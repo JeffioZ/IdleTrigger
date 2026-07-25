@@ -92,11 +92,14 @@ func main() {
 	defer gdiplus.Shutdown()
 
 	// GUI mode
-	exePath, _ := os.Executable()
+	exeDir := os.TempDir()
+	if exePath, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exePath)
+	}
 	if developerTools.ForceLog {
 		cfg.LoggingEnabled = true
 	}
-	mylog.Init(cfg.LoggingEnabled, filepath.Dir(exePath))
+	mylog.Init(cfg.LoggingEnabled, exeDir)
 	defer mylog.Close()
 	mylog.Info("IdleTrigger starting: version=%s mode=GUI", version.Value)
 	if developerTools.Enabled {

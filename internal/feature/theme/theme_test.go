@@ -148,6 +148,23 @@ func TestParseIPLocationRejectsFailedResponse(t *testing.T) {
 	}
 }
 
+func TestWinHTTPGetRejectsEmbeddedNULBeforeOpeningRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		path string
+	}{
+		{name: "host", host: "ipwho.is\x00invalid", path: "/"},
+		{name: "path", host: "ipwho.is", path: "/\x00invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := winHTTPGet(tc.host, tc.path, time.Second); err == nil {
+				t.Fatal("expected an embedded NUL to return an encoding error")
+			}
+		})
+	}
+}
+
 func TestResetIPLocationFailureCooldownAllowsImmediateRetry(t *testing.T) {
 	originalInfo, originalOK, originalQuerying, originalLastAttempt := snapshotIPLocationCache()
 	defer restoreIPLocationCache(originalInfo, originalOK, originalQuerying, originalLastAttempt)

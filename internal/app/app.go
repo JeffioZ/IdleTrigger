@@ -60,7 +60,7 @@ type runtimeState struct {
 	devtools  devtools.Config
 	requestCh chan runtimeRequest
 
-	mon *idle.Monitor
+	mon *idle.Monitor // Owned by the serialized request loop; callbacks use post before accessing it.
 
 	hotkeyMgr             *hotkey.Manager
 	autoRunner            *autorules.Runner

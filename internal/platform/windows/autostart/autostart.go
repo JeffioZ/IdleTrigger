@@ -60,7 +60,7 @@ func Disable() error {
 		}
 		return fmt.Errorf("open Run key: %w", err)
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 
 	err = k.DeleteValue(valName)
 	if err == registry.ErrNotExist {
@@ -77,7 +77,7 @@ func read() (bool, string, error) {
 		}
 		return false, "", err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 
 	value, _, err := k.GetStringValue(valName)
 	if err == registry.ErrNotExist {
@@ -91,7 +91,7 @@ func write(cmd string) error {
 	if err != nil {
 		return fmt.Errorf("create or open Run key: %w", err)
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 
 	return k.SetStringValue(valName, cmd)
 }

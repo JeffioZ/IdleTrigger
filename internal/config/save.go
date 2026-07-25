@@ -50,9 +50,9 @@ func saveToAtRevision(p string, cfg Config, expectedRevision string) (string, er
 	tmpPath := f.Name()
 	ok := false
 	defer func() {
-		f.Close()
+		_ = f.Close()
 		if !ok {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath)
 		}
 	}()
 

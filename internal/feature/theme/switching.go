@@ -225,7 +225,10 @@ func notifyThemeChanged() {
 	for _, notification := range themeChangeNotifications() {
 		var lParam uintptr
 		if notification.token != "" {
-			ptr, _ := windows.UTF16PtrFromString(notification.token)
+			ptr, err := windows.UTF16PtrFromString(notification.token)
+			if err != nil {
+				continue
+			}
 			lParam = uintptr(unsafe.Pointer(ptr))
 		}
 		pSendMessageTimeout.Call(hwndBroadcast, uintptr(notification.message), 0, lParam, smtoAbortIfHung, 250, 0)

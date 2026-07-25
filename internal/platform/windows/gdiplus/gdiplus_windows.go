@@ -391,14 +391,14 @@ func startup() (lifecycleSession, bool) {
 	status, _, _ := pStartup.Call(uintptr(unsafe.Pointer(&token)), uintptr(unsafe.Pointer(&input)), uintptr(unsafe.Pointer(&output)))
 	if status != 0 || token == 0 || output.NotificationHook == 0 || output.NotificationUnhook == 0 {
 		if token != 0 {
-			pShutdown.Call(token)
+			_, _, _ = pShutdown.Call(token)
 		}
 		return lifecycleSession{}, false
 	}
 	var notificationToken uintptr
 	status, _, _ = syscall.SyscallN(output.NotificationHook, uintptr(unsafe.Pointer(&notificationToken)))
 	if status != 0 {
-		pShutdown.Call(token)
+		_, _, _ = pShutdown.Call(token)
 		return lifecycleSession{}, false
 	}
 	return lifecycleSession{
@@ -422,10 +422,10 @@ func loadRequiredAPI(load func() error, finders ...func() error) bool {
 
 func shutdown(session lifecycleSession) {
 	if session.notificationUnhook != 0 {
-		syscall.SyscallN(session.notificationUnhook, session.notificationToken)
+		_, _, _ = syscall.SyscallN(session.notificationUnhook, session.notificationToken)
 	}
 	if session.gdiplusToken != 0 {
-		pShutdown.Call(session.gdiplusToken)
+		_, _, _ = pShutdown.Call(session.gdiplusToken)
 	}
 }
 
@@ -435,7 +435,7 @@ func createFromHDC(hdc windows.Handle) (uintptr, bool) {
 	return graphics, status == 0 && graphics != 0
 }
 
-func deleteGraphics(graphics uintptr) { pDeleteGraphics.Call(graphics) }
+func deleteGraphics(graphics uintptr) { _, _, _ = pDeleteGraphics.Call(graphics) }
 
 func setSmoothingMode(graphics uintptr) bool {
 	status, _, _ := pSetSmoothingMode.Call(graphics, smoothingModeAntiAlias8x8)
@@ -453,7 +453,7 @@ func createSolidFill(color uint32) (uintptr, bool) {
 	return brush, status == 0 && brush != 0
 }
 
-func deleteBrush(brush uintptr) { pDeleteBrush.Call(brush) }
+func deleteBrush(brush uintptr) { _, _, _ = pDeleteBrush.Call(brush) }
 
 func fillPolygon(graphics, brush uintptr, points []Point, fillMode int) bool {
 	status, _, _ := pFillPolygonI.Call(graphics, brush, uintptr(unsafe.Pointer(&points[0])), uintptr(len(points)), uintptr(fillMode))
@@ -466,7 +466,7 @@ func createPath(fillMode int) (uintptr, bool) {
 	return path, status == 0 && path != 0
 }
 
-func deletePath(path uintptr) { pDeletePath.Call(path) }
+func deletePath(path uintptr) { _, _, _ = pDeletePath.Call(path) }
 
 func startPathFigure(path uintptr) bool {
 	status, _, _ := pStartPathFigure.Call(path)

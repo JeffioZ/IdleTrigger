@@ -151,7 +151,22 @@ func winHTTPGet(host, path string, timeout time.Duration) (string, error) {
 		defaultHTTPSPort       = 443
 		flagSecure             = 0x00800000
 	)
-	userAgent, _ := windows.UTF16PtrFromString("IdleTrigger")
+	userAgent, err := windows.UTF16PtrFromString("IdleTrigger")
+	if err != nil {
+		return "", fmt.Errorf("encode WinHTTP user agent: %w", err)
+	}
+	hostPtr, err := windows.UTF16PtrFromString(host)
+	if err != nil {
+		return "", fmt.Errorf("encode WinHTTP host: %w", err)
+	}
+	method, err := windows.UTF16PtrFromString("GET")
+	if err != nil {
+		return "", fmt.Errorf("encode WinHTTP method: %w", err)
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", fmt.Errorf("encode WinHTTP path: %w", err)
+	}
 	session, _, err := procWinHttpOpen.Call(uintptr(unsafe.Pointer(userAgent)), accessTypeDefaultProxy, 0, 0, 0)
 	if session == 0 {
 		return "", fmt.Errorf("WinHttpOpen: %w", err)
@@ -161,15 +176,12 @@ func winHTTPGet(host, path string, timeout time.Duration) (string, error) {
 	timeoutMS := int(timeout / time.Millisecond)
 	procWinHttpSetTimeouts.Call(session, uintptr(timeoutMS), uintptr(timeoutMS), uintptr(timeoutMS), uintptr(timeoutMS))
 
-	hostPtr, _ := windows.UTF16PtrFromString(host)
 	connect, _, err := procWinHttpConnect.Call(session, uintptr(unsafe.Pointer(hostPtr)), defaultHTTPSPort, 0)
 	if connect == 0 {
 		return "", fmt.Errorf("WinHttpConnect: %w", err)
 	}
 	defer procWinHttpCloseHandle.Call(connect)
 
-	method, _ := windows.UTF16PtrFromString("GET")
-	pathPtr, _ := windows.UTF16PtrFromString(path)
 	request, _, err := procWinHttpOpenRequest.Call(connect, uintptr(unsafe.Pointer(method)), uintptr(unsafe.Pointer(pathPtr)), 0, 0, 0, flagSecure)
 	if request == 0 {
 		return "", fmt.Errorf("WinHttpOpenRequest: %w", err)

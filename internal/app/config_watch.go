@@ -13,8 +13,11 @@ import (
 
 func (s *runtimeState) applyLogging() {
 	if s.cfg.LoggingEnabled {
-		exePath, _ := os.Executable()
-		mylog.Init(true, filepath.Dir(exePath))
+		exeDir := os.TempDir()
+		if exePath, err := os.Executable(); err == nil {
+			exeDir = filepath.Dir(exePath)
+		}
+		mylog.Init(true, exeDir)
 		mylog.Info("Debug logging enabled from control panel")
 		ps := powerstate.GetStatus()
 		s.logPowerState("logging-enabled", ps)

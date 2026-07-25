@@ -112,8 +112,14 @@ func NewManager(bindings []Binding, cbs Callbacks) *Manager {
 // Register creates the message-only window and calls RegisterHotKey for each
 // binding.  Returns labels for any that failed (conflict with another app).
 func (m *Manager) Register() Failed {
-	classNamePtr, _ := syscall.UTF16PtrFromString(className)
+	classNamePtr, err := syscall.UTF16PtrFromString(className)
+	if err != nil {
+		return failedBindings(m.bindings)
+	}
 	hInst, _, _ := pGetModuleHandle.Call(0)
+	if hInst == 0 {
+		return failedBindings(m.bindings)
+	}
 
 	var wc wndClassExW
 	wc.Size = uint32(unsafe.Sizeof(wc))
@@ -121,7 +127,9 @@ func (m *Manager) Register() Failed {
 	wc.Instance = windows.Handle(hInst)
 	wc.ClassName = classNamePtr
 
-	pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
+	if registered, _, callErr := pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); registered == 0 && callErr != windows.ERROR_CLASS_ALREADY_EXISTS {
+		return failedBindings(m.bindings)
+	}
 
 	const wsOverlapped = 0
 	const hwndMessage = ^uintptr(0)
@@ -132,11 +140,7 @@ func (m *Manager) Register() Failed {
 	)
 	m.hwnd = windows.Handle(ret)
 	if m.hwnd == 0 {
-		var failed Failed
-		for _, b := range m.bindings {
-			failed = append(failed, b.Label)
-		}
-		return failed
+		return failedBindings(m.bindings)
 	}
 
 	var failed Failed
@@ -153,14 +157,13 @@ func (m *Manager) Register() Failed {
 func (m *Manager) Run() {
 	msg2 := &msg{}
 	for {
-		// GetMessage blocks until a message arrives. Stop sends WM_QUIT
-		// to this thread via PostThreadMessage, which makes GetMessage
-		// return 0 and exit the loop naturally.
+		// GetMessage blocks until a message arrives. Stop posts WM_QUIT to this
+		// thread, which makes GetMessage return 0 and exit the loop naturally.
 		r, _, _ := pGetMessage.Call(uintptr(unsafe.Pointer(msg2)), 0, 0, 0)
 		if r == 0 || r == ^uintptr(0) {
 			return
 		}
-		pDispatchMessage.Call(uintptr(unsafe.Pointer(msg2)))
+		_, _, _ = pDispatchMessage.Call(uintptr(unsafe.Pointer(msg2)))
 	}
 }
 
@@ -198,14 +201,14 @@ func (m *Manager) Start() Failed {
 
 			// Unregister hotkeys and destroy window on this thread.
 			for i := range m.bindings {
-				pUnregisterHotKey.Call(uintptr(m.hwnd), uintptr(i))
+				_, _, _ = pUnregisterHotKey.Call(uintptr(m.hwnd), uintptr(i))
 			}
-			pDestroyWindow.Call(uintptr(m.hwnd))
+			_, _, _ = pDestroyWindow.Call(uintptr(m.hwnd))
 			m.hwnd = 0
 		}
 		classNamePtr, _ := syscall.UTF16PtrFromString(className)
 		hInst, _, _ := pGetModuleHandle.Call(0)
-		pUnregisterClass.Call(uintptr(unsafe.Pointer(classNamePtr)), hInst)
+		_, _, _ = pUnregisterClass.Call(uintptr(unsafe.Pointer(classNamePtr)), hInst)
 		m.mu.Lock()
 		m.threadID = 0
 		m.started = false
@@ -225,9 +228,15 @@ func (m *Manager) Stop() {
 	if !started || doneCh == nil {
 		return
 	}
-	if tid != 0 {
-		const wmQuit = 0x0012
-		pPostThreadMessage.Call(uintptr(tid), uintptr(wmQuit), 0, 0)
+	if tid == 0 {
+		return
+	}
+	const wmQuit = 0x0012
+	posted, _, _ := pPostThreadMessage.Call(uintptr(tid), uintptr(wmQuit), 0, 0)
+	if posted == 0 {
+		// Avoid deadlocking shutdown if the thread is already exiting or its
+		// message queue is no longer available.
+		return
 	}
 	<-doneCh
 }
@@ -255,4 +264,12 @@ func (m *Manager) wndProc(hwnd windows.Handle, msg2 uint32, wParam, lParam uintp
 	}
 	r, _, _ := pDefWindowProc.Call(uintptr(hwnd), uintptr(msg2), wParam, lParam)
 	return r
+}
+
+func failedBindings(bindings []Binding) Failed {
+	failed := make(Failed, 0, len(bindings))
+	for _, binding := range bindings {
+		failed = append(failed, binding.Label)
+	}
+	return failed
 }

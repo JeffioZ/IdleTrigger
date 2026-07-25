@@ -27,7 +27,7 @@ func TestNewManager_NoPanic(t *testing.T) {
 
 func TestManager_RegisterThenStop(t *testing.T) {
 	m := NewManager(DefaultBindings(), Callbacks{})
-	failed := m.Register()
+	failed := m.Start()
 	_ = failed
 	m.Stop()
 }
