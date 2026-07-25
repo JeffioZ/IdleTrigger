@@ -344,6 +344,32 @@ func TestTooltipStaysWithinTrayLimit(t *testing.T) {
 	}
 }
 
+func TestThemeTooltipUsesDedicatedShortScheduleFormats(t *testing.T) {
+	for _, tc := range []struct {
+		lang string
+		want string
+	}{
+		{lang: "en", want: "On L07:00/D19:00"},
+		{lang: "zh-CN", want: "开 浅07:00/深19:00"},
+	} {
+		cfg := config.DefaultConfig()
+		cfg.Language = tc.lang
+		cfg.ThemeSwitchEnabled = true
+		cfg.ThemeMode = "fixed"
+		cfg.ThemeLightTime = "07:00"
+		cfg.ThemeDarkTime = "19:00"
+		state := runtimeState{
+			cfg:                 cfg,
+			lang:                tc.lang,
+			themeSupportChecked: true,
+			themeSupported:      true,
+		}
+		if got := state.themeTooltipValueShort(); got != tc.want {
+			t.Fatalf("short theme schedule for %s = %q, want %q", tc.lang, got, tc.want)
+		}
+	}
+}
+
 func TestTooltipKeepsOnlyOperationalStates(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Language = "zh-CN"

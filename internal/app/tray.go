@@ -76,24 +76,21 @@ func (s *runtimeState) themeTooltipValueShort() string {
 	if !s.cfg.ThemeSwitchEnabled {
 		return i18n.T(s.lang, "status_short_off")
 	}
-	if schedule := s.themeScheduleText(false); schedule != "" {
-		return i18n.T(s.lang, "status_short_on") + " " + compactThemeSchedule(schedule)
+	if schedule := s.themeScheduleTextShort(); schedule != "" {
+		return i18n.T(s.lang, "status_short_on") + " " + schedule
 	}
 	return i18n.T(s.lang, "status_short_on")
 }
 
-func compactThemeSchedule(schedule string) string {
-	replacer := strings.NewReplacer(
-		"浅色 ", "浅",
-		"深色 ", "深",
-		"Light ", "L",
-		"Dark ", "D",
-		" / ", "/",
-	)
-	return replacer.Replace(schedule)
+func (s *runtimeState) themeScheduleText(showSource bool) string {
+	return s.formatThemeSchedule(showSource, false)
 }
 
-func (s *runtimeState) themeScheduleText(showSource bool) string {
+func (s *runtimeState) themeScheduleTextShort() string {
+	return s.formatThemeSchedule(false, true)
+}
+
+func (s *runtimeState) formatThemeSchedule(showSource, short bool) string {
 	if !s.themeAvailable() {
 		return i18n.T(s.lang, "theme_unavailable")
 	}
@@ -106,12 +103,20 @@ func (s *runtimeState) themeScheduleText(showSource bool) string {
 		return i18n.T(s.lang, "theme_schedule_unavailable")
 	}
 	formatKey := "theme_schedule_format"
+	fallbackKey := "theme_schedule_fallback_format"
 	if s.cfg.ThemeMode == "sunrise" {
 		formatKey = "theme_schedule_sunrise_format"
 	}
+	if short {
+		formatKey = "theme_schedule_short_format"
+		fallbackKey = "theme_schedule_short_fallback_format"
+		if s.cfg.ThemeMode == "sunrise" {
+			formatKey = "theme_schedule_sunrise_short_format"
+		}
+	}
 	schedule := fmt.Sprintf(i18n.T(s.lang, formatKey), scheduleInfo.LightTime, scheduleInfo.DarkTime)
 	if scheduleInfo.FixedFallback {
-		return fmt.Sprintf(i18n.T(s.lang, "theme_schedule_fallback_format"), schedule)
+		return fmt.Sprintf(i18n.T(s.lang, fallbackKey), schedule)
 	}
 	if s.cfg.ThemeMode != "sunrise" || !showSource {
 		return schedule
