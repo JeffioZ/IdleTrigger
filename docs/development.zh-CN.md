@@ -152,7 +152,7 @@ go run ./tools/trayicons/main.go build/windows/icons
 然后重新生成两种架构资源。资源命令与发布构建必须使用同一个版本号：
 
 ```powershell
-$version = "1.3.0"
+$version = Read-Host "请输入本次发布版本号（不带开头的 v，例如 1.9.0）"
 go run ./tools/resourcegen.go -version $version
 ```
 

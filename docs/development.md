@@ -179,7 +179,7 @@ go run ./tools/trayicons/main.go build/windows/icons
 Then regenerate both architecture resources. Use the identical version value in the resource command and release build:
 
 ```powershell
-$version = "1.3.0"
+$version = Read-Host "Release version without the leading v (for example, 1.9.0)"
 go run ./tools/resourcegen.go -version $version
 ```
 
