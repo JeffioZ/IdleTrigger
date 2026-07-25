@@ -66,6 +66,19 @@ try {
             Write-Host "SKIPPED: golangci-lint is not installed."
         } else {
             Invoke-NativeCheck "golangci-lint" { & $golangci.Source run --timeout=5m --disable=errcheck ./... }
+            $errcheckTargets = @(
+                './internal/config/...'
+                './internal/automation/...'
+                './internal/app/...'
+                './internal/platform/windows/autostart/...'
+                './internal/platform/windows/gdiplus/...'
+                './internal/platform/windows/hotkey/...'
+                './internal/platform/windows/ipc/...'
+                './internal/platform/windows/singleinstance/...'
+            )
+            Invoke-NativeCheck "errcheck (core)" {
+                & $golangci.Source run --timeout=5m --default=none --enable=errcheck @errcheckTargets
+            }
         }
     } else {
         Write-Host "NOT RUN: extended build-tag checks and golangci-lint (pass -Full to run them)."

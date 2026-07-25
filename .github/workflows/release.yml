@@ -26,17 +26,31 @@ jobs:
       - name: Verify
         run: |
           go mod download
-          go mod verify
-          $unfmt = (gofmt -l .)
-          if ($unfmt) { Write-Error "gofmt: $unfmt"; exit 1 }
-          go test -count=1 ./...
-          go vet ./...
-          ./tools/check-build-boundaries.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tools/check.ps1 -Full -Vulncheck
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.11.4
+          args: --timeout=5m --disable=errcheck
+
+      - name: errcheck (core)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.11.4
+          args: >-
+            --timeout=5m --default=none --enable=errcheck
+            ./internal/config/... ./internal/automation/... ./internal/app/...
+            ./internal/platform/windows/autostart/... ./internal/platform/windows/gdiplus/...
+            ./internal/platform/windows/hotkey/...
+            ./internal/platform/windows/ipc/... ./internal/platform/windows/singleinstance/...
 
       - name: Generate .syso
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
           go run ./tools/resourcegen.go -version $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         run: |
@@ -45,8 +59,10 @@ jobs:
           $ldflags = "-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=$version"
           $env:GOARCH = "386"
           go build -trimpath -ldflags "$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletrigger
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:GOARCH = "amd64"
           go build -trimpath -ldflags "$ldflags" -o dist/IdleTrigger-x64.exe ./cmd/idletrigger
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Checksums
         run: |

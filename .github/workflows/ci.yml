@@ -28,7 +28,9 @@ jobs:
       - name: Verify modules
         run: |
           go mod download
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go mod verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: gofmt
         run: |
@@ -71,3 +73,14 @@ jobs:
         with:
           version: v2.11.4
           args: --timeout=5m --disable=errcheck
+
+      - name: errcheck (core)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.11.4
+          args: >-
+            --timeout=5m --default=none --enable=errcheck
+            ./internal/config/... ./internal/automation/... ./internal/app/...
+            ./internal/platform/windows/autostart/... ./internal/platform/windows/gdiplus/...
+            ./internal/platform/windows/hotkey/...
+            ./internal/platform/windows/ipc/... ./internal/platform/windows/singleinstance/...
