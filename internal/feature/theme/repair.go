@@ -26,7 +26,6 @@ const (
 	themeApplyIgnoreBackground   = 1 << 0
 	themeApplyIgnoreCursor       = 1 << 1
 	themeApplyIgnoreDesktopIcons = 1 << 2
-	themeApplyIgnoreColor        = 1 << 3
 	themeApplyIgnoreSound        = 1 << 4
 	themeApplyIgnoreScreensaver  = 1 << 5
 
@@ -77,10 +76,9 @@ type themeFilePatch struct {
 
 // refreshDWMColorization follows Auto Dark Mode's full DWM refresh strategy:
 // apply a copy of the current theme with a one-digit accent-color nudge, wait
-// for DWM to commit it, and apply an unmodified-color copy again. The original
-// theme selection, accent color, and independent app/system modes are then
-// restored, so the repair does not leave an IdleTrigger theme selected in
-// Windows Settings or alter the user's theme preferences.
+// for DWM to commit it, and select the original theme again with color changes
+// enabled. The original theme selection, accent color, and independent
+// app/system modes are restored without applying a second disposable theme.
 // Reference: AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs in
 // https://github.com/AutoDarkMode/Windows-Auto-Night-Mode.
 func refreshDWMColorization() error {
@@ -101,10 +99,6 @@ func refreshDWMColorization() error {
 	if err != nil {
 		return fmt.Errorf("create DWM refresh theme id: %w", err)
 	}
-	restoreID, err := windows.GenerateGUID()
-	if err != nil {
-		return fmt.Errorf("create DWM restore theme id: %w", err)
-	}
 	appMode := modeName(appsLight)
 	systemMode := modeName(systemLight)
 	refreshTheme, err := patchThemeFile(source, themeFilePatch{
@@ -115,29 +109,24 @@ func refreshDWMColorization() error {
 	if err != nil {
 		return fmt.Errorf("build DWM refresh theme: %w", err)
 	}
-	restoreTheme, err := patchThemeFile(source, themeFilePatch{
-		displayName: "IdleTrigger DWM Restore", themeID: themeIDString(restoreID),
-		appMode: appMode, systemMode: systemMode, colorization: accent, setColorization: true,
-	})
-	if err != nil {
-		return fmt.Errorf("build DWM restore theme: %w", err)
-	}
 
-	tempDir, err := os.MkdirTemp("", "IdleTrigger-theme-repair-")
+	localAppData, err := os.UserCacheDir()
 	if err != nil {
-		return fmt.Errorf("create theme repair directory: %w", err)
+		return fmt.Errorf("locate Windows themes directory: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
-	refreshPath := filepath.Join(tempDir, "DwmRefresh.theme")
-	restorePath := filepath.Join(tempDir, "DwmRestore.theme")
+	userThemesDir := filepath.Join(localAppData, "Microsoft", "Windows", "Themes")
+	if err := os.MkdirAll(userThemesDir, 0o700); err != nil {
+		return fmt.Errorf("create Windows themes directory: %w", err)
+	}
+	// Keep one stable helper theme in the Windows user-theme directory, matching
+	// Auto Dark Mode's DWM refresh strategy. Applying a disposable theme from
+	// %TEMP% makes IThemeManager import a copy here and later recycle that copy.
+	refreshPath := filepath.Join(userThemesDir, "IdleTriggerDwmRefresh.theme")
 	if err := os.WriteFile(refreshPath, refreshTheme, 0o600); err != nil {
 		return fmt.Errorf("write DWM refresh theme: %w", err)
 	}
-	if err := os.WriteFile(restorePath, restoreTheme, 0o600); err != nil {
-		return fmt.Errorf("write DWM restore theme: %w", err)
-	}
 
-	if err := applyColorizationRefresh(refreshPath, restorePath, appsLight, systemLight); err != nil {
+	if err := applyColorizationRefresh(refreshPath, appsLight, systemLight); err != nil {
 		return err
 	}
 	mylog.Info("Theme repair: full DWM colorization refresh completed")
@@ -449,7 +438,7 @@ func sortedThemeKeys(values map[string]string) []string {
 	return keys
 }
 
-func applyColorizationRefresh(refreshPath, restorePath string, appsLight, systemLight bool) (returnErr error) {
+func applyColorizationRefresh(refreshPath string, appsLight, systemLight bool) (returnErr error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -483,7 +472,7 @@ func applyColorizationRefresh(refreshPath, restorePath string, appsLight, system
 	restoreOriginal := true
 	defer func() {
 		if restoreOriginal {
-			if err := restoreThemeAfterColorization(legacyManager, manager, restorePath, originalTheme, colorOnlyFlags, appsLight, systemLight); err != nil {
+			if err := restoreThemeAfterColorization(manager, originalTheme, colorOnlyFlags, appsLight, systemLight); err != nil {
 				recoveryErr := fmt.Errorf("recover from interrupted DWM refresh: %w", err)
 				if returnErr == nil {
 					returnErr = recoveryErr
@@ -498,20 +487,17 @@ func applyColorizationRefresh(refreshPath, restorePath string, appsLight, system
 		return fmt.Errorf("apply DWM refresh theme: %w", err)
 	}
 	time.Sleep(time.Second)
-	if err := restoreThemeAfterColorization(legacyManager, manager, restorePath, originalTheme, colorOnlyFlags, appsLight, systemLight); err != nil {
+	if err := restoreThemeAfterColorization(manager, originalTheme, colorOnlyFlags, appsLight, systemLight); err != nil {
 		return err
 	}
 	restoreOriginal = false
 	return nil
 }
 
-func restoreThemeAfterColorization(legacyManager *legacyThemeManager, manager *themeManager2, restorePath string,
-	originalTheme int32, colorOnlyFlags uintptr, appsLight, systemLight bool) error {
+func restoreThemeAfterColorization(manager *themeManager2, originalTheme int32, colorOnlyFlags uintptr,
+	appsLight, systemLight bool) error {
 	var restoreErrs []error
-	if err := legacyManager.applyTheme(restorePath); err != nil {
-		restoreErrs = append(restoreErrs, fmt.Errorf("apply DWM restore theme: %w", err))
-	}
-	if err := manager.setCurrentTheme(originalTheme, colorOnlyFlags|themeApplyIgnoreColor); err != nil {
+	if err := manager.setCurrentTheme(originalTheme, colorOnlyFlags); err != nil {
 		restoreErrs = append(restoreErrs, fmt.Errorf("restore original Windows theme selection: %w", err))
 	}
 	if err := restoreThemePreferences(appsLight, systemLight); err != nil {

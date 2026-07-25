@@ -34,10 +34,10 @@ func TestPatchThemeFileForcesColorizationAndCurrentModes(t *testing.T) {
 	}
 }
 
-func TestPatchRestoreThemeUsesCurrentColorizationAndPreservesAutoMode(t *testing.T) {
+func TestPatchThemeFilePreservesAutoColorizationWhenNotDisabled(t *testing.T) {
 	source := []byte("[Theme]\nDisplayName=Original\nThemeId={OLD}\n[VisualStyles]\nAutoColorization=1\nColorizationColor=0XABCDEF\n")
 	got, err := patchThemeFile(source, themeFilePatch{
-		displayName: "IdleTrigger DWM Restore", themeID: "{NEW}",
+		displayName: "Patched", themeID: "{NEW}",
 		appMode: "Dark", systemMode: "Light", colorization: 0xff123456, setColorization: true,
 	})
 	if err != nil {
@@ -46,7 +46,7 @@ func TestPatchRestoreThemeUsesCurrentColorizationAndPreservesAutoMode(t *testing
 	text := string(got)
 	for _, want := range []string{"AutoColorization=1", "ColorizationColor=0XFF123456", "AppMode=Dark", "SystemMode=Light"} {
 		if !strings.Contains(text, want) {
-			t.Errorf("restore theme missing %q:\n%s", want, text)
+			t.Errorf("patched theme missing %q:\n%s", want, text)
 		}
 	}
 }
