@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -22,6 +23,7 @@ const (
 	pipeUnlimited    = 255
 	pipeTimeout      = 1000
 	maxConnections   = 8
+	genericReadWrite = 0xC0000000
 )
 
 type Handler func(cmd string) string
@@ -74,7 +76,7 @@ func currentLogonSID() (string, error) {
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
 		return "", fmt.Errorf("OpenProcessToken: %w", err)
 	}
-	defer token.Close()
+	defer func() { _ = token.Close() }()
 
 	groups, err := token.GetTokenGroups()
 	if err != nil {
@@ -89,23 +91,37 @@ func currentLogonSID() (string, error) {
 }
 
 func Server(handler Handler) error {
-	sa, sd, err := pipeSA()
-	if err != nil {
-		return err
-	}
-	defer windows.LocalFree(windows.Handle(sd))
 	name, err := pipeName()
 	if err != nil {
 		return err
 	}
+	return serve(name, handler, nil)
+}
+
+func serve(name string, handler Handler, stop <-chan struct{}) error {
+	sa, sd, err := pipeSA()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = windows.LocalFree(windows.Handle(sd))
+	}()
 	pipePath, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return fmt.Errorf("pipe path: %w", err)
 	}
 
 	connections := make(chan struct{}, maxConnections)
+	wakeDone := make(chan struct{})
+	if stop != nil {
+		go wakeServerOnStop(pipePath, stop, wakeDone)
+	}
+	defer close(wakeDone)
+
 	for {
-		connections <- struct{}{}
+		if !claimConnectionSlot(connections, stop) {
+			return nil
+		}
 		openMode := uint32(pipeAccessDuplex)
 		pipeMode := uint32(pipeTypeMessage | pipeReadModeMsg | pipeRejectRemote)
 
@@ -120,8 +136,13 @@ func Server(handler Handler) error {
 		}
 
 		err = windows.ConnectNamedPipe(h, nil)
+		if isStopped(stop) {
+			_ = windows.CloseHandle(h)
+			<-connections
+			return nil
+		}
 		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
-			windows.CloseHandle(h)
+			_ = windows.CloseHandle(h)
 			<-connections
 			continue
 		}
@@ -133,8 +154,55 @@ func Server(handler Handler) error {
 	}
 }
 
+func claimConnectionSlot(connections chan<- struct{}, stop <-chan struct{}) bool {
+	if stop == nil {
+		connections <- struct{}{}
+		return true
+	}
+	select {
+	case connections <- struct{}{}:
+		return true
+	case <-stop:
+		return false
+	}
+}
+
+func isStopped(stop <-chan struct{}) bool {
+	if stop == nil {
+		return false
+	}
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func wakeServerOnStop(pipePath *uint16, stop, done <-chan struct{}) {
+	select {
+	case <-stop:
+	case <-done:
+		return
+	}
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if h, err := openPipe(pipePath); err == nil {
+			_ = windows.CloseHandle(h)
+			return
+		}
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func handleConn(h windows.Handle, handler Handler) {
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 
 	buf := make([]byte, pipeBufSize)
 	var done uint32
@@ -151,8 +219,8 @@ func handleConn(h windows.Handle, handler Handler) {
 		return
 	}
 
-	windows.FlushFileBuffers(h)
-	windows.DisconnectNamedPipe(h)
+	_ = windows.FlushFileBuffers(h)
+	_ = windows.DisconnectNamedPipe(h)
 }
 
 func Send(cmd string) (string, bool) {
@@ -160,21 +228,20 @@ func Send(cmd string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	return sendTo(name, cmd)
+}
+
+func sendTo(name, cmd string) (string, bool) {
 	pipePath, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return "", false
 	}
 
-	const genericReadWrite = 0xC0000000
-
-	h, err := windows.CreateFile(
-		pipePath, genericReadWrite, 0, nil,
-		windows.OPEN_EXISTING, 0, 0,
-	)
+	h, err := openPipe(pipePath)
 	if err != nil {
 		return "", false
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 
 	data := []byte(cmd + "\r\n")
 	var written uint32
@@ -189,4 +256,11 @@ func Send(cmd string) (string, bool) {
 	}
 
 	return strings.TrimSpace(string(buf[:done])), true
+}
+
+func openPipe(pipePath *uint16) (windows.Handle, error) {
+	return windows.CreateFile(
+		pipePath, genericReadWrite, 0, nil,
+		windows.OPEN_EXISTING, 0, 0,
+	)
 }
