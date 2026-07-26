@@ -3,11 +3,7 @@
 // v2 first (Windows 10 1703+), falling back to System DPI awareness.
 package dpi
 
-import (
-	"fmt"
-
-	"golang.org/x/sys/windows"
-)
+import "golang.org/x/sys/windows"
 
 // Enable declares this process as DPI-aware.  Call once at startup before
 // any UI is created.
@@ -41,22 +37,4 @@ func Enable() {
 	if err := setLegacy.Find(); err == nil {
 		setLegacy.Call()
 	}
-}
-
-// WithFixed96 creates a short-lived thread DPI context for deterministic
-// off-screen/documentation captures. It is intentionally opt-in: normal UI
-// windows continue to use the process's per-monitor DPI behavior.
-func WithFixed96(run func() error) error {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	setThreadContext := user32.NewProc("SetThreadDpiAwarenessContext")
-	if err := setThreadContext.Find(); err != nil {
-		return run()
-	}
-	const unaware = ^uintptr(0) // DPI_AWARENESS_CONTEXT_UNAWARE (-1)
-	previous, _, callErr := setThreadContext.Call(unaware)
-	if previous == 0 {
-		return fmt.Errorf("SetThreadDpiAwarenessContext: %w", callErr)
-	}
-	defer setThreadContext.Call(previous)
-	return run()
 }

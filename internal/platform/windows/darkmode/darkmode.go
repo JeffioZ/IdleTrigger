@@ -5,6 +5,8 @@ package darkmode
 
 import (
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // Enable forces the process to use the dark (immersive) theme.
@@ -17,9 +19,9 @@ func Enable() {
 // forceDark is used for native popup menus, which do not always follow
 // AllowDark after the system theme changes while the process stays running.
 func SetPreferredAppMode(forceDark bool) {
-	withUxtheme(func(uxtheme uintptr, getProc *syscall.LazyProc) {
+	withUxtheme(func(uxtheme windows.Handle) {
 		// SetPreferredAppMode — ordinal 135. 1 = AllowDark, 2 = ForceDark.
-		proc, _, _ := getProc.Call(uxtheme, uintptr(135))
+		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 135)
 		if proc != 0 {
 			mode := uintptr(1)
 			if forceDark {
@@ -27,7 +29,7 @@ func SetPreferredAppMode(forceDark bool) {
 			}
 			syscall.SyscallN(proc, mode)
 		}
-		flushMenuThemes(uxtheme, getProc)
+		flushMenuThemes(uxtheme)
 	})
 }
 
@@ -37,9 +39,9 @@ func AllowWindow(hwnd uintptr) {
 	if hwnd == 0 {
 		return
 	}
-	withUxtheme(func(uxtheme uintptr, getProc *syscall.LazyProc) {
+	withUxtheme(func(uxtheme windows.Handle) {
 		// AllowDarkModeForWindow — ordinal 133.
-		proc, _, _ := getProc.Call(uxtheme, uintptr(133))
+		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 133)
 		if proc != 0 {
 			syscall.SyscallN(proc, hwnd, 1)
 		}
@@ -49,8 +51,8 @@ func AllowWindow(hwnd uintptr) {
 // RefreshMenuThemes asks Windows to rebuild cached popup-menu theme resources.
 // This is useful after the OS theme changes while the tray app stays running.
 func RefreshMenuThemes() {
-	withUxtheme(func(uxtheme uintptr, getProc *syscall.LazyProc) {
-		flushMenuThemes(uxtheme, getProc)
+	withUxtheme(func(uxtheme windows.Handle) {
+		flushMenuThemes(uxtheme)
 	})
 }
 
@@ -58,9 +60,9 @@ func RefreshMenuThemes() {
 // immersive-theme API used by native controls. The second result is false on
 // Windows versions that do not expose ShouldAppsUseDarkMode.
 func AppsUseDark() (dark, supported bool) {
-	withUxtheme(func(uxtheme uintptr, getProc *syscall.LazyProc) {
+	withUxtheme(func(uxtheme windows.Handle) {
 		// ShouldAppsUseDarkMode — ordinal 132.
-		proc, _, _ := getProc.Call(uxtheme, uintptr(132))
+		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 132)
 		if proc == 0 {
 			return
 		}
@@ -71,21 +73,18 @@ func AppsUseDark() (dark, supported bool) {
 	return dark, supported
 }
 
-func withUxtheme(fn func(uxtheme uintptr, getProc *syscall.LazyProc)) {
-	uxtheme, err := syscall.LoadLibrary("uxtheme.dll")
+func withUxtheme(fn func(uxtheme windows.Handle)) {
+	uxtheme, err := windows.LoadLibraryEx("uxtheme.dll", 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
 	if err != nil {
 		return
 	}
-	defer syscall.FreeLibrary(uxtheme)
-
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getProc := kernel32.NewProc("GetProcAddress")
-	fn(uintptr(uxtheme), getProc)
+	defer func() { _ = windows.FreeLibrary(uxtheme) }()
+	fn(uxtheme)
 }
 
-func flushMenuThemes(uxtheme uintptr, getProc *syscall.LazyProc) {
+func flushMenuThemes(uxtheme windows.Handle) {
 	// FlushMenuThemes — ordinal 136.
-	proc2, _, _ := getProc.Call(uxtheme, uintptr(136))
+	proc2, _ := windows.GetProcAddressByOrdinal(uxtheme, 136)
 	if proc2 != 0 {
 		syscall.SyscallN(proc2)
 	}

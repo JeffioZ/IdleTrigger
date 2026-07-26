@@ -67,44 +67,66 @@ func includeSnapshotEntry(pid uint32, name string) bool {
 	return pid != 0 && name != "" && !strings.EqualFold(name, "[System Process]")
 }
 
-// EnrichDescriptions resolves at most one accessible image per executable
-// name. The picker only needs a representative FileDescription, so opening
-// every same-name process would add latency without improving the result.
+// EnrichDescriptions keeps one representative result per executable name. It
+// tries same-name instances only until one yields a FileDescription.
 func EnrichDescriptions(instances []Instance) []Instance {
+	return enrichDescriptions(instances, ImagePath, FileDescription)
+}
+
+func enrichDescriptions(
+	instances []Instance,
+	imagePath func(uint32) (string, error),
+	fileDescription func(string) string,
+) []Instance {
 	out := append([]Instance(nil), instances...)
-	firstByName := make(map[string]int, len(out))
+	candidatesByName := make(map[string][]int, len(out))
 	described := make(map[string]struct{}, len(out))
 	for index := range out {
 		key := strings.ToLower(out[index].Executable)
 		if out[index].Description != "" {
 			described[key] = struct{}{}
 		}
-		if _, exists := firstByName[key]; !exists {
-			firstByName[key] = index
-		}
+		candidatesByName[key] = append(candidatesByName[key], index)
 	}
 	for key := range described {
-		delete(firstByName, key)
+		delete(candidatesByName, key)
 	}
-	jobs := make(chan int)
+	jobs := make(chan []int)
 	var workers sync.WaitGroup
-	workerCount := min(4, len(firstByName))
+	workerCount := min(4, len(candidatesByName))
 	for range workerCount {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for index := range jobs {
-				path, err := ImagePath(out[index].PID)
-				if err != nil {
-					continue
+			for candidates := range jobs {
+				firstAccessibleIndex := -1
+				var firstAccessiblePath string
+				for _, index := range candidates {
+					path, err := imagePath(out[index].PID)
+					if err != nil {
+						continue
+					}
+					if firstAccessibleIndex < 0 {
+						firstAccessibleIndex = index
+						firstAccessiblePath = path
+					}
+					description := fileDescription(path)
+					if description == "" {
+						continue
+					}
+					out[index].Path = path
+					out[index].Description = description
+					firstAccessibleIndex = -1
+					break
 				}
-				out[index].Path = path
-				out[index].Description = FileDescription(path)
+				if firstAccessibleIndex >= 0 {
+					out[firstAccessibleIndex].Path = firstAccessiblePath
+				}
 			}
 		}()
 	}
-	for _, index := range firstByName {
-		jobs <- index
+	for _, candidates := range candidatesByName {
+		jobs <- candidates
 	}
 	close(jobs)
 	workers.Wait()

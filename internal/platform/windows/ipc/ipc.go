@@ -2,6 +2,7 @@
 package ipc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -24,7 +25,13 @@ const (
 	pipeTimeout      = 1000
 	maxConnections   = 8
 	genericReadWrite = 0xC0000000
+	pipeIOTimeout    = 2 * time.Second
+	clientOpenFlags  = windows.FILE_FLAG_OVERLAPPED |
+		windows.SECURITY_SQOS_PRESENT |
+		windows.SECURITY_IDENTIFICATION
 )
+
+var errPipeIOTimeout = errors.New("named-pipe I/O timed out")
 
 type Handler func(cmd string) string
 
@@ -118,11 +125,15 @@ func serve(name string, handler Handler, stop <-chan struct{}) error {
 	}
 	defer close(wakeDone)
 
+	firstInstance := true
 	for {
 		if !claimConnectionSlot(connections, stop) {
 			return nil
 		}
-		openMode := uint32(pipeAccessDuplex)
+		openMode := uint32(pipeAccessDuplex | windows.FILE_FLAG_OVERLAPPED)
+		if firstInstance {
+			openMode |= windows.FILE_FLAG_FIRST_PIPE_INSTANCE
+		}
 		pipeMode := uint32(pipeTypeMessage | pipeReadModeMsg | pipeRejectRemote)
 
 		h, err := windows.CreateNamedPipe(
@@ -134,8 +145,9 @@ func serve(name string, handler Handler, stop <-chan struct{}) error {
 			<-connections
 			return fmt.Errorf("CreateNamedPipe: %w", err)
 		}
+		firstInstance = false
 
-		err = windows.ConnectNamedPipe(h, nil)
+		err = connectPipe(h)
 		if isStopped(stop) {
 			_ = windows.CloseHandle(h)
 			<-connections
@@ -149,7 +161,7 @@ func serve(name string, handler Handler, stop <-chan struct{}) error {
 
 		go func() {
 			defer func() { <-connections }()
-			handleConn(h, handler)
+			handleConn(h, handler, pipeIOTimeout)
 		}()
 	}
 }
@@ -201,12 +213,11 @@ func wakeServerOnStop(pipePath *uint16, stop, done <-chan struct{}) {
 	}
 }
 
-func handleConn(h windows.Handle, handler Handler) {
+func handleConn(h windows.Handle, handler Handler, timeout time.Duration) {
 	defer func() { _ = windows.CloseHandle(h) }()
 
 	buf := make([]byte, pipeBufSize)
-	var done uint32
-	err := windows.ReadFile(h, buf, &done, nil)
+	done, err := readWithTimeout(h, buf, timeout)
 	if err != nil {
 		return
 	}
@@ -215,12 +226,22 @@ func handleConn(h windows.Handle, handler Handler) {
 	resp := handler(cmd)
 
 	out := resp + "\r\n"
-	if err := windows.WriteFile(h, []byte(out), nil, nil); err != nil {
+	written, err := writeWithTimeout(h, []byte(out), timeout)
+	if err != nil || written != uint32(len(out)) {
 		return
 	}
 
-	_ = windows.FlushFileBuffers(h)
+	waitForClientClose(h, timeout)
 	_ = windows.DisconnectNamedPipe(h)
+}
+
+// The client closes its handle after reading the single response. Waiting for
+// that close keeps DisconnectNamedPipe from discarding a response that is still
+// buffered, while the overlapped timeout prevents a client from holding the
+// connection indefinitely.
+func waitForClientClose(h windows.Handle, timeout time.Duration) {
+	var probe [1]byte
+	_, _ = readWithTimeout(h, probe[:], timeout)
 }
 
 func Send(cmd string) (string, bool) {
@@ -232,6 +253,10 @@ func Send(cmd string) (string, bool) {
 }
 
 func sendTo(name, cmd string) (string, bool) {
+	return sendToTimeout(name, cmd, pipeIOTimeout)
+}
+
+func sendToTimeout(name, cmd string, timeout time.Duration) (string, bool) {
 	pipePath, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return "", false
@@ -244,14 +269,14 @@ func sendTo(name, cmd string) (string, bool) {
 	defer func() { _ = windows.CloseHandle(h) }()
 
 	data := []byte(cmd + "\r\n")
-	var written uint32
-	if err := windows.WriteFile(h, data, &written, nil); err != nil || written != uint32(len(data)) {
+	written, err := writeWithTimeout(h, data, timeout)
+	if err != nil || written != uint32(len(data)) {
 		return "", false
 	}
 
-	buf := make([]byte, 4096)
-	var done uint32
-	if err := windows.ReadFile(h, buf, &done, nil); err != nil {
+	buf := make([]byte, pipeBufSize)
+	done, err := readWithTimeout(h, buf, timeout)
+	if err != nil {
 		return "", false
 	}
 
@@ -261,6 +286,106 @@ func sendTo(name, cmd string) (string, bool) {
 func openPipe(pipePath *uint16) (windows.Handle, error) {
 	return windows.CreateFile(
 		pipePath, genericReadWrite, 0, nil,
-		windows.OPEN_EXISTING, 0, 0,
+		windows.OPEN_EXISTING,
+		clientOpenFlags,
+		0,
 	)
+}
+
+func connectPipe(h windows.Handle) error {
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(event) }()
+
+	overlapped := windows.Overlapped{HEvent: event}
+	err = windows.ConnectNamedPipe(h, &overlapped)
+	if err == nil || errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+		return nil
+	}
+	if !errors.Is(err, windows.ERROR_IO_PENDING) {
+		return err
+	}
+	if _, err := windows.WaitForSingleObject(event, windows.INFINITE); err != nil {
+		_ = cancelOverlapped(h, &overlapped)
+		return err
+	}
+	var ignored uint32
+	return windows.GetOverlappedResult(h, &overlapped, &ignored, false)
+}
+
+func readWithTimeout(h windows.Handle, buffer []byte, timeout time.Duration) (uint32, error) {
+	return overlappedIO(h, timeout, func(overlapped *windows.Overlapped) (uint32, error) {
+		var transferred uint32
+		err := windows.ReadFile(h, buffer, &transferred, overlapped)
+		return transferred, err
+	})
+}
+
+func writeWithTimeout(h windows.Handle, buffer []byte, timeout time.Duration) (uint32, error) {
+	return overlappedIO(h, timeout, func(overlapped *windows.Overlapped) (uint32, error) {
+		var transferred uint32
+		err := windows.WriteFile(h, buffer, &transferred, overlapped)
+		return transferred, err
+	})
+}
+
+func overlappedIO(h windows.Handle, timeout time.Duration, start func(*windows.Overlapped) (uint32, error)) (uint32, error) {
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = windows.CloseHandle(event) }()
+
+	overlapped := windows.Overlapped{HEvent: event}
+	transferred, err := start(&overlapped)
+	if err == nil {
+		return transferred, nil
+	}
+	if !errors.Is(err, windows.ERROR_IO_PENDING) {
+		return 0, err
+	}
+
+	waitMilliseconds := uint32(max(1, (timeout+time.Millisecond-1)/time.Millisecond))
+	result, waitErr := windows.WaitForSingleObject(event, waitMilliseconds)
+	if waitErr != nil {
+		if cancelErr := cancelOverlapped(h, &overlapped); cancelErr != nil {
+			return 0, cancelErr
+		}
+		return 0, waitErr
+	}
+	if result == uint32(windows.WAIT_TIMEOUT) {
+		if cancelErr := cancelOverlapped(h, &overlapped); cancelErr != nil {
+			return 0, cancelErr
+		}
+		return 0, errPipeIOTimeout
+	}
+	if result != uint32(windows.WAIT_OBJECT_0) {
+		if cancelErr := cancelOverlapped(h, &overlapped); cancelErr != nil {
+			return 0, cancelErr
+		}
+		return 0, fmt.Errorf("wait for named-pipe I/O returned %#x", result)
+	}
+
+	var completed uint32
+	if err := windows.GetOverlappedResult(h, &overlapped, &completed, false); err != nil {
+		return 0, err
+	}
+	return completed, nil
+}
+
+// CancelIoEx completes asynchronously. Always drain the operation before its
+// OVERLAPPED structure and event leave scope.
+func cancelOverlapped(h windows.Handle, overlapped *windows.Overlapped) error {
+	cancelErr := windows.CancelIoEx(h, overlapped)
+	var ignored uint32
+	completionErr := windows.GetOverlappedResult(h, overlapped, &ignored, true)
+	if cancelErr != nil && !errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
+		return fmt.Errorf("CancelIoEx: %w", cancelErr)
+	}
+	if completionErr != nil && !errors.Is(completionErr, windows.ERROR_OPERATION_ABORTED) {
+		return completionErr
+	}
+	return nil
 }

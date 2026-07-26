@@ -1,6 +1,10 @@
 package processcatalog
 
-import "testing"
+import (
+	"errors"
+	"reflect"
+	"testing"
+)
 
 func TestIncludeSnapshotEntrySkipsSystemPseudoProcess(t *testing.T) {
 	for _, test := range []struct {
@@ -39,5 +43,49 @@ func TestGroupInstancesDeduplicatesExecutableNames(t *testing.T) {
 	})
 	if len(groups) != 1 || groups[0].Count != 2 || groups[0].Executable != "worker.exe" {
 		t.Fatalf("groups = %+v", groups)
+	}
+}
+
+func TestEnrichDescriptionsTriesUntilDescriptionIsAvailable(t *testing.T) {
+	var attempted []uint32
+	var describedPaths []string
+	instances := []Instance{
+		{PID: 10, Executable: "app.exe"},
+		{PID: 20, Executable: "APP.EXE"},
+		{PID: 30, Executable: "app.exe"},
+		{PID: 40, Executable: "other.exe", Description: "Already known"},
+	}
+	got := enrichDescriptions(
+		instances,
+		func(pid uint32) (string, error) {
+			attempted = append(attempted, pid)
+			if pid == 10 {
+				return "", errors.New("access denied")
+			}
+			if pid == 20 {
+				return `C:\Apps\undescribed.exe`, nil
+			}
+			return `C:\Apps\app.exe`, nil
+		},
+		func(path string) string {
+			describedPaths = append(describedPaths, path)
+			if path == `C:\Apps\undescribed.exe` {
+				return ""
+			}
+			return "Accessible app"
+		},
+	)
+
+	if !reflect.DeepEqual(attempted, []uint32{10, 20, 30}) {
+		t.Fatalf("attempted PIDs = %v, want [10 20 30]", attempted)
+	}
+	if !reflect.DeepEqual(describedPaths, []string{`C:\Apps\undescribed.exe`, `C:\Apps\app.exe`}) {
+		t.Fatalf("description paths = %v", describedPaths)
+	}
+	if got[0].Description != "" || got[1].Description != "" || got[2].Description != "Accessible app" {
+		t.Fatalf("enriched instances = %+v", got)
+	}
+	if got[3] != instances[3] {
+		t.Fatalf("pre-described instance changed: %+v", got[3])
 	}
 }
