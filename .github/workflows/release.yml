@@ -16,12 +16,19 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
+
+      - name: Validate release tag
+        run: |
+          $version = (./tools/validate-release-tag.ps1 -Tag $env:RELEASE_TAG).Trim()
+          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
 
       - name: Verify
         run: |
@@ -48,15 +55,13 @@ jobs:
 
       - name: Generate .syso
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          go run ./tools/resourcegen.go -version $version
+          go run ./tools/resourcegen.go -version $env:RELEASE_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         run: |
           $env:CGO_ENABLED = "0"
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          $ldflags = "-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=$version"
+          $ldflags = "-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=$env:RELEASE_VERSION"
           $env:GOARCH = "386"
           go build -trimpath -ldflags "$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletrigger
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -71,12 +76,17 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
             $lines += "$hash *$([System.IO.Path]::GetFileName($file))"
           }
-          Set-Content -Encoding ascii SHA256SUMS.txt $lines
+          $content = ($lines -join "`n") + "`n"
+          [System.IO.File]::WriteAllText(
+            (Join-Path $PWD "SHA256SUMS.txt"),
+            $content,
+            [System.Text.Encoding]::ASCII
+          )
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
-          name: IdleTrigger ${{ github.ref_name }}
+          name: IdleTrigger ${{ env.RELEASE_TAG }}
           draft: true
           fail_on_unmatched_files: true
           files: |

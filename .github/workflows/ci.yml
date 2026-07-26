@@ -46,6 +46,18 @@ jobs:
       - name: go test (tools)
         run: go test -count=1 -tags tools ./...
 
+      - name: Test release tag validation
+        run: ./tools/validate-release-tag.ps1 -SelfTest
+
+      - name: go test (386 platform and UI)
+        run: |
+          $env:CGO_ENABLED = "0"
+          $env:GOARCH = "386"
+          go test -count=1 ./internal/platform/windows/... ./internal/ui/...
+
+      - name: Generate CI resources
+        run: go run ./tools/resourcegen.go -version ci
+
       - name: Build supported Windows architectures
         run: |
           $env:CGO_ENABLED = "0"

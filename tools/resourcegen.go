@@ -39,11 +39,6 @@ type grpIconDirEntry struct {
 	ID uint16
 }
 
-type byteResource []byte
-
-func (r byteResource) Read(p []byte) (int, error) { return bytes.NewReader(r).Read(p) }
-func (r byteResource) Size() int64                { return int64(len(r)) }
-
 func main() {
 	version := flag.String("version", "0.0.0", "product version string")
 	manifest := flag.String("manifest", "build/windows/manifest.xml", "manifest path")
@@ -102,7 +97,7 @@ func generate(arch, output, originalFilename, manifestPath, iconPath, trayDarkIc
 	}
 	defer trayLightIconFile.Close()
 
-	out.AddResource(rtVersion, 1, byteResource(versionInfo(version, originalFilename)))
+	out.AddResource(rtVersion, 1, bytes.NewReader(versionInfo(version, originalFilename)))
 	out.Freeze()
 	return writeCOFF(out, output)
 }
