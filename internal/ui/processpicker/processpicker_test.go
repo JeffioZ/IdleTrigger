@@ -20,6 +20,16 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/wintest"
 )
 
+func TestOwnerDrawButtonsIgnoreDoubleClickNotification(t *testing.T) {
+	const bnDoubleClicked = 5
+	if !ownerDrawButtonClicked(bnClicked) {
+		t.Fatal("BN_CLICKED should invoke an owner-draw button command")
+	}
+	if ownerDrawButtonClicked(bnDoubleClicked) {
+		t.Fatal("BN_DOUBLECLICKED must not invoke an owner-draw button command twice")
+	}
+}
+
 var (
 	pickerTestUser32         = windows.NewLazySystemDLL("user32.dll")
 	pickerTestGetWindowRect  = pickerTestUser32.NewProc("GetWindowRect")

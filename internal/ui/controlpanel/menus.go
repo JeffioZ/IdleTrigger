@@ -1,8 +1,6 @@
 package controlpanel
 
 import (
-	"unsafe"
-
 	"github.com/JeffioZ/idletrigger/internal/ui/nativeform"
 	"golang.org/x/sys/windows"
 )
@@ -118,8 +116,5 @@ func (p *panel) subclassButton(hwnd windows.Handle) {
 }
 
 func setWindowProc(hwnd windows.Handle, proc uintptr) (uintptr, uintptr, error) {
-	if unsafe.Sizeof(uintptr(0)) == 4 {
-		return pSetWindowLong.Call(uintptr(hwnd), gwlpWndProc, proc)
-	}
-	return pSetWindowLongPtr.Call(uintptr(hwnd), gwlpWndProc, proc)
+	return nativeform.SetWindowProc(hwnd, proc)
 }

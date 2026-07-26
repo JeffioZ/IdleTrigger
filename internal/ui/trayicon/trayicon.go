@@ -3,6 +3,7 @@
 package trayicon
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -23,6 +24,8 @@ var (
 
 	currentID = uint32(0)
 	quitOnce  sync.Once
+
+	errTrayUnavailable = errors.New("tray UI is unavailable")
 )
 
 // SetErrorHandler routes internal tray errors to the application's logger.
@@ -93,7 +96,9 @@ func newMenuItem(title string, tooltip string, parent *MenuItem) *MenuItem {
 // Run initializes GUI and starts the event loop, then invokes the onReady
 // callback. It blocks until trayicon.Quit() is called.
 func Run(onReady func(), onExit func()) {
-	Register(onReady, onExit)
+	if !register(onReady, onExit) {
+		return
+	}
 	nativeLoop()
 }
 
@@ -103,18 +108,14 @@ func Run(onReady func(), onExit func()) {
 // To overcome some OS weirdness, On macOS versions before Catalina, calling
 // this does exactly the same as Run().
 func Register(onReady func(), onExit func()) {
+	register(onReady, onExit)
+}
+
+func register(onReady func(), onExit func()) bool {
 	if onReady == nil {
 		systrayReady = func() {}
 	} else {
-		// Run onReady on separate goroutine to avoid blocking event loop
-		readyCh := make(chan interface{})
-		go func() {
-			<-readyCh
-			onReady()
-		}()
-		systrayReady = func() {
-			close(readyCh)
-		}
+		systrayReady = onReady
 	}
 	// unlike onReady, onExit runs in the event loop to make sure it has time to
 	// finish before the process terminates
@@ -122,7 +123,7 @@ func Register(onReady func(), onExit func()) {
 		onExit = func() {}
 	}
 	systrayExit = onExit
-	registerSystray()
+	return registerSystray()
 }
 
 // Quit the systray

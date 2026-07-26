@@ -184,7 +184,6 @@ const (
 	swpNoActivate                 = 0x0010
 	monitorNearest                = 2
 	panelFallbackWindowCoordinate = int32(-32000)
-	gwlpWndProc                   = ^uintptr(3)
 	vkUp                          = 0x26
 	vkDown                        = 0x28
 	vkHome                        = 0x24
@@ -275,8 +274,6 @@ var (
 	pDefWindowProc         = user32.NewProc("DefWindowProcW")
 	pCallWindowProc        = user32.NewProc("CallWindowProcW")
 	pSendMessage           = user32.NewProc("SendMessageW")
-	pSetWindowLong         = user32.NewProc("SetWindowLongW")
-	pSetWindowLongPtr      = user32.NewProc("SetWindowLongPtrW")
 	pSetWindowPos          = user32.NewProc("SetWindowPos")
 	pBeginDeferWindowPos   = user32.NewProc("BeginDeferWindowPos")
 	pDeferWindowPos        = user32.NewProc("DeferWindowPos")

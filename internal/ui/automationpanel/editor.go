@@ -401,30 +401,38 @@ func (p *panel) handleManager(id, notification uint16) {
 			p.updateManagerActions()
 		}
 	case idNew:
-		p.showEditor(-1)
+		if ownerDrawButtonClicked(notification) {
+			p.showEditor(-1)
+		}
 	case idEdit:
-		p.editSelected()
+		if ownerDrawButtonClicked(notification) {
+			p.editSelected()
+		}
 	case idToggle:
-		if index := p.selectedRule(); index >= 0 {
-			candidate := append([]automation.Rule(nil), p.rules...)
-			candidate[index].Enabled = !candidate[index].Enabled
-			if ok, message := p.notifySave(candidate); !ok {
-				p.setText(idNext, message)
+		if ownerDrawButtonClicked(notification) {
+			if index := p.selectedRule(); index >= 0 {
+				candidate := append([]automation.Rule(nil), p.rules...)
+				candidate[index].Enabled = !candidate[index].Enabled
+				if ok, message := p.notifySave(candidate); !ok {
+					p.setText(idNext, message)
+				}
+				p.populateRules()
 			}
-			p.populateRules()
 		}
 	case idDelete:
-		if index := p.selectedRule(); index >= 0 {
-			if !p.confirm(p.t("automation_delete_title"), fmt.Sprintf(p.t("automation_delete_confirm"), p.rules[index].Name)) {
-				return
+		if ownerDrawButtonClicked(notification) {
+			if index := p.selectedRule(); index >= 0 {
+				if !p.confirm(p.t("automation_delete_title"), fmt.Sprintf(p.t("automation_delete_confirm"), p.rules[index].Name)) {
+					return
+				}
+				candidate := append([]automation.Rule(nil), p.rules...)
+				candidate = append(candidate[:index], candidate[index+1:]...)
+				p.selectedRuleID = ""
+				if ok, message := p.notifySave(candidate); !ok {
+					p.setText(idNext, message)
+				}
+				p.populateRules()
 			}
-			candidate := append([]automation.Rule(nil), p.rules...)
-			candidate = append(candidate[:index], candidate[index+1:]...)
-			p.selectedRuleID = ""
-			if ok, message := p.notifySave(candidate); !ok {
-				p.setText(idNext, message)
-			}
-			p.populateRules()
 		}
 	}
 }
@@ -436,7 +444,7 @@ func (p *panel) handleEditor(id, notification uint16) {
 		}
 	}
 	if _, ok := p.choices[id]; ok {
-		if notification == bnClicked {
+		if ownerDrawButtonClicked(notification) {
 			// Open after the native BUTTON finishes its click processing. Opening
 			// synchronously from BN_CLICKED lets the button restore focus and close
 			// the popup immediately on some Windows versions.
@@ -447,7 +455,7 @@ func (p *panel) handleEditor(id, notification uint16) {
 		// the popup that has just opened.
 		return
 	}
-	if id >= idWeekdayBase && id < idWeekdayBase+uint16(len(editorWeekdays)) && notification == bnClicked {
+	if id >= idWeekdayBase && id < idWeekdayBase+uint16(len(editorWeekdays)) && ownerDrawButtonClicked(notification) {
 		p.setChecked(id, !p.checked(id))
 		p.clearEditorError()
 		return
@@ -455,36 +463,46 @@ func (p *panel) handleEditor(id, notification uint16) {
 	p.closeChoice(false)
 	switch id {
 	case idDaysWorkdays:
-		if notification == bnClicked {
+		if ownerDrawButtonClicked(notification) {
 			p.selectWeekdays(false)
 		}
 	case idDaysEveryday:
-		if notification == bnClicked {
+		if ownerDrawButtonClicked(notification) {
 			p.selectWeekdays(true)
 		}
 	case idKeepScreen:
-		if notification == bnClicked {
+		if ownerDrawButtonClicked(notification) {
 			p.setChecked(id, !p.checked(id))
 		}
 	case idChooseProcesses:
-		p.syncDraft()
-		_ = processpicker.Show(processpicker.Options{Owner: p.hwnd, Selected: p.draft.Processes, Descriptions: p.processDescriptions, Chinese: p.state.Chinese, Text: p.text, OnConfirm: func(targets []automation.ProcessTarget, descriptions map[string]string) {
-			p.draft.Processes = targets
-			p.processDescriptions = descriptions
-			p.setText(idProcessSummary, p.processSummary())
-			p.refreshProcessInfoTooltip()
-			p.clearEditorError()
-			p.relayoutEditor()
-		}})
+		if ownerDrawButtonClicked(notification) {
+			p.syncDraft()
+			_ = processpicker.Show(processpicker.Options{Owner: p.hwnd, Selected: p.draft.Processes, Descriptions: p.processDescriptions, Chinese: p.state.Chinese, Text: p.text, OnConfirm: func(targets []automation.ProcessTarget, descriptions map[string]string) {
+				p.draft.Processes = targets
+				p.processDescriptions = descriptions
+				p.setText(idProcessSummary, p.processSummary())
+				p.refreshProcessInfoTooltip()
+				p.clearEditorError()
+				p.relayoutEditor()
+			}})
+		}
 	case idProcessInfo:
-		if notification == bnClicked && len(p.draft.Processes) > 0 {
+		if ownerDrawButtonClicked(notification) && len(p.draft.Processes) > 0 {
 			p.showProcessDetails()
 		}
 	case idSave:
-		p.saveEditor()
+		if ownerDrawButtonClicked(notification) {
+			p.saveEditor()
+		}
 	case idCancel:
-		p.cancelEditor()
+		if ownerDrawButtonClicked(notification) {
+			p.cancelEditor()
+		}
 	}
+}
+
+func ownerDrawButtonClicked(notification uint16) bool {
+	return notification == bnClicked
 }
 
 func (p *panel) selectWeekdays(everyDay bool) {

@@ -5,6 +5,7 @@ package actionwarning
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type Options struct {
 
 type rect struct{ Left, Top, Right, Bottom int32 }
 type point struct{ X, Y int32 }
+type size struct{ Width, Height int32 }
 type monitorInfo struct {
 	Size          uint32
 	Monitor, Work rect
@@ -139,6 +141,8 @@ var (
 	pMonitorFromRect     = user32.NewProc("MonitorFromRect")
 	pGetMonitorInfo      = user32.NewProc("GetMonitorInfoW")
 	pGetClientRect       = user32.NewProc("GetClientRect")
+	pGetDC               = user32.NewProc("GetDC")
+	pReleaseDC           = user32.NewProc("ReleaseDC")
 	pFillRect            = user32.NewProc("FillRect")
 	pInvalidateRect      = user32.NewProc("InvalidateRect")
 	pSendMessage         = user32.NewProc("SendMessageW")
@@ -146,6 +150,8 @@ var (
 	pSetBkMode           = gdi32.NewProc("SetBkMode")
 	pCreateBrush         = gdi32.NewProc("CreateSolidBrush")
 	pDeleteObject        = gdi32.NewProc("DeleteObject")
+	pSelectObject        = gdi32.NewProc("SelectObject")
+	pGetTextExtent       = gdi32.NewProc("GetTextExtentPoint32W")
 
 	classOnce      sync.Once
 	classErr       error
@@ -163,6 +169,7 @@ var (
 	current        Options
 	currentSeq     uint64
 	nextSeq        atomic.Uint64
+	countdown      nativeform.CountdownCancellation
 	finished       atomic.Bool
 	languageMu     sync.RWMutex
 	uiChinese      *bool
@@ -184,16 +191,30 @@ func Show(options Options) {
 		options.Seconds = 0
 	}
 	seq := nextSeq.Add(1)
-	trayicon.Post(func() { showNow(options, seq) })
-	go func() {
-		if options.Seconds == 0 {
-			trayicon.Post(func() { complete(seq, true) })
+	trayicon.Post(func() {
+		showNow(options, seq)
+		if active == 0 || currentSeq != seq {
 			return
 		}
+		if options.Seconds == 0 {
+			complete(seq, true)
+			return
+		}
+		startCountdown(options, seq)
+	})
+}
+
+func startCountdown(options Options, seq uint64) {
+	stop := countdown.Replace()
+	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for remaining := options.Seconds - 1; remaining >= 0; remaining-- {
-			<-ticker.C
+			select {
+			case <-ticker.C:
+			case <-stop:
+				return
+			}
 			value := remaining
 			if !trayicon.Post(func() {
 				if value == 0 {
@@ -268,7 +289,7 @@ func buildControls(options Options) {
 	}
 	languageMu.RUnlock()
 	uiFont, _ = font.New(int32(14*scale+0.5), 400, chinese)
-	bodyControl = child("STATIC", options.Body(options.Seconds), wsChild|wsVisible|ssLeft|ssNotify, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight, idBody)
+	bodyControl = child("STATIC", fitWarningBody(options.Body(options.Seconds)), wsChild|wsVisible|ssLeft|ssNotify, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight, idBody)
 	cancelControl = child("BUTTON", options.CancelText, wsChild|wsVisible|wsTabStop|bsPushButton, warningCancelX, warningButtonsY, warningButtonWidth, warningButtonHeight, idCancel)
 	executeControl = child("BUTTON", options.ExecuteText, wsChild|wsVisible|wsTabStop|bsPushButton, warningExecuteX, warningButtonsY, warningButtonWidth, warningButtonHeight, idExecute)
 	createTooltips()
@@ -312,8 +333,71 @@ func updateBody(seq uint64, remaining int) {
 	if active == 0 || currentSeq != seq || finished.Load() {
 		return
 	}
-	text, _ := windows.UTF16PtrFromString(current.Body(remaining))
+	text, _ := windows.UTF16PtrFromString(fitWarningBody(current.Body(remaining)))
 	pSetWindowText.Call(uintptr(bodyControl), uintptr(unsafe.Pointer(text)))
+}
+
+func fitWarningBody(value string) string {
+	maxWidth := int32(float64(warningBodyWidth)*windowScale() + 0.5)
+	return ellipsizeLeadingLine(value, maxWidth, measureWarningTextWidth)
+}
+
+func ellipsizeLeadingLine(value string, maxWidth int32, measure func(string) (int32, bool)) string {
+	newline := strings.LastIndexByte(value, '\n')
+	if newline <= 0 {
+		return value
+	}
+	leading := strings.Join(strings.Fields(value[:newline]), " ")
+	suffix := value[newline:]
+	normalized := leading + suffix
+	if maxWidth <= 0 || measure == nil {
+		return normalized
+	}
+	width, ok := measure(leading)
+	if !ok || width <= maxWidth {
+		return normalized
+	}
+	runes := []rune(leading)
+	const ellipsis = "…"
+	low, high := 0, len(runes)
+	for low < high {
+		mid := (low + high + 1) / 2
+		width, measured := measure(string(runes[:mid]) + ellipsis)
+		if !measured {
+			return normalized
+		}
+		if width <= maxWidth {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return string(runes[:low]) + ellipsis + suffix
+}
+
+func measureWarningTextWidth(value string) (int32, bool) {
+	if active == 0 || uiFont == 0 {
+		return 0, false
+	}
+	text, err := windows.UTF16FromString(value)
+	if err != nil {
+		return 0, false
+	}
+	dc, _, _ := pGetDC.Call(uintptr(active))
+	if dc == 0 {
+		return 0, false
+	}
+	defer pReleaseDC.Call(uintptr(active), dc)
+	old, _, _ := pSelectObject.Call(dc, uintptr(uiFont))
+	defer pSelectObject.Call(dc, old)
+	var measured size
+	ok, _, _ := pGetTextExtent.Call(
+		dc,
+		uintptr(unsafe.Pointer(&text[0])),
+		uintptr(len(text)-1),
+		uintptr(unsafe.Pointer(&measured)),
+	)
+	return measured.Width, ok != 0
 }
 
 func complete(seq uint64, execute bool) {
@@ -332,6 +416,7 @@ func complete(seq uint64, execute bool) {
 }
 
 func hideNow() {
+	countdown.Stop()
 	if active != 0 {
 		trayicon.ClearTabNavigationWindow(active)
 		pDestroyWindow.Call(uintptr(active))
@@ -556,6 +641,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		}
 		return 0
 	case wmDestroy:
+		countdown.Stop()
 		windowIcons.Release()
 		if active == hwnd {
 			active = 0

@@ -345,6 +345,7 @@ const (
 	wmGetText             = 0x000D
 	enChange              = 0x0300
 	enSetFocus            = 0x0100
+	bnClicked             = 0
 	bnSetFocus            = 6
 	ttfIDIsHwnd           = 0x0001
 	ttfSubclass           = 0x0010

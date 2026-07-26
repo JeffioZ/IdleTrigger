@@ -1,6 +1,9 @@
 package actionwarning
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestWarningPhysicalBoundsUseOneDPITransform(t *testing.T) {
 	got := warningPhysicalBounds(warningControlLayout{x: warningBodyX, y: warningBodyY, width: warningBodyWidth, height: warningBodyHeight}, 1.5)
@@ -30,5 +33,48 @@ func TestWarningOriginUsesTargetMonitorWorkArea(t *testing.T) {
 	x, y := warningOrigin(work, 600, 300, 27)
 	if x != -627 || y != 753 {
 		t.Fatalf("warning origin = (%d,%d), want (-627,753)", x, y)
+	}
+}
+
+func TestHideStopsCountdownWorker(t *testing.T) {
+	stop := countdown.Replace()
+	hideNow()
+	select {
+	case <-stop:
+	default:
+		t.Fatal("hideNow left the countdown worker running")
+	}
+}
+
+func TestWarningBodyEllipsizesOnlyTheRuleName(t *testing.T) {
+	value := strings.Repeat("规", 12) + "\n“Lock” will run in 10 seconds."
+	got := ellipsizeLeadingLine(value, 6, func(text string) (int32, bool) {
+		return int32(len([]rune(text))), true
+	})
+	want := strings.Repeat("规", 5) + "…\n“Lock” will run in 10 seconds."
+	if got != want {
+		t.Fatalf("ellipsized body = %q, want %q", got, want)
+	}
+}
+
+func TestWarningBodyPreservesShortRuleName(t *testing.T) {
+	const value = "Night lock\n“Lock” will run in 10 seconds."
+	got := ellipsizeLeadingLine(value, 20, func(text string) (int32, bool) {
+		return int32(len([]rune(text))), true
+	})
+	if got != value {
+		t.Fatalf("short warning body changed to %q", got)
+	}
+}
+
+func TestWarningBodyCollapsesMultilineRuleNameAndPreservesAction(t *testing.T) {
+	const action = "“Lock” will run in 10 seconds."
+	const value = "Alpha\nBeta   Gamma\n" + action
+	got := ellipsizeLeadingLine(value, 11, func(text string) (int32, bool) {
+		return int32(len([]rune(text))), true
+	})
+	const want = "Alpha Beta…\n" + action
+	if got != want {
+		t.Fatalf("multiline warning body = %q, want %q", got, want)
 	}
 }

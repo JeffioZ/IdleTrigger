@@ -2,18 +2,35 @@ package trayicon
 
 import "unsafe"
 
-func registerSystray() {
+func registerSystray() bool {
 	if err := wt.initInstance(); err != nil {
 		reportError("Unable to init instance: %v", err)
-		return
+		wt.abortInitialization()
+		return false
 	}
 
 	if err := wt.createMenu(); err != nil {
 		reportError("Unable to create menu: %v", err)
-		return
+		wt.abortInitialization()
+		return false
 	}
 
-	systrayReady()
+	go systrayReady()
+	return true
+}
+
+func (t *winTray) abortInitialization() {
+	t.muUITasks.Lock()
+	window := t.window
+	t.muUITasks.Unlock()
+	t.shutdown()
+	if window != 0 {
+		pDestroyWindow.Call(uintptr(window))
+	}
+	if t.wcex != nil {
+		_ = t.wcex.unregister()
+		t.wcex = nil
+	}
 }
 
 func nativeLoop() {
@@ -57,6 +74,9 @@ func quit() {
 // in the current executable.
 func SetIconResource(resourceID uint16) {
 	if err := wt.setIcon(resourceID); err != nil {
+		if err == errTrayUnavailable {
+			return
+		}
 		reportError("Unable to set icon: %v", err)
 		return
 	}
@@ -77,20 +97,20 @@ func (item *MenuItem) parentId() uint32 {
 // SetIconResource sets a menu item's icon from an RT_GROUP_ICON resource
 // embedded in the current executable.
 func (item *MenuItem) SetIconResource(resourceID uint16) {
+	if !wt.uiAvailable() {
+		return
+	}
 	key, err := systemSmallIconKey(resourceID)
 	if err != nil {
 		reportError("Unable to resolve menu icon size: %v", err)
 		return
 	}
-	h, err := wt.loadIconResource(key)
+	h, err := wt.loadMenuIconBitmap(key)
 	if err != nil {
-		reportError("Unable to load menu icon resource: %v", err)
-		return
-	}
-
-	h, err = wt.iconToBitmap(h)
-	if err != nil {
-		reportError("Unable to convert icon to bitmap: %v", err)
+		if err == errTrayUnavailable {
+			return
+		}
+		reportError("Unable to prepare menu icon resource: %v", err)
 		return
 	}
 	wt.muMenuItemIcons.Lock()
@@ -108,12 +128,18 @@ func (item *MenuItem) SetIconResource(resourceID uint16) {
 // only available on Mac and Windows.
 func SetTooltip(tooltip string) {
 	if err := wt.setTooltip(tooltip); err != nil {
+		if err == errTrayUnavailable {
+			return
+		}
 		reportError("Unable to set tooltip: %v", err)
 		return
 	}
 }
 
 func addOrUpdateMenuItem(item *MenuItem) {
+	if !wt.uiAvailable() {
+		return
+	}
 	err := wt.addOrUpdateMenuItem(uint32(item.id), item.parentId(), item.title, item.disabled, item.checked)
 	if err != nil {
 		reportError("Unable to addOrUpdateMenuItem: %v", err)
@@ -122,6 +148,9 @@ func addOrUpdateMenuItem(item *MenuItem) {
 }
 
 func addSeparator(id uint32) {
+	if !wt.uiAvailable() {
+		return
+	}
 	err := wt.addSeparatorMenuItem(id, 0)
 	if err != nil {
 		reportError("Unable to addSeparator: %v", err)
@@ -130,6 +159,9 @@ func addSeparator(id uint32) {
 }
 
 func hideMenuItem(item *MenuItem) {
+	if !wt.uiAvailable() {
+		return
+	}
 	err := wt.hideMenuItem(uint32(item.id), item.parentId())
 	if err != nil {
 		reportError("Unable to hideMenuItem: %v", err)

@@ -14,6 +14,7 @@ import (
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/ui/colors"
 	"github.com/JeffioZ/idletrigger/internal/ui/font"
+	"github.com/JeffioZ/idletrigger/internal/ui/nativeform"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 )
 
@@ -81,8 +82,8 @@ var (
 	pRegisterClassEx       = user32.NewProc("RegisterClassExW")
 	pGetCursorPos          = user32.NewProc("GetCursorPos")
 	pMonitorFromWindow     = user32.NewProc("MonitorFromWindow")
+	pMonitorFromRect       = user32.NewProc("MonitorFromRect")
 	pGetMonitorInfo        = user32.NewProc("GetMonitorInfoW")
-	pAdjustWindowRectEx    = user32.NewProc("AdjustWindowRectEx")
 	pSetWindowPos          = user32.NewProc("SetWindowPos")
 	pUpdateWindow          = user32.NewProc("UpdateWindow")
 	pBeginPaint            = user32.NewProc("BeginPaint")
@@ -112,6 +113,7 @@ var (
 	fontChoice font.Choice
 	uiChinese  *bool
 	nextSeq    atomic.Uint64
+	countdown  nativeform.CountdownCancellation
 	dismissMu  sync.RWMutex
 	onDismiss  func()
 	languageMu sync.RWMutex
@@ -142,19 +144,28 @@ func ShowCountdown(titleText string, seconds int, bodyForSecond func(int) string
 		seconds = 0
 	}
 	seq := nextSeq.Add(1)
+	initial := bodyForSecond(seconds)
 	if !trayicon.Post(func() {
-		showNow(titleText, bodyForSecond(seconds), seq)
+		showNow(titleText, initial, seq)
+		if seconds > 0 && active != 0 && activeSeq == seq {
+			startCountdown(seq, seconds, bodyForSecond)
+		}
 	}) {
 		return
 	}
-	if seconds == 0 {
-		return
-	}
+}
+
+func startCountdown(seq uint64, seconds int, bodyForSecond func(int) string) {
+	stop := countdown.Replace()
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for remaining := seconds - 1; remaining >= 0; remaining-- {
-			<-ticker.C
+			select {
+			case <-ticker.C:
+			case <-stop:
+				return
+			}
 			text := bodyForSecond(remaining)
 			if !trayicon.Post(func() { updateBodyNow(seq, text) }) {
 				return
@@ -183,6 +194,7 @@ func SetLanguage(chinese bool) {
 
 // Hide closes the currently displayed warning. It must run on the tray UI thread.
 func Hide() {
+	countdown.Stop()
 	if active != 0 {
 		pDestroyWindow.Call(uintptr(active))
 	}
@@ -218,7 +230,7 @@ func showNow(titleText, bodyText string, seq uint64) {
 	rebuildFonts(active)
 	applyFrameTheme(active, theme.Current() == theme.ModeDark)
 	mylog.Info("UI font: surface=idle-warning ui_language=%s system_language=%s system_locale=%s face=%q reason=%s dpi=%d title_px=%d body_px=%d", fontChoice.UILanguage, fontChoice.SystemLanguage, fontChoice.SystemLocale, fontChoice.Face, fontChoice.Reason, dpiForWindow(active), scaledFontSize(active, 15), scaledFontSize(active, 13))
-	position(active)
+	position(active, nil)
 }
 
 func updateBodyNow(seq uint64, bodyText string) {
@@ -229,7 +241,7 @@ func updateBodyNow(seq uint64, bodyText string) {
 		return
 	}
 	body = bodyText
-	position(active)
+	position(active, nil)
 	pInvalidateRect.Call(uintptr(active), 0, 0)
 	pUpdateWindow.Call(uintptr(active))
 }
@@ -250,7 +262,7 @@ func ensureClass() error {
 	return classErr
 }
 
-func position(hwnd windows.Handle) {
+func position(hwnd windows.Handle, suggested *rect) {
 	sc := func(v int32) int32 { return scaleForWindow(hwnd, v) }
 	width, margin := sc(348), sc(16)
 	bodyWidth := width - 2*margin - sc(10)
@@ -261,10 +273,18 @@ func position(hwnd windows.Handle) {
 	if minimum := sc(warningMinHeight); height < minimum {
 		height = minimum
 	}
-	outer := rect{Right: width, Bottom: height}
-	pAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&outer)), warningWindowStyle(), 0, wsExTool|wsExTopmost|wsExNoActivate)
-	width, height = outer.Right-outer.Left, outer.Bottom-outer.Top
-	monitor, _, _ := pMonitorFromWindow.Call(uintptr(hwnd), monitorNearest)
+	if outerWidth, outerHeight, err := nativeform.WindowSizeForClient(
+		int(width), int(height), warningWindowStyle(), wsExTool|wsExTopmost|wsExNoActivate, uint32(dpiForWindow(hwnd)),
+	); err == nil {
+		width, height = outerWidth, outerHeight
+	}
+	monitor := uintptr(0)
+	if suggested != nil {
+		monitor, _, _ = pMonitorFromRect.Call(uintptr(unsafe.Pointer(suggested)), monitorNearest)
+	}
+	if monitor == 0 {
+		monitor, _, _ = pMonitorFromWindow.Call(uintptr(hwnd), monitorNearest)
+	}
 	info := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
 	if monitor != 0 {
 		pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
@@ -379,11 +399,17 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		return 0
 	case wmDpiChanged:
 		rebuildFonts(hwnd)
-		position(hwnd)
+		var suggested *rect
+		if lParam != 0 {
+			value := *(*rect)(nativeform.MessagePointer(lParam))
+			suggested = &value
+		}
+		position(hwnd, suggested)
 		mylog.Info("UI font: surface=idle-warning rebuilt reason=dpi-change dpi=%d face=%q", dpiForWindow(hwnd), fontChoice.Face)
 		return 0
 	case wmDestroy:
 		if active == hwnd {
+			countdown.Stop()
 			active = 0
 			activeSeq = 0
 		}

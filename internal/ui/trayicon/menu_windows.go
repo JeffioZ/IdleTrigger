@@ -227,23 +227,26 @@ func (t *winTray) showMenu() error {
 	const (
 		TPM_BOTTOMALIGN = 0x0020
 		TPM_LEFTALIGN   = 0x0000
+		WM_NULL         = 0x0000
 	)
 	p := point{}
 	res, _, err := pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
 	if res == 0 {
 		return err
 	}
-	pSetForegroundWindow.Call(uintptr(t.window))
+	window := t.window
+	pSetForegroundWindow.Call(uintptr(window))
 	darkmode.SetPreferredAppMode(theme.Current() == theme.ModeDark)
 	darkmode.RefreshMenuThemes()
 
+	defer pPostMessage.Call(uintptr(window), WM_NULL, 0, 0)
 	res, _, err = pTrackPopupMenu.Call(
 		uintptr(t.menus[0]),
 		TPM_BOTTOMALIGN|TPM_LEFTALIGN,
 		uintptr(p.X),
 		uintptr(p.Y),
 		0,
-		uintptr(t.window),
+		uintptr(window),
 		0,
 	)
 	if res == 0 {
@@ -297,28 +300,43 @@ func (t *winTray) loadIconResource(key loadedImageKey) (windows.Handle, error) {
 		return 0, fmt.Errorf("invalid icon size %dx%d", key.width, key.height)
 	}
 
-	// Save and reuse handles of loaded resources.
-	t.muLoadedImages.RLock()
-	h, ok := t.loadedImages[key]
-	t.muLoadedImages.RUnlock()
-	if !ok {
-		res, _, err := pLoadImage.Call(
-			uintptr(t.instance),
-			uintptr(key.resourceID),
-			IMAGE_ICON,
-			uintptr(key.width),
-			uintptr(key.height),
-			0,
-		)
-		if res == 0 {
-			return 0, err
-		}
-		h = windows.Handle(res)
-		t.muLoadedImages.Lock()
-		t.loadedImages[key] = h
-		t.muLoadedImages.Unlock()
+	// Serialize the load with shutdown and with other loads of the same key.
+	// This keeps one owned HICON per key and never writes into a released cache.
+	t.muLoadedImages.Lock()
+	defer t.muLoadedImages.Unlock()
+	if t.iconsReleased || t.loadedImages == nil {
+		return 0, errTrayUnavailable
 	}
+	if h, ok := t.loadedImages[key]; ok {
+		return h, nil
+	}
+	res, _, err := pLoadImage.Call(
+		uintptr(t.instance),
+		uintptr(key.resourceID),
+		IMAGE_ICON,
+		uintptr(key.width),
+		uintptr(key.height),
+		0,
+	)
+	if res == 0 {
+		return 0, err
+	}
+	h := windows.Handle(res)
+	t.loadedImages[key] = h
 	return h, nil
+}
+
+func (t *winTray) loadMenuIconBitmap(key loadedImageKey) (windows.Handle, error) {
+	t.muIconLifecycle.Lock()
+	defer t.muIconLifecycle.Unlock()
+	if !t.uiAvailable() {
+		return 0, errTrayUnavailable
+	}
+	icon, err := t.loadIconResource(key)
+	if err != nil {
+		return 0, err
+	}
+	return t.iconToBitmap(icon)
 }
 
 func systemSmallIconKey(resourceID uint16) (loadedImageKey, error) {

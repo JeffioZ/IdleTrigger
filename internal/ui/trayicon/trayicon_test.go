@@ -221,3 +221,13 @@ func TestBeginUIShutdownIsIdempotent(t *testing.T) {
 		t.Fatal("shutdown did not notify synchronous UI waiters")
 	}
 }
+
+func TestClosedTrayRejectsIconCacheAndTooltipUpdates(t *testing.T) {
+	tray := &winTray{iconsReleased: true}
+	if _, err := tray.loadIconResource(loadedImageKey{resourceID: 1, width: 16, height: 16}); err != errTrayUnavailable {
+		t.Fatalf("closed icon cache error = %v, want %v", err, errTrayUnavailable)
+	}
+	if err := tray.setTooltip("ignored"); err != errTrayUnavailable {
+		t.Fatalf("closed tooltip error = %v, want %v", err, errTrayUnavailable)
+	}
+}

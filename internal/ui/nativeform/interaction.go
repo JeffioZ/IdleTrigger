@@ -39,7 +39,6 @@ type trackMouseEvent struct {
 }
 
 const (
-	gwlpWndProc      = ^uintptr(3) // -4
 	wmSetFocus       = 0x0007
 	wmKillFocus      = 0x0008
 	wmEnable         = 0x000A
@@ -57,7 +56,6 @@ const (
 
 var (
 	interactionUser32          = windows.NewLazySystemDLL("user32.dll")
-	interactionSetWindowLong   = interactionUser32.NewProc("SetWindowLongPtrW")
 	interactionCallWindowProc  = interactionUser32.NewProc("CallWindowProcW")
 	interactionTrackMouseEvent = interactionUser32.NewProc("TrackMouseEvent")
 	interactionInvalidateRect  = interactionUser32.NewProc("InvalidateRect")
@@ -82,7 +80,7 @@ func (t *InteractionTracker) Track(control, invalidate windows.Handle) {
 		return
 	}
 	interactionMu.Unlock()
-	oldProc, _, _ := interactionSetWindowLong.Call(uintptr(control), gwlpWndProc, interactionCallback)
+	oldProc, _, _ := SetWindowProc(control, interactionCallback)
 	if oldProc == 0 {
 		return
 	}
@@ -146,7 +144,7 @@ func (t *InteractionTracker) Release() {
 	}
 	interactionMu.Unlock()
 	for _, value := range values {
-		interactionSetWindowLong.Call(uintptr(value.hwnd), gwlpWndProc, value.proc)
+		SetWindowProc(value.hwnd, value.proc)
 	}
 }
 

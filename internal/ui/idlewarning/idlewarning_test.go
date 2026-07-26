@@ -12,6 +12,16 @@ func TestShowHideRepeat(t *testing.T) {
 	}
 }
 
+func TestHideStopsCountdownWorker(t *testing.T) {
+	stop := countdown.Replace()
+	Hide()
+	select {
+	case <-stop:
+	default:
+		t.Fatal("Hide left the countdown worker running")
+	}
+}
+
 func TestWarningMinimumHeightIsCompact(t *testing.T) {
 	if warningMinHeight >= 112 {
 		t.Fatalf("minimum warning height = %d, expected a more compact card", warningMinHeight)

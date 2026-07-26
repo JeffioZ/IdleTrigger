@@ -25,14 +25,26 @@ func (p *picker) handleCommand(id, notification uint16) {
 			pSetTimer.Call(uintptr(p.hwnd), searchTimerID, 120, 0)
 		}
 	case idRefresh:
-		p.startLoad(processLoadManual)
+		if ownerDrawButtonClicked(notification) {
+			p.startLoad(processLoadManual)
+		}
 	case idBrowse:
-		p.browseExecutable()
+		if ownerDrawButtonClicked(notification) {
+			p.browseExecutable()
+		}
 	case idCancel:
-		p.destroy()
+		if ownerDrawButtonClicked(notification) {
+			p.destroy()
+		}
 	case idConfirm:
-		p.confirm()
+		if ownerDrawButtonClicked(notification) {
+			p.confirm()
+		}
 	}
+}
+
+func ownerDrawButtonClicked(notification uint16) bool {
+	return notification == bnClicked
 }
 
 func (p *picker) handleNotify(lParam unsafe.Pointer) {

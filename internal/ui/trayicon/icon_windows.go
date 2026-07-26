@@ -9,6 +9,9 @@ import (
 // Loads an icon resource embedded in the executable and shows it in the tray.
 // Shell_NotifyIcon: https://msdn.microsoft.com/en-us/library/windows/desktop/bb762159(v=vs.85).aspx
 func (t *winTray) setIcon(resourceID uint16) error {
+	if !t.uiAvailable() {
+		return errTrayUnavailable
+	}
 	side := t.desiredTrayIconSide()
 	width, height := uintptr(side), uintptr(side)
 	if err := t.setIconAtSize(resourceID, width, height); err != nil {
@@ -38,6 +41,9 @@ func (t *winTray) setIconAtSize(resourceID uint16, width, height uintptr) error 
 
 func (t *winTray) setIconAtSizeLocked(resourceID uint16, width, height uintptr) error {
 	const NIF_ICON = 0x00000002
+	if !t.uiAvailable() {
+		return errTrayUnavailable
+	}
 	key := loadedImageKey{resourceID: resourceID, width: uint32(width), height: uint32(height)}
 	if t.trayIconKey == key {
 		return nil
@@ -49,6 +55,9 @@ func (t *winTray) setIconAtSizeLocked(resourceID uint16, width, height uintptr) 
 
 	t.muNID.Lock()
 	defer t.muNID.Unlock()
+	if t.nid == nil {
+		return errTrayUnavailable
+	}
 	t.nid.Icon = h
 	t.nid.Flags |= NIF_ICON
 	t.nid.Size = uint32(unsafe.Sizeof(*t.nid))
@@ -237,7 +246,10 @@ func (t *winTray) removeNotificationIcon() {
 // Shell_NotifyIcon: https://msdn.microsoft.com/en-us/library/windows/desktop/bb762159(v=vs.85).aspx
 func (t *winTray) setTooltip(src string) error {
 	const NIF_TIP = 0x00000004
-	src = fitTooltip(src, len(t.nid.Tip)-1)
+	if !t.uiAvailable() {
+		return errTrayUnavailable
+	}
+	src = fitTooltip(src, len(notifyIconData{}.Tip)-1)
 	b, err := windows.UTF16FromString(src)
 	if err != nil {
 		return err
@@ -245,6 +257,9 @@ func (t *winTray) setTooltip(src string) error {
 
 	t.muNID.Lock()
 	defer t.muNID.Unlock()
+	if t.nid == nil {
+		return errTrayUnavailable
+	}
 	for i := range t.nid.Tip {
 		t.nid.Tip[i] = 0
 	}

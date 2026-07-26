@@ -498,6 +498,7 @@ func automationSectionControl(id uint16) bool {
 	}
 }
 func (p *panel) applyTheme() {
+	p.closeChoice(false)
 	p.themeDark = theme.Current() == theme.ModeDark
 	if p.themeOverride != nil {
 		p.themeDark = *p.themeOverride

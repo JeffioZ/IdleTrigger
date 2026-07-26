@@ -28,13 +28,14 @@ var (
 // when replaced or when the window is destroyed.
 type WindowIcons struct {
 	large, small windows.Handle
+	hwnd         windows.Handle
 	dark         bool
 	initialized  bool
 }
 
 // Apply refreshes the title-bar icon when the theme or DPI changes.
 func (i *WindowIcons) Apply(hwnd windows.Handle, dark bool, largeSize, smallSize int, force bool) {
-	if hwnd == 0 || (i.initialized && !force && i.dark == dark) {
+	if hwnd == 0 || (i.initialized && !force && i.hwnd == hwnd && i.dark == dark) {
 		return
 	}
 	module, _, _ := iconGetModuleHandle.Call(0)
@@ -56,24 +57,40 @@ func (i *WindowIcons) Apply(hwnd windows.Handle, dark bool, largeSize, smallSize
 		}
 		return
 	}
-	i.release()
+	oldWindow := i.hwnd
+	oldLarge, oldSmall := i.large, i.small
+	iconSendMessage.Call(uintptr(hwnd), wmSetIcon, iconBig, large)
+	iconSendMessage.Call(uintptr(hwnd), wmSetIcon, iconSmall, small)
+	if oldWindow != 0 && oldWindow != hwnd {
+		iconSendMessage.Call(uintptr(oldWindow), wmSetIcon, iconBig, 0)
+		iconSendMessage.Call(uintptr(oldWindow), wmSetIcon, iconSmall, 0)
+	}
 	i.large, i.small = windows.Handle(large), windows.Handle(small)
+	i.hwnd = hwnd
 	i.dark, i.initialized = dark, true
-	iconSendMessage.Call(uintptr(hwnd), wmSetIcon, iconBig, uintptr(i.large))
-	iconSendMessage.Call(uintptr(hwnd), wmSetIcon, iconSmall, uintptr(i.small))
+	destroyWindowIcons(oldLarge, oldSmall)
 }
 
 // Release frees every owned icon handle.
 func (i *WindowIcons) Release() {
+	if i.hwnd != 0 {
+		iconSendMessage.Call(uintptr(i.hwnd), wmSetIcon, iconBig, 0)
+		iconSendMessage.Call(uintptr(i.hwnd), wmSetIcon, iconSmall, 0)
+	}
 	i.release()
+	i.hwnd = 0
 	i.initialized = false
 }
 
 func (i *WindowIcons) release() {
-	for _, icon := range []windows.Handle{i.large, i.small} {
+	destroyWindowIcons(i.large, i.small)
+	i.large, i.small = 0, 0
+}
+
+func destroyWindowIcons(icons ...windows.Handle) {
+	for _, icon := range icons {
 		if icon != 0 {
 			iconDestroy.Call(uintptr(icon))
 		}
 	}
-	i.large, i.small = 0, 0
 }

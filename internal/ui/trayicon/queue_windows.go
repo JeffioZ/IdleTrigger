@@ -64,6 +64,12 @@ func WindowHandle() windows.Handle {
 	return wt.window
 }
 
+func (t *winTray) uiAvailable() bool {
+	t.muUITasks.Lock()
+	defer t.muUITasks.Unlock()
+	return t.window != 0 && !t.uiClosing
+}
+
 func (t *winTray) drainUITasks() {
 	t.muUITasks.Lock()
 	tasks := t.uiTasks
