@@ -12,6 +12,7 @@ import (
 	"time"
 
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
+	"github.com/JeffioZ/idletrigger/internal/wallclock"
 )
 
 type ScheduleInfo struct {
@@ -167,15 +168,11 @@ func (s *Scheduler) HoldManualOverride(now time.Time) {
 	if lightMin < 0 || darkMin < 0 {
 		return
 	}
-	y, m, d := now.Date()
-	today := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
 	var next time.Time
-	for _, candidate := range []time.Time{
-		today.Add(time.Duration(lightMin) * time.Minute),
-		today.Add(time.Duration(darkMin) * time.Minute),
-	} {
+	for _, minute := range []int{lightMin, darkMin} {
+		candidate := wallclock.At(now, minute)
 		if !candidate.After(now) {
-			candidate = candidate.AddDate(0, 0, 1)
+			candidate = wallclock.At(now.AddDate(0, 0, 1), minute)
 		}
 		if next.IsZero() || candidate.Before(next) {
 			next = candidate
@@ -202,10 +199,8 @@ func (s *Scheduler) check(now time.Time, cancel <-chan struct{}) {
 		return
 	}
 
-	y, m, d := now.Date()
-	today := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
-	lightToday := today.Add(time.Duration(lightMin) * time.Minute)
-	darkToday := today.Add(time.Duration(darkMin) * time.Minute)
+	lightToday := wallclock.At(now, lightMin)
+	darkToday := wallclock.At(now, darkMin)
 
 	var target Mode
 	if lightToday.Before(darkToday) {

@@ -247,6 +247,20 @@ func TestManualOverrideCrossesMidnightToNextTransition(t *testing.T) {
 	}
 }
 
+func TestManualOverrideUsesDSTTransitionDayWallClock(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("load DST location: %v", err)
+	}
+	s := NewScheduler("fixed", "07:00", "19:00", 0, 0, false, false)
+	now := time.Date(2026, 3, 8, 0, 30, 0, 0, loc)
+	s.HoldManualOverride(now)
+	want := time.Date(2026, 3, 8, 7, 0, 0, 0, loc)
+	if got := time.Unix(0, s.manualUntil.Load()); !got.Equal(want) {
+		t.Fatalf("manual override ends at %s, want %s", got, want)
+	}
+}
+
 func TestSwitchFailureLogDedupesUntilSuccess(t *testing.T) {
 	dir := t.TempDir()
 	mylog.Init(true, dir)

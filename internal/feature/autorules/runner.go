@@ -12,6 +12,7 @@ import (
 
 	"github.com/JeffioZ/idletrigger/internal/automation"
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/processcatalog"
+	"github.com/JeffioZ/idletrigger/internal/wallclock"
 )
 
 const (
@@ -138,7 +139,7 @@ type loopState struct {
 	counts          map[string]int
 	lastCounts      map[string]int
 	absentSince     map[string]time.Time
-	processKnown    bool
+	processKnown    bool // true only when the most recent process scan succeeded
 	previousRunning map[string]bool
 	pending         map[string]pendingEvent
 	lastEffective   EffectiveState
@@ -178,7 +179,7 @@ func (r *Runner) step(now time.Time, state *loopState, forceScan bool) {
 		}
 		state.lastProcessScan = now
 	}
-	effective := r.evaluateState(now, state.counts)
+	effective := r.evaluateState(now, state.counts, state.processKnown)
 	if !state.effectiveKnown || !reflect.DeepEqual(effective, state.lastEffective) {
 		state.lastEffective = effective
 		state.effectiveKnown = true
@@ -199,6 +200,7 @@ func (r *Runner) scanProcesses(now time.Time, state *loopState) error {
 		state.processKnown = true
 		return nil
 	}
+	state.processKnown = false
 	instances, err := processcatalog.SnapshotNames()
 	if err != nil {
 		return err
@@ -259,10 +261,14 @@ func stabilizeCounts(now time.Time, targets []automation.ProcessTarget, raw map[
 	return stable
 }
 
-func (r *Runner) evaluateState(now time.Time, counts map[string]int) EffectiveState {
+func (r *Runner) evaluateState(now time.Time, counts map[string]int, processKnown bool) EffectiveState {
 	result := EffectiveState{IdleMinutes: automation.DefaultIdleMinutes}
+	idleMinutesSet := false
 	for _, rule := range r.rules {
-		if !rule.Enabled || !automation.IsStateAction(rule.Action) || !stateRuleActive(rule, now, counts) {
+		if !rule.Enabled ||
+			!automation.IsStateAction(rule.Action) ||
+			!canEvaluateProcessCondition(rule, processKnown) ||
+			!stateRuleActive(rule, now, counts) {
 			continue
 		}
 		result.ActiveRuleIDs = append(result.ActiveRuleIDs, rule.ID)
@@ -274,8 +280,9 @@ func (r *Runner) evaluateState(now time.Time, counts map[string]int) EffectiveSt
 			result.PauseStayAwake = true
 		case automation.ActionEnableIdle:
 			result.EnableIdle = true
-			if rule.IdleMinutes > 0 && (result.IdleMinutes == automation.DefaultIdleMinutes || rule.IdleMinutes < result.IdleMinutes) {
+			if rule.IdleMinutes > 0 && (!idleMinutesSet || rule.IdleMinutes < result.IdleMinutes) {
 				result.IdleMinutes = rule.IdleMinutes
+				idleMinutesSet = true
 			}
 		case automation.ActionPauseIdle:
 			result.PauseIdle = true
@@ -296,7 +303,7 @@ func (r *Runner) evaluateEvents(now time.Time, state *loopState) {
 			r.markOccurrence(pending.rule.ID, pending.occurrence)
 			continue
 		}
-		if processCondition(pending.rule, state.counts) {
+		if canEvaluateProcessCondition(pending.rule, state.processKnown) && processCondition(pending.rule, state.counts) {
 			delete(state.pending, key)
 			r.fire(pending.rule, pending.occurrence)
 		}
@@ -309,10 +316,16 @@ func (r *Runner) evaluateEvents(now time.Time, state *loopState) {
 			continue
 		}
 		if rule.Trigger == automation.TriggerProcessStarted || rule.Trigger == automation.TriggerProcessExited {
+			// A failed initial process scan must not establish an artificial
+			// "not running" baseline. The first successful snapshot only seeds
+			// previousRunning; transitions begin with later snapshots.
+			if !state.processKnown {
+				continue
+			}
 			any := anyTargetRunning(rule.Processes, state.counts)
 			previous, known := state.previousRunning[rule.ID]
 			state.previousRunning[rule.ID] = any
-			if state.processKnown && known {
+			if known {
 				if rule.Trigger == automation.TriggerProcessStarted && !previous && any {
 					r.fire(rule, "process-started:"+now.Format(time.RFC3339))
 				}
@@ -329,7 +342,7 @@ func (r *Runner) evaluateEvents(now time.Time, state *loopState) {
 		if !due || r.lastOccurrences[rule.ID] == occurrence {
 			continue
 		}
-		if processCondition(rule, state.counts) {
+		if canEvaluateProcessCondition(rule, state.processKnown) && processCondition(rule, state.counts) {
 			r.fire(rule, occurrence)
 			continue
 		}
@@ -412,6 +425,10 @@ func processCondition(rule automation.Rule, counts map[string]int) bool {
 	}
 }
 
+func canEvaluateProcessCondition(rule automation.Rule, processKnown bool) bool {
+	return len(rule.Processes) == 0 || processKnown
+}
+
 func anyTargetRunning(targets []automation.ProcessTarget, counts map[string]int) bool {
 	for _, target := range targets {
 		if counts[target.Key()] > 0 {
@@ -460,7 +477,7 @@ func scheduledOccurrence(rule automation.Rule, now time.Time) (string, bool) {
 	if rule.Trigger == automation.TriggerWeekly && !containsDay(rule.Days, automation.WeekdayKey(now.Weekday())) {
 		return "", false
 	}
-	candidate := time.Date(now.Year(), now.Month(), now.Day(), parsed.Hour(), parsed.Minute(), 0, 0, now.Location())
+	candidate := wallclock.At(now, parsed.Hour()*60+parsed.Minute())
 	return date + "T" + rule.Time, !now.Before(candidate) && now.Before(candidate.Add(scheduleDueGrace))
 }
 
@@ -480,7 +497,7 @@ func nextScheduled(rules []automation.Rule, now time.Time) (string, time.Time) {
 			if err != nil {
 				continue
 			}
-			candidate := time.Date(date.Year(), date.Month(), date.Day(), parsed.Hour(), parsed.Minute(), 0, 0, now.Location())
+			candidate := wallclock.At(date, parsed.Hour()*60+parsed.Minute())
 			if candidate.After(now) && (next.IsZero() || candidate.Before(next)) {
 				next, id = candidate, rule.ID
 			}
@@ -488,14 +505,11 @@ func nextScheduled(rules []automation.Rule, now time.Time) (string, time.Time) {
 		}
 		for offset := 0; offset <= 7; offset++ {
 			day := now.AddDate(0, 0, offset)
-			candidate := time.Date(day.Year(), day.Month(), day.Day(), parsed.Hour(), parsed.Minute(), 0, 0, now.Location())
+			candidate := wallclock.At(day, parsed.Hour()*60+parsed.Minute())
 			if !candidate.After(now) {
 				continue
 			}
-			if rule.Trigger == automation.TriggerOnce && candidate.Format("2006-01-02") != rule.Date {
-				continue
-			}
-			if rule.Trigger == automation.TriggerWeekly && !containsDay(rule.Days, automation.WeekdayKey(candidate.Weekday())) {
+			if rule.Trigger == automation.TriggerWeekly && !containsDay(rule.Days, automation.WeekdayKey(day.Weekday())) {
 				continue
 			}
 			if next.IsZero() || candidate.Before(next) {
