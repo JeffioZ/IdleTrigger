@@ -60,6 +60,8 @@ type runtimeState struct {
 	devtools  devtools.Config
 	requestCh chan runtimeRequest
 
+	loggingActive bool
+
 	mon *idle.Monitor // Owned by the serialized request loop; callbacks use post before accessing it.
 
 	hotkeyMgr             *hotkey.Manager
@@ -99,11 +101,12 @@ func Run(cfg config.Config, cbs Callbacks) {
 	})
 
 	s := &runtimeState{
-		cfg:       cfg,
-		lang:      cfg.Language,
-		callbacks: cbs,
-		devtools:  cbs.DeveloperTools,
-		requestCh: make(chan runtimeRequest, 64),
+		cfg:           cfg,
+		lang:          cfg.Language,
+		callbacks:     cbs,
+		devtools:      cbs.DeveloperTools,
+		requestCh:     make(chan runtimeRequest, 64),
+		loggingActive: cfg.LoggingEnabled || cbs.DeveloperTools.ForceLog,
 	}
 	s.detectThemeSupport()
 	stateReady := make(chan struct{})
@@ -179,6 +182,10 @@ func Run(cfg config.Config, cbs Callbacks) {
 		}()
 		s.syncBatteryLoop()
 		go s.watchConfig()
+		if s.cfg.LoadError != "" {
+			loadError := s.cfg.LoadError
+			trayicon.Post(func() { s.warnConfigLoadError(loadError) })
+		}
 		if cbs.ShowControlPanelOnStart {
 			trayicon.Post(s.showControlPanel)
 		}

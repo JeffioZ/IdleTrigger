@@ -28,6 +28,7 @@ func (s *runtimeState) reloadConfig() error {
 		return err
 	}
 	s.cfg = newCfg
+	s.applyLogging()
 	s.detectThemeSupport()
 	if enabled, updated, err := autostart.EnsureCurrent(); err == nil {
 		s.cfg.AutostartEnabled = enabled
@@ -254,7 +255,18 @@ func (s *runtimeState) saveConfig() {
 }
 
 func (s *runtimeState) warnConfigSaveError(err error) {
+	if errors.Is(err, config.ErrConfigRecoveryRequired) {
+		msg := i18n.T(s.lang, "warning_config_recovery") + "\n\n" + err.Error()
+		dialog.Warn(i18n.T(s.lang, "app_title"), "", msg)
+		return
+	}
 	msg := fmt.Sprintf(i18n.T(s.lang, "msg_config_save_failed"), err.Error())
+	dialog.Warn(i18n.T(s.lang, "app_title"), "", msg)
+}
+
+func (s *runtimeState) warnConfigLoadError(loadError string) {
+	msg := i18n.T(s.lang, "warning_config_defaults") + "\n" +
+		i18n.T(s.lang, "warning_config_recovery") + "\n\n" + loadError
 	dialog.Warn(i18n.T(s.lang, "app_title"), "", msg)
 }
 

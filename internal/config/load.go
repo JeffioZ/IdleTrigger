@@ -25,7 +25,9 @@ func Path() (string, error) {
 func Load() (Config, error) {
 	p, err := Path()
 	if err != nil {
-		return DefaultConfig(), err
+		cfg := DefaultConfig()
+		cfg.LoadError = err.Error()
+		return cfg, err
 	}
 	return loadFrom(p)
 }
@@ -35,26 +37,34 @@ func loadFrom(p string) (Config, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if saveErr := saveTo(p, cfg); saveErr != nil {
+			revision, saveErr := saveToAtRevision(p, cfg, "")
+			if saveErr != nil {
+				cfg.LoadError = saveErr.Error()
 				return cfg, saveErr
 			}
-			if saved, readErr := os.ReadFile(p); readErr == nil {
-				cfg.SourceRevision = configRevision(saved)
-			}
+			cfg.SourceRevision = revision
 			return cfg, nil
 		}
-		return cfg, fmt.Errorf("read config: %w", err)
+		loadErr := fmt.Errorf("read config: %w", err)
+		cfg.LoadError = loadErr.Error()
+		return cfg, loadErr
 	}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return DefaultConfig(), fmt.Errorf("parse config: %w", err)
+		loadErr := fmt.Errorf("parse config: %w", err)
+		cfg = DefaultConfig()
+		cfg.SourceRevision = configRevision(data)
+		cfg.LoadError = loadErr.Error()
+		return cfg, loadErr
 	}
 	normalized := NormalizeConfig(cfg)
 	normalized.SourceRevision = configRevision(data)
 	normalizedDisk, originalDisk := normalized, cfg
 	normalizedDisk.AutomationIssues = nil
 	normalizedDisk.SourceRevision = ""
+	normalizedDisk.LoadError = ""
 	originalDisk.AutomationIssues = nil
 	originalDisk.SourceRevision = ""
+	originalDisk.LoadError = ""
 	corrected := !reflect.DeepEqual(normalizedDisk, originalDisk)
 	// Invalid automatic-task rules are kept on disk byte-for-byte. The runtime
 	// disables only those rules and the manager exposes their diagnostics; a
@@ -62,18 +72,23 @@ func loadFrom(p string) (Config, error) {
 	if len(normalized.AutomationIssues) > 0 {
 		return normalized, nil
 	}
-	if corrected {
+	refreshAnnotations := needsAnnotatedTOMLRefresh(data)
+	rewrite := refreshAnnotations || corrected
+	if rewrite {
 		if err := os.WriteFile(p+".bak", data, 0600); err != nil {
-			return normalized, fmt.Errorf("back up corrected config: %w", err)
+			loadErr := fmt.Errorf("back up config before refresh: %w", err)
+			normalized.LoadError = loadErr.Error()
+			return normalized, loadErr
 		}
 	}
-	if needsAnnotatedTOMLRefresh(data) || corrected {
-		if err := saveTo(p, normalized); err != nil {
-			return normalized, fmt.Errorf("refresh config annotations: %w", err)
+	if rewrite {
+		revision, err := saveToAtRevision(p, normalized, normalized.SourceRevision)
+		if err != nil {
+			loadErr := fmt.Errorf("refresh config annotations: %w", err)
+			normalized.LoadError = loadErr.Error()
+			return normalized, loadErr
 		}
-		if saved, err := os.ReadFile(p); err == nil {
-			normalized.SourceRevision = configRevision(saved)
-		}
+		normalized.SourceRevision = revision
 	}
 	return normalized, nil
 }

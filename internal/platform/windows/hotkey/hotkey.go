@@ -4,7 +4,6 @@ package hotkey
 import (
 	"runtime"
 	"sync"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -22,14 +21,14 @@ type Binding struct {
 	VK       uint32
 	Modifier uint32
 	Action   Action
-	Label    string // "Win+Shift+S"
+	Label    string // "Ctrl+Win+Shift+S"
 }
 
 type Manager struct {
 	bindings  []Binding
-	hwnd      windows.Handle
 	mu        sync.Mutex
 	threadID  uint32
+	readyCh   chan struct{}
 	doneCh    chan struct{}
 	started   bool
 	callbacks Callbacks
@@ -44,46 +43,27 @@ type Callbacks struct {
 type Failed []string
 
 const (
-	modAlt    = 0x0001
-	modCtrl   = 0x0002
-	modShift  = 0x0004
-	modWin    = 0x0008
-	wmHotkey  = 0x0312
-	className = "IdleTriggerHotkey"
+	modAlt      = 0x0001
+	modCtrl     = 0x0002
+	modShift    = 0x0004
+	modWin      = 0x0008
+	modNoRepeat = 0x4000
+	wmHotkey    = 0x0312
+	wmQuit      = 0x0012
+	wmUser      = 0x0400
+	pmNoRemove  = 0x0000
 )
 
 var (
-	user32   = windows.NewLazySystemDLL("user32.dll")
-	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
-
-	pRegisterClassEx    = user32.NewProc("RegisterClassExW")
-	pCreateWindowEx     = user32.NewProc("CreateWindowExW")
+	user32              = windows.NewLazySystemDLL("user32.dll")
+	kernel32            = windows.NewLazySystemDLL("kernel32.dll")
 	pRegisterHotKey     = user32.NewProc("RegisterHotKey")
 	pGetMessage         = user32.NewProc("GetMessageW")
-	pDispatchMessage    = user32.NewProc("DispatchMessageW")
+	pPeekMessage        = user32.NewProc("PeekMessageW")
 	pUnregisterHotKey   = user32.NewProc("UnregisterHotKey")
-	pDestroyWindow      = user32.NewProc("DestroyWindow")
-	pUnregisterClass    = user32.NewProc("UnregisterClassW")
 	pPostThreadMessage  = user32.NewProc("PostThreadMessageW")
-	pDefWindowProc      = user32.NewProc("DefWindowProcW")
-	pGetModuleHandle    = kernel32.NewProc("GetModuleHandleW")
 	pGetCurrentThreadID = kernel32.NewProc("GetCurrentThreadId")
 )
-
-type wndClassExW struct {
-	Size       uint32
-	Style      uint32
-	WndProc    uintptr
-	ClsExtra   int32
-	WndExtra   int32
-	Instance   windows.Handle
-	Icon       windows.Handle
-	Cursor     windows.Handle
-	Background windows.Handle
-	MenuName   *uint16
-	ClassName  *uint16
-	IconSm     windows.Handle
-}
 
 type msg struct {
 	Hwnd    windows.Handle
@@ -96,9 +76,9 @@ type msg struct {
 
 func DefaultBindings() []Binding {
 	return []Binding{
-		{VK: 'S', Modifier: modWin | modShift, Action: ActionSleep, Label: "Win+Shift+S"},
-		{VK: 'L', Modifier: modWin | modShift, Action: ActionLock, Label: "Win+Shift+L"},
-		{VK: 'N', Modifier: modWin | modShift, Action: ActionToggleNoSleep, Label: "Win+Shift+N"},
+		{VK: 'S', Modifier: modCtrl | modWin | modShift | modNoRepeat, Action: ActionSleep, Label: "Ctrl+Win+Shift+S"},
+		{VK: 'L', Modifier: modWin | modShift | modNoRepeat, Action: ActionLock, Label: "Win+Shift+L"},
+		{VK: 'N', Modifier: modWin | modShift | modNoRepeat, Action: ActionToggleNoSleep, Label: "Win+Shift+N"},
 	}
 }
 
@@ -109,43 +89,12 @@ func NewManager(bindings []Binding, cbs Callbacks) *Manager {
 	}
 }
 
-// Register creates the message-only window and calls RegisterHotKey for each
-// binding.  Returns labels for any that failed (conflict with another app).
+// Register calls RegisterHotKey for the current thread. It must run on the
+// locked thread whose message queue is pumped by Run.
 func (m *Manager) Register() Failed {
-	classNamePtr, err := syscall.UTF16PtrFromString(className)
-	if err != nil {
-		return failedBindings(m.bindings)
-	}
-	hInst, _, _ := pGetModuleHandle.Call(0)
-	if hInst == 0 {
-		return failedBindings(m.bindings)
-	}
-
-	var wc wndClassExW
-	wc.Size = uint32(unsafe.Sizeof(wc))
-	wc.WndProc = windows.NewCallback(m.wndProc)
-	wc.Instance = windows.Handle(hInst)
-	wc.ClassName = classNamePtr
-
-	if registered, _, callErr := pRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); registered == 0 && callErr != windows.ERROR_CLASS_ALREADY_EXISTS {
-		return failedBindings(m.bindings)
-	}
-
-	const wsOverlapped = 0
-	const hwndMessage = ^uintptr(0)
-	ret, _, _ := pCreateWindowEx.Call(
-		0, uintptr(unsafe.Pointer(classNamePtr)), 0,
-		uintptr(wsOverlapped), 0, 0, 0, 0,
-		hwndMessage, 0, hInst, 0,
-	)
-	m.hwnd = windows.Handle(ret)
-	if m.hwnd == 0 {
-		return failedBindings(m.bindings)
-	}
-
 	var failed Failed
 	for i, b := range m.bindings {
-		r, _, _ := pRegisterHotKey.Call(uintptr(m.hwnd), uintptr(i), uintptr(b.Modifier), uintptr(b.VK))
+		r, _, _ := pRegisterHotKey.Call(0, uintptr(i), uintptr(b.Modifier), uintptr(b.VK))
 		if r == 0 {
 			failed = append(failed, b.Label)
 		}
@@ -155,15 +104,17 @@ func (m *Manager) Register() Failed {
 
 // Run enters the message pump; blocks until Stop().
 func (m *Manager) Run() {
-	msg2 := &msg{}
+	var message msg
 	for {
 		// GetMessage blocks until a message arrives. Stop posts WM_QUIT to this
 		// thread, which makes GetMessage return 0 and exit the loop naturally.
-		r, _, _ := pGetMessage.Call(uintptr(unsafe.Pointer(msg2)), 0, 0, 0)
+		r, _, _ := pGetMessage.Call(uintptr(unsafe.Pointer(&message)), 0, 0, 0)
 		if r == 0 || r == ^uintptr(0) {
 			return
 		}
-		_, _, _ = pDispatchMessage.Call(uintptr(unsafe.Pointer(msg2)))
+		if message.Message == wmHotkey {
+			m.dispatch(int(message.WParam))
+		}
 	}
 }
 
@@ -177,7 +128,9 @@ func (m *Manager) Start() Failed {
 		return nil
 	}
 	m.started = true
+	m.readyCh = make(chan struct{})
 	m.doneCh = make(chan struct{})
+	readyCh := m.readyCh
 	doneCh := m.doneCh
 	m.mu.Unlock()
 
@@ -187,28 +140,32 @@ func (m *Manager) Start() Failed {
 		defer runtime.UnlockOSThread()
 		defer close(doneCh)
 
+		// A thread does not have a message queue until it calls a User32 queue
+		// function. Create it before publishing the thread ID so Stop can always
+		// use PostThreadMessage safely.
+		var message msg
+		_, _, _ = pPeekMessage.Call(
+			uintptr(unsafe.Pointer(&message)),
+			0,
+			uintptr(wmUser),
+			uintptr(wmUser),
+			uintptr(pmNoRemove),
+		)
 		tid, _, _ := pGetCurrentThreadID.Call()
 		m.mu.Lock()
 		m.threadID = uint32(tid)
 		m.mu.Unlock()
+		close(readyCh)
 
 		failed := m.Register()
 		resultCh <- failed
 
-		// Run message pump on this same thread, then clean up.
-		if m.hwnd != 0 {
-			m.Run()
-
-			// Unregister hotkeys and destroy window on this thread.
-			for i := range m.bindings {
-				_, _, _ = pUnregisterHotKey.Call(uintptr(m.hwnd), uintptr(i))
-			}
-			_, _, _ = pDestroyWindow.Call(uintptr(m.hwnd))
-			m.hwnd = 0
+		// Run the message pump and clean up on the same thread that registered
+		// the thread-scoped hotkeys.
+		m.Run()
+		for i := range m.bindings {
+			_, _, _ = pUnregisterHotKey.Call(0, uintptr(i))
 		}
-		classNamePtr, _ := syscall.UTF16PtrFromString(className)
-		hInst, _, _ := pGetModuleHandle.Call(0)
-		_, _, _ = pUnregisterClass.Call(uintptr(unsafe.Pointer(classNamePtr)), hInst)
 		m.mu.Lock()
 		m.threadID = 0
 		m.started = false
@@ -221,17 +178,22 @@ func (m *Manager) Start() Failed {
 // Start()'s goroutine on the same OS thread.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	tid := m.threadID
+	readyCh := m.readyCh
 	doneCh := m.doneCh
 	started := m.started
 	m.mu.Unlock()
-	if !started || doneCh == nil {
+	if !started || readyCh == nil || doneCh == nil {
 		return
 	}
+
+	<-readyCh
+	m.mu.Lock()
+	tid := m.threadID
+	m.mu.Unlock()
 	if tid == 0 {
+		<-doneCh
 		return
 	}
-	const wmQuit = 0x0012
 	posted, _, _ := pPostThreadMessage.Call(uintptr(tid), uintptr(wmQuit), 0, 0)
 	if posted == 0 {
 		// Avoid deadlocking shutdown if the thread is already exiting or its
@@ -241,35 +203,22 @@ func (m *Manager) Stop() {
 	<-doneCh
 }
 
-func (m *Manager) wndProc(hwnd windows.Handle, msg2 uint32, wParam, lParam uintptr) uintptr {
-	if msg2 == wmHotkey {
-		id := int(wParam)
-		if id >= 0 && id < len(m.bindings) {
-			switch m.bindings[id].Action {
-			case ActionSleep:
-				if m.callbacks.OnSleep != nil {
-					m.callbacks.OnSleep()
-				}
-			case ActionLock:
-				if m.callbacks.OnLock != nil {
-					m.callbacks.OnLock()
-				}
-			case ActionToggleNoSleep:
-				if m.callbacks.OnToggleNoSleep != nil {
-					m.callbacks.OnToggleNoSleep()
-				}
-			}
+func (m *Manager) dispatch(id int) {
+	if id < 0 || id >= len(m.bindings) {
+		return
+	}
+	switch m.bindings[id].Action {
+	case ActionSleep:
+		if m.callbacks.OnSleep != nil {
+			m.callbacks.OnSleep()
 		}
-		return 0
+	case ActionLock:
+		if m.callbacks.OnLock != nil {
+			m.callbacks.OnLock()
+		}
+	case ActionToggleNoSleep:
+		if m.callbacks.OnToggleNoSleep != nil {
+			m.callbacks.OnToggleNoSleep()
+		}
 	}
-	r, _, _ := pDefWindowProc.Call(uintptr(hwnd), uintptr(msg2), wParam, lParam)
-	return r
-}
-
-func failedBindings(bindings []Binding) Failed {
-	failed := make(Failed, 0, len(bindings))
-	for _, binding := range bindings {
-		failed = append(failed, binding.Label)
-	}
-	return failed
 }

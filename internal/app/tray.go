@@ -34,10 +34,13 @@ func (s *runtimeState) buildTooltip() string {
 	lines = append(lines, s.statusLine("tooltip_nosleep", shortStatus(s.lang, keepawake.IsEnabled())))
 	if s.idleSuspended() {
 		lines = append(lines, s.statusLine("tooltip_idle", i18n.T(s.lang, "status_paused")))
+	} else if s.idleAutomationPaused() {
+		lines = append(lines, s.statusLine("tooltip_idle", i18n.T(s.lang, "status_paused")))
 	} else if s.devtools.IdleMonitorEnabled() && s.mon != nil {
 		lines = append(lines, s.statusLine("tooltip_idle", s.developerIdleMonitorStatus()))
-	} else if s.cfg.IdleTimeoutMinutes > 0 {
-		lines = append(lines, s.statusLine("tooltip_idle", fmt.Sprintf("%d%s %s", s.cfg.IdleTimeoutMinutes, shortMinuteUnit(s.lang), i18n.T(s.lang, actionTranslationKey(s.cfg.IdleAction)))))
+	} else if s.mon != nil {
+		threshold, _, action, _ := s.effectiveIdleMonitorSettings()
+		lines = append(lines, s.statusLine("tooltip_idle", fmt.Sprintf("%d%s %s", int(threshold/time.Minute), shortMinuteUnit(s.lang), i18n.T(s.lang, actionTranslationKey(action)))))
 	} else {
 		lines = append(lines, s.statusLine("tooltip_idle", shortStatus(s.lang, false)))
 	}

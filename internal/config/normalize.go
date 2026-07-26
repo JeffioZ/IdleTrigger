@@ -2,9 +2,10 @@ package config
 
 import (
 	"fmt"
-	"github.com/JeffioZ/idletrigger/internal/automation"
 	"math"
 	"time"
+
+	"github.com/JeffioZ/idletrigger/internal/automation"
 )
 
 // NormalizeConfig returns a copy of cfg with invalid fields replaced by defaults.
@@ -47,6 +48,9 @@ func NormalizeConfig(cfg Config) Config {
 // Validate checks values that can otherwise lead to unsafe or surprising
 // runtime behavior.
 func (cfg Config) Validate() error {
+	if cfg.LoadError != "" {
+		return fmt.Errorf("%w: %s", ErrConfigRecoveryRequired, cfg.LoadError)
+	}
 	switch cfg.Language {
 	case "auto", "en", "zh-CN":
 	default:

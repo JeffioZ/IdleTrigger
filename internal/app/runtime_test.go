@@ -96,6 +96,74 @@ func TestDeveloperIdleMonitorStillRespectsStayAwakeMutualExclusion(t *testing.T)
 	}
 }
 
+func TestEffectiveLoggingSeparatesConfiguredAndForcedState(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured bool
+		forced     bool
+		want       bool
+	}{
+		{name: "disabled", want: false},
+		{name: "configured", configured: true, want: true},
+		{name: "forced", forced: true, want: true},
+		{name: "both", configured: true, forced: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.LoggingEnabled = test.configured
+			state := runtimeState{
+				cfg:      cfg,
+				devtools: devtools.Config{ForceLog: test.forced},
+			}
+			if got := state.effectiveLoggingEnabled(); got != test.want {
+				t.Fatalf("effectiveLoggingEnabled() = %v, want %v", got, test.want)
+			}
+			if state.cfg.LoggingEnabled != test.configured {
+				t.Fatal("forced logging changed the persisted configuration")
+			}
+		})
+	}
+}
+
+func TestConfigWatchDecisionRetriesUntilReloadSucceeds(t *testing.T) {
+	lastMod := time.Unix(100, 0)
+	modTime := lastMod.Add(time.Second)
+
+	reload, nextLastMod := configWatchDecision(lastMod, modTime, false, 0)
+	if !reload || !nextLastMod.Equal(lastMod) {
+		t.Fatalf("first decision = reload %v, mod %v", reload, nextLastMod)
+	}
+
+	// A failed reload leaves lastMod unchanged, so the same file revision is
+	// offered again on the next poll.
+	reload, nextLastMod = configWatchDecision(nextLastMod, modTime, false, 0)
+	if !reload || !nextLastMod.Equal(lastMod) {
+		t.Fatalf("retry decision = reload %v, mod %v", reload, nextLastMod)
+	}
+
+	// The caller advances the watermark only after a successful reload.
+	lastMod = modTime
+	reload, nextLastMod = configWatchDecision(lastMod, modTime, false, 0)
+	if reload || !nextLastMod.Equal(lastMod) {
+		t.Fatalf("settled decision = reload %v, mod %v", reload, nextLastMod)
+	}
+}
+
+func TestConfigWatchDecisionDefersAndThenConsumesSelfWrite(t *testing.T) {
+	lastMod := time.Unix(100, 0)
+	modTime := lastMod.Add(time.Second)
+
+	reload, nextLastMod := configWatchDecision(lastMod, modTime, true, 0)
+	if reload || !nextLastMod.Equal(lastMod) {
+		t.Fatalf("in-flight self-write decision = reload %v, mod %v", reload, nextLastMod)
+	}
+
+	reload, nextLastMod = configWatchDecision(nextLastMod, modTime, false, modTime.UnixNano())
+	if reload || !nextLastMod.Equal(modTime) {
+		t.Fatalf("completed self-write decision = reload %v, mod %v", reload, nextLastMod)
+	}
+}
+
 func TestBatteryLoopIsLazy(t *testing.T) {
 	s := &runtimeState{
 		cfg:       config.DefaultConfig(),
@@ -449,6 +517,23 @@ func TestAutomaticIdleStatusUsesEffectiveDuration(t *testing.T) {
 	}
 	if got := state.monitorStatusText(); got != "45 分钟 → 锁定" {
 		t.Fatalf("automatic idle status = %q", got)
+	}
+	if got := state.buildTooltip(); !strings.Contains(got, "空闲监测：45分 锁定") {
+		t.Fatalf("automatic idle tooltip should use effective settings: %q", got)
+	}
+}
+
+func TestAutomaticIdlePauseIsVisibleInTooltip(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Language = "zh-CN"
+	cfg.IdleTimeoutMinutes = 30
+	state := runtimeState{
+		cfg:       cfg,
+		lang:      "zh-CN",
+		autoState: autorules.EffectiveState{PauseIdle: true},
+	}
+	if got := state.buildTooltip(); !strings.Contains(got, "空闲监测：已暂停") {
+		t.Fatalf("automatic idle pause missing from tooltip: %q", got)
 	}
 }
 

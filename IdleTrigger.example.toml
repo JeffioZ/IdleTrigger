@@ -1,7 +1,7 @@
 # IdleTrigger 配置示例 / Configuration Example
 # 复制为 IdleTrigger.toml 放在 EXE 同目录即可生效
 # Copy to IdleTrigger.toml next to the EXE to apply
-# config_template_version = 12
+# config_template_version = 13
 
 # -- 保持唤醒 / Stay Awake --
 # 手动启用保持唤醒，阻止系统自动睡眠 / Manually keep the system awake and prevent automatic sleep
@@ -52,7 +52,7 @@ theme_dark_on_battery = true
 theme_skip_fullscreen = true
 
 # -- 设置 / Settings --
-# 启用全局热键：Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake
+# 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake
 hotkeys_enabled = false
 # 将调试日志写入 EXE 同目录的 IdleTrigger.log；每行带启动会话标识 / Write debug logs to IdleTrigger.log next to the EXE; each line includes a startup session ID
 logging_enabled = false

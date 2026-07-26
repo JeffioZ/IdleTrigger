@@ -77,7 +77,6 @@ func main() {
 	configLoadErr := err
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("auto", "warning_config_defaults"), err)
-		cfg = config.DefaultConfig()
 	}
 
 	if isCLI {
@@ -96,10 +95,7 @@ func main() {
 	if exePath, err := os.Executable(); err == nil {
 		exeDir = filepath.Dir(exePath)
 	}
-	if developerTools.ForceLog {
-		cfg.LoggingEnabled = true
-	}
-	mylog.Init(cfg.LoggingEnabled, exeDir)
+	mylog.Init(cfg.LoggingEnabled || developerTools.ForceLog, exeDir)
 	defer mylog.Close()
 	mylog.Info("IdleTrigger starting: version=%s mode=GUI", version.Value)
 	if developerTools.Enabled {
@@ -118,7 +114,10 @@ func main() {
 	if startupDelay > 0 {
 		time.Sleep(time.Duration(startupDelay) * time.Second)
 	}
-	app.Run(cfg, app.Callbacks{ShowControlPanelOnStart: !startMinimized, DeveloperTools: developerTools})
+	app.Run(cfg, app.Callbacks{
+		ShowControlPanelOnStart: !startMinimized,
+		DeveloperTools:          developerTools,
+	})
 }
 
 func enableConsoleOutput() {

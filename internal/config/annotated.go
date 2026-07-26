@@ -66,7 +66,7 @@ func renderAnnotatedTOML(cfg Config) string {
 	fmt.Fprintf(&b, "theme_skip_fullscreen = %t\n\n", cfg.ThemeSkipFullscreen)
 
 	b.WriteString("# -- 设置 / Settings --\n")
-	b.WriteString("# 启用全局热键：Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake\n")
+	b.WriteString("# 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake\n")
 	fmt.Fprintf(&b, "hotkeys_enabled = %t\n", cfg.HotkeysEnabled)
 	b.WriteString("# 将调试日志写入 EXE 同目录的 IdleTrigger.log；每行带启动会话标识 / Write debug logs to IdleTrigger.log next to the EXE; each line includes a startup session ID\n")
 	fmt.Fprintf(&b, "logging_enabled = %t\n", cfg.LoggingEnabled)
@@ -83,7 +83,34 @@ func renderAnnotatedTOML(cfg Config) string {
 }
 
 func tomlString(value string) string {
-	return strconv.Quote(value)
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 func tomlStringList(values []string) string {

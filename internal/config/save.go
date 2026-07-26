@@ -9,13 +9,13 @@ import (
 	"strconv"
 )
 
-var ErrConfigChanged = errors.New("configuration changed on disk")
+var (
+	ErrConfigChanged          = errors.New("configuration changed on disk")
+	ErrConfigRecoveryRequired = errors.New("configuration must be repaired and reloaded before it can be saved")
+)
 
 // Save atomically writes the configuration to disk.
 func Save(cfg Config) error {
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
 	p, err := Path()
 	if err != nil {
 		return err
@@ -27,9 +27,6 @@ func Save(cfg Config) error {
 // matches the revision that was loaded by the caller. It closes the stale UI
 // snapshot window without relying on the polling config watcher.
 func SaveAtRevision(cfg Config, expectedRevision string) (string, error) {
-	if err := cfg.Validate(); err != nil {
-		return "", err
-	}
 	p, err := Path()
 	if err != nil {
 		return "", err
@@ -43,6 +40,9 @@ func saveTo(p string, cfg Config) error {
 }
 
 func saveToAtRevision(p string, cfg Config, expectedRevision string) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", err
+	}
 	f, err := os.CreateTemp(filepath.Dir(p), ".IdleTrigger-*.toml.tmp")
 	if err != nil {
 		return "", fmt.Errorf("create temporary config file: %w", err)

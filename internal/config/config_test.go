@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -54,6 +55,19 @@ func TestIdleActionIndexRoundTrip(t *testing.T) {
 func TestDefaultConfigValid(t *testing.T) {
 	if err := DefaultConfig().Validate(); err != nil {
 		t.Fatalf("default config must be valid: %v", err)
+	}
+}
+
+func TestHotkeyDocumentationTemplateVersion(t *testing.T) {
+	if configTemplateVersion < 13 {
+		t.Fatalf("config template version = %d; Ctrl+Win+Shift+S documentation requires version 13 or later", configTemplateVersion)
+	}
+	cfg := DefaultConfig()
+	if cfg.HotkeysEnabled {
+		t.Fatal("global hotkeys must remain opt-in by default")
+	}
+	if text := renderAnnotatedTOML(cfg); !strings.Contains(text, "Ctrl+Win+Shift+S") {
+		t.Fatal("annotated configuration does not document the current sleep hotkey")
 	}
 }
 
@@ -214,6 +228,23 @@ func TestSaveToWritesAnnotatedConfigThatParses(t *testing.T) {
 	}
 }
 
+func TestTOMLStringUsesTOMLEscapesForControlCharacters(t *testing.T) {
+	want := "bell:\a vertical-tab:\v"
+	encoded := "value = " + tomlString(want)
+	if strings.Contains(encoded, `\a`) || strings.Contains(encoded, `\v`) {
+		t.Fatalf("TOML contains Go-only escapes: %q", encoded)
+	}
+	var decoded struct {
+		Value string `toml:"value"`
+	}
+	if err := toml.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("parse encoded TOML: %v", err)
+	}
+	if decoded.Value != want {
+		t.Fatalf("decoded value = %q, want %q", decoded.Value, want)
+	}
+}
+
 func TestLoadFromRefreshesExistingPlainConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
 	plain := strings.Join([]string{
@@ -292,6 +323,68 @@ func TestLoadFromRefreshesExistingPlainConfig(t *testing.T) {
 	}
 }
 
+func TestLoadFromBacksUpConfigBeforeTemplateRefresh(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	current := renderAnnotatedTOML(DefaultConfig())
+	previousMarker := fmt.Sprintf("# config_template_version = %d", configTemplateVersion-1)
+	previous := strings.Replace(current, configTemplateVersionMarker(), previousMarker, 1)
+	if previous == current {
+		t.Fatal("failed to prepare previous template version")
+	}
+	if err := os.WriteFile(path, []byte(previous), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadFrom(path); err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read template refresh backup: %v", err)
+	}
+	if string(backup) != previous {
+		t.Fatal("template refresh backup does not match the original config")
+	}
+	refreshed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(refreshed), configTemplateVersionMarker()) {
+		t.Fatal("template refresh did not write the current version marker")
+	}
+}
+
+func TestLoadFromBlocksSaveWhenTemplateRefreshBackupFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	current := renderAnnotatedTOML(DefaultConfig())
+	previousMarker := fmt.Sprintf("# config_template_version = %d", configTemplateVersion-1)
+	previous := strings.Replace(current, configTemplateVersionMarker(), previousMarker, 1)
+	if err := os.WriteFile(path, []byte(previous), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".bak", 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err == nil {
+		t.Fatal("loadFrom should report a failed template backup")
+	}
+	if cfg.LoadError == "" {
+		t.Fatal("failed template refresh should retain a save-blocking load error")
+	}
+	if _, err := saveToAtRevision(path, cfg, cfg.SourceRevision); !errors.Is(err, ErrConfigRecoveryRequired) {
+		t.Fatalf("saveToAtRevision error = %v, want ErrConfigRecoveryRequired", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != previous {
+		t.Fatal("failed template backup changed the original config")
+	}
+}
+
 func TestLoadFromKeepsMalformedConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
 	broken := []byte("idle_timeout_minutes = [")
@@ -299,8 +392,18 @@ func TestLoadFromKeepsMalformedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := loadFrom(path); err == nil {
+	cfg, err := loadFrom(path)
+	if err == nil {
 		t.Fatal("loadFrom should report malformed TOML")
+	}
+	if cfg.LoadError == "" {
+		t.Fatal("malformed config should retain a save-blocking load error")
+	}
+	if cfg.SourceRevision != configRevision(broken) {
+		t.Fatalf("source revision = %q, want revision of malformed file", cfg.SourceRevision)
+	}
+	if _, err := saveToAtRevision(path, cfg, cfg.SourceRevision); !errors.Is(err, ErrConfigRecoveryRequired) {
+		t.Fatalf("saveToAtRevision error = %v, want ErrConfigRecoveryRequired", err)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -308,6 +411,31 @@ func TestLoadFromKeepsMalformedConfig(t *testing.T) {
 	}
 	if string(got) != string(broken) {
 		t.Fatalf("malformed config was modified: %q", got)
+	}
+}
+
+func TestRepairingMalformedConfigClearsSaveProtection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	if err := os.WriteFile(path, []byte("idle_timeout_minutes = ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadFrom(path); err == nil {
+		t.Fatal("loadFrom should report malformed TOML")
+	}
+
+	repaired := renderAnnotatedTOML(DefaultConfig())
+	if err := os.WriteFile(path, []byte(repaired), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("load repaired config: %v", err)
+	}
+	if cfg.LoadError != "" {
+		t.Fatalf("repaired config retained load error: %q", cfg.LoadError)
+	}
+	if _, err := saveToAtRevision(path, cfg, cfg.SourceRevision); err != nil {
+		t.Fatalf("save repaired config: %v", err)
 	}
 }
 
