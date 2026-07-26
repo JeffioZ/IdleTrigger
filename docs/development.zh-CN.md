@@ -84,7 +84,7 @@ go build -trimpath "-ldflags=$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletri
 
 ## 🚢 发布流程
 
-推送 `v*` tag 后，工作流会创建名为 `IdleTrigger vX.Y.Z` 的草稿 Release。草稿包含两个 EXE、`SHA256SUMS.txt` 和初始变更记录。`.github/release.yml` 会对 PR 分组；直接提交仍需人工整理。
+推送格式为 `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` 的严格 SemVer tag 后，工作流会创建以该 tag 命名的草稿 Release；其他 `v*` tag 会被拒绝。草稿包含两个 EXE、`SHA256SUMS.txt` 和初始变更记录。`.github/release.yml` 会对 PR 分组；直接提交仍需人工整理。
 
 正式发布前，请应用[更新说明格式与模板](release-notes.md)。先写用户可感知的结果，保持中英文一致，核对附件和版本对比范围，并把提交明细留在末尾。
 
@@ -131,8 +131,9 @@ go build -trimpath "-ldflags=$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletri
   选择预览应复用共享滚动条；窗口重新激活后的过期快照可轻量刷新，但须保留筛选、排序、
   勾选、焦点和可视锚点，并避免重复读取已有说明。
   名称匹配与精确文件匹配必须在预览中清楚区分，PID 和说明不得作为规则标识保存。
-- **进程元数据：** 优先使用 Toolhelp 进程名；每个进程名最多从一个可访问实例读取代表性说明，
-  使用有上限的工作线程，并仅在需要路径时申请 `PROCESS_QUERY_LIMITED_INFORMATION`。
+- **进程元数据：** 优先使用 Toolhelp 进程名；每个进程名只保留一条代表性说明，并仅在当前
+  同名实例无说明时继续尝试下一个；使用有上限的工作线程，并仅在需要路径时申请
+  `PROCESS_QUERY_LIMITED_INFORMATION`。
   浏览的 EXE 可校验格式和读取说明，但不得启动；不得加入调试权限、进程内存访问、代码注入、
   结束进程、任意程序启动、服务或 Windows 任务计划。
 
@@ -206,7 +207,7 @@ go test ./...
 go run ./tools/resourcegen.go -version dev
 $env:CGO_ENABLED = "0"
 $env:GOARCH = "amd64"
-go build -tags devtools -trimpath -ldflags="-H windowsgui" -o dist/IdleTrigger-x64-devtools.exe ./cmd/idletrigger
+go build -tags devtools -trimpath -ldflags="-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=devtools" -o dist/IdleTrigger-x64-devtools.exe ./cmd/idletrigger
 .\dist\IdleTrigger-x64-devtools.exe
 
 # 托盘程序启动后，在第二个终端中执行：

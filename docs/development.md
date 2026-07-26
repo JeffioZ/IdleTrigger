@@ -87,7 +87,7 @@ The release workflow runs formatting, module, test, and vet checks. It then buil
 
 ## 🚢 Release Process
 
-Pushing a `v*` tag creates a draft named `IdleTrigger vX.Y.Z`. It includes both executables, `SHA256SUMS.txt`, and an initial changelog. `.github/release.yml` groups pull requests; direct commits still need manual review.
+Pushing a strict SemVer tag in the form `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` creates a draft named after that tag; other `v*` tags are rejected. The draft includes both executables, `SHA256SUMS.txt`, and an initial changelog. `.github/release.yml` groups pull requests; direct commits still need manual review.
 
 Before publishing, apply the [release-notes style and template](release-notes.md). Lead with user-visible results. Keep both languages aligned, check the assets and comparison range, and leave commit details at the end.
 
@@ -152,10 +152,11 @@ Use the relevant row before considering a change complete:
   descriptions that are already known.
   Clearly distinguish name and exact-file matching in the preview; never persist
   a PID or use a description as identity.
-- **Process metadata:** use Toolhelp names first. Resolve a representative
-  description from at most one accessible instance per executable name, with a
-  bounded worker count, and request `PROCESS_QUERY_LIMITED_INFORMATION` only when
-  a path is required. Browsed EXEs may be validated and read for description but
+- **Process metadata:** use Toolhelp names first. Keep one representative
+  description per executable name, trying same-name instances only until one
+  yields a description, with a bounded worker count. Request
+  `PROCESS_QUERY_LIMITED_INFORMATION` only when a path is required. Browsed EXEs
+  may be validated and read for description but
   must never be launched. Do not add debug privilege, process-memory access,
   injection, process termination,
   arbitrary launch, a service, or Task Scheduler integration.
@@ -239,7 +240,7 @@ go test ./...
 go run ./tools/resourcegen.go -version dev
 $env:CGO_ENABLED = "0"
 $env:GOARCH = "amd64"
-go build -tags devtools -trimpath -ldflags="-H windowsgui" -o dist/IdleTrigger-x64-devtools.exe ./cmd/idletrigger
+go build -tags devtools -trimpath -ldflags="-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=devtools" -o dist/IdleTrigger-x64-devtools.exe ./cmd/idletrigger
 .\dist\IdleTrigger-x64-devtools.exe
 
 # In a second terminal after the tray app starts:
