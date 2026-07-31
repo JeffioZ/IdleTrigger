@@ -3,6 +3,11 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/JeffioZ/idletrigger/internal/config"
 	"github.com/JeffioZ/idletrigger/internal/devtools"
 	"github.com/JeffioZ/idletrigger/internal/feature/autorules"
@@ -18,14 +23,22 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 	"golang.org/x/sys/windows"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 const projectHomeURL = "https://github.com/JeffioZ/IdleTrigger"
 
-var executeShell = windows.ShellExecute
+var (
+	executeShell       = windows.ShellExecute
+	getSystemDirectory = windows.GetSystemDirectory
+)
+
+func systemExecutable(name string) string {
+	directory, err := getSystemDirectory()
+	if err != nil || directory == "" {
+		return name
+	}
+	return filepath.Join(directory, name)
+}
 
 func openWithShell(target, arguments string) error {
 	verb, err := windows.UTF16PtrFromString("open")

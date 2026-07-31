@@ -12,7 +12,7 @@ func (s *runtimeState) handleIPC(cmd string) string {
 }
 
 func (s *runtimeState) handleIPCState(cmd string) string {
-	mylog.Info("IPC command received: %s", cmd)
+	mylog.Info("IPC command received: %q", cmd)
 	switch cmd {
 	case "sleep":
 		if err := s.executeAction(config.ActionSleep); err != nil {

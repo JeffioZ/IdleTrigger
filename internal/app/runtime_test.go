@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/devtools"
 	"github.com/JeffioZ/idletrigger/internal/feature/autorules"
 	idlefeature "github.com/JeffioZ/idletrigger/internal/feature/idle"
+	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/powerstate"
 )
 
@@ -35,6 +38,53 @@ func TestOpenWithShellBuildsNativeArguments(t *testing.T) {
 	}
 	if gotFile != "notepad.exe" || gotArgs != `"C:\Program Files\IdleTrigger\IdleTrigger.toml"` {
 		t.Fatalf("shell launch = %q %q", gotFile, gotArgs)
+	}
+}
+
+func TestSystemExecutableUsesTrustedWindowsDirectory(t *testing.T) {
+	previous := getSystemDirectory
+	t.Cleanup(func() { getSystemDirectory = previous })
+
+	getSystemDirectory = func() (string, error) {
+		return `C:\Windows\System32`, nil
+	}
+	if got, want := systemExecutable("notepad.exe"), filepath.Join(`C:\Windows\System32`, "notepad.exe"); got != want {
+		t.Fatalf("systemExecutable() = %q, want %q", got, want)
+	}
+}
+
+func TestSystemExecutableFallsBackWhenWindowsDirectoryIsUnavailable(t *testing.T) {
+	previous := getSystemDirectory
+	t.Cleanup(func() { getSystemDirectory = previous })
+
+	getSystemDirectory = func() (string, error) {
+		return "", errors.New("unavailable")
+	}
+	if got := systemExecutable("notepad.exe"); got != "notepad.exe" {
+		t.Fatalf("systemExecutable() = %q, want fallback executable name", got)
+	}
+}
+
+func TestIPCCommandLogEscapesControlCharacters(t *testing.T) {
+	dir := t.TempDir()
+	mylog.Init(true, dir)
+	t.Cleanup(mylog.Close)
+
+	cmd := "ping\n[spoofed log line]"
+	state := runtimeState{}
+	state.handleIPCState(cmd)
+	mylog.Close()
+
+	data, err := os.ReadFile(filepath.Join(dir, "IdleTrigger.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "ping\n[spoofed log line]") {
+		t.Fatalf("IPC command inserted an unescaped log line:\n%s", text)
+	}
+	if !strings.Contains(text, `IPC command received: "ping\n[spoofed log line]"`) {
+		t.Fatalf("IPC command was not quoted in the log:\n%s", text)
 	}
 }
 

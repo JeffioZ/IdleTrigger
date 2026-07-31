@@ -207,7 +207,7 @@ func (s *runtimeState) handleGeneralControlAction(action controlpanel.Action, va
 			mylog.Info("Config path lookup failed: %v", err)
 			return
 		}
-		if err := openWithShell("notepad.exe", windows.EscapeArg(path)); err != nil {
+		if err := openWithShell(systemExecutable("notepad.exe"), windows.EscapeArg(path)); err != nil {
 			mylog.Info("Config editor launch failed: %v", err)
 		}
 	case controlpanel.ActProjectHome:
