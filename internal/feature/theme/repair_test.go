@@ -1,6 +1,7 @@
 package theme
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,39 @@ func TestReadThemeSnapshotSkipsIncompleteCurrentTheme(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Fatalf("theme snapshot = %q, want complete current theme", got)
+	}
+}
+
+func TestReadThemeSnapshotSkipsOversizedTheme(t *testing.T) {
+	dir := t.TempDir()
+	oversized := filepath.Join(dir, "Oversized.theme")
+	complete := filepath.Join(dir, "Current.theme")
+	if err := os.WriteFile(oversized, bytes.Repeat([]byte("x"), maxThemeSnapshotSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("[Theme]\nDisplayName=Current\n[VisualStyles]\nAppMode=Dark\nSystemMode=Light\n")
+	if err := os.WriteFile(complete, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readThemeSnapshotFromPaths([]string{oversized, complete})
+	if err != nil {
+		t.Fatalf("readThemeSnapshotFromPaths: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("theme snapshot = %q, want complete fallback theme", got)
+	}
+}
+
+func TestReadThemeSnapshotRejectsOversizedTheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Oversized.theme")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), maxThemeSnapshotSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readThemeSnapshotFromPaths([]string{path})
+	if err == nil || !strings.Contains(err.Error(), "1048576-byte limit") {
+		t.Fatalf("readThemeSnapshotFromPaths error = %v, want size limit", err)
 	}
 }
 

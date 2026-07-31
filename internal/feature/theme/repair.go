@@ -3,6 +3,7 @@ package theme
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 
 const (
 	windows11FullDWMRefreshBuild = 22621
+	maxThemeSnapshotSize         = 1 << 20
 
 	coinitApartmentThreaded = 0x2
 	clsctxAll               = 0x17
@@ -212,7 +214,7 @@ func readThemeSnapshotFromPaths(paths []string) ([]byte, error) {
 			continue
 		}
 		seen[key] = struct{}{}
-		data, err := os.ReadFile(cleanPath)
+		data, err := readThemeSnapshotFile(cleanPath)
 		if err != nil {
 			readErrs = append(readErrs, fmt.Errorf("read %s: %w", cleanPath, err))
 			continue
@@ -227,6 +229,23 @@ func readThemeSnapshotFromPaths(paths []string) ([]byte, error) {
 		return nil, errors.New("no current Windows theme file path is available")
 	}
 	return nil, errors.Join(readErrs...)
+}
+
+func readThemeSnapshotFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxThemeSnapshotSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxThemeSnapshotSize {
+		return nil, fmt.Errorf("theme file exceeds %d-byte limit", maxThemeSnapshotSize)
+	}
+	return data, nil
 }
 
 func themeFileHasSection(source []byte, section string) bool {

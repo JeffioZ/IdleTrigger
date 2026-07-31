@@ -36,9 +36,10 @@ type LocationInfo struct {
 }
 
 const (
-	ipLocationHost           = "ipwho.is"
-	ipLocationPath           = "/?fields=success,message,latitude,longitude,city,region,country"
-	ipLocationRequestTimeout = 4 * time.Second
+	ipLocationHost            = "ipwho.is"
+	ipLocationPath            = "/?fields=success,message,latitude,longitude,city,region,country"
+	ipLocationRequestTimeout  = 4 * time.Second
+	maxIPLocationResponseSize = 64 * 1024
 	// IPLocationRetryInterval is shared by the lookup cache and the tray's
 	// single delayed retry so both enforce the same cooldown.
 	IPLocationRetryInterval   = 30 * time.Minute
@@ -223,7 +224,7 @@ func winHTTPGet(host, path string, timeout time.Duration) (string, error) {
 		if available == 0 {
 			break
 		}
-		if out.Len()+int(available) > 64*1024 {
+		if !responseChunkFits(out.Len(), available) {
 			return "", errors.New("response too large")
 		}
 		buf := make([]byte, available)
@@ -234,6 +235,13 @@ func winHTTPGet(host, path string, timeout time.Duration) (string, error) {
 		out.WriteString(string(buf[:read]))
 	}
 	return out.String(), nil
+}
+
+func responseChunkFits(currentSize int, available uint32) bool {
+	if currentSize < 0 || currentSize > maxIPLocationResponseSize {
+		return false
+	}
+	return uint64(available) <= uint64(maxIPLocationResponseSize-currentSize)
 }
 
 func validateHTTPStatus(statusCode uint32) error {

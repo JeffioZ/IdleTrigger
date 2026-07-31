@@ -225,6 +225,29 @@ func TestValidateHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestResponseChunkFitsWithoutIntegerOverflow(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		current   int
+		available uint32
+		want      bool
+	}{
+		{name: "empty response", want: true},
+		{name: "exact limit", available: maxIPLocationResponseSize, want: true},
+		{name: "one byte over limit", available: maxIPLocationResponseSize + 1},
+		{name: "remaining byte", current: maxIPLocationResponseSize - 1, available: 1, want: true},
+		{name: "chunk exceeds remaining", current: maxIPLocationResponseSize - 1, available: 2},
+		{name: "existing response exceeds limit", current: maxIPLocationResponseSize + 1},
+		{name: "maximum uint32 chunk", available: ^uint32(0)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := responseChunkFits(test.current, test.available); got != test.want {
+				t.Fatalf("responseChunkFits(%d, %d) = %v, want %v", test.current, test.available, got, test.want)
+			}
+		})
+	}
+}
+
 func TestManualOverrideEndsAtNextScheduledTransition(t *testing.T) {
 	loc := time.FixedZone("CST", 8*60*60)
 	s := NewScheduler("fixed", "07:00", "19:00", 0, 0, false, false)
