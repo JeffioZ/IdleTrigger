@@ -518,6 +518,51 @@ func TestSaveToAtRevisionRejectsExternalChange(t *testing.T) {
 	}
 }
 
+func TestSaveToAtRevisionSkipsIdenticalContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	cfg := DefaultConfig()
+	if err := saveTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, stableTime, stableTime); err != nil {
+		t.Fatal(err)
+	}
+	infoBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	revision, err := saveToAtRevision(path, cfg, configRevision(data))
+	if err != nil {
+		t.Fatalf("saveToAtRevision: %v", err)
+	}
+	if revision != configRevision(data) {
+		t.Fatalf("revision = %q, want %q", revision, configRevision(data))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(stableTime) {
+		t.Fatalf("identical save changed modification time: got %v, want %v", info.ModTime(), stableTime)
+	}
+	if !os.SameFile(infoBefore, info) {
+		t.Fatal("identical save replaced the existing config file")
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".IdleTrigger-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("identical save created temporary files: %v", matches)
+	}
+}
+
 func TestConfigRevisionIsCompactAndContentSensitive(t *testing.T) {
 	revision := configRevision([]byte("idletrigger"))
 	if len(revision) > 16 || revision == "" {
