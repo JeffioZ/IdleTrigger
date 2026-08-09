@@ -18,7 +18,7 @@ $outputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $temporaryDirectory = Join-Path (Join-Path $repoRoot 'dist') ('.IdleTrigger-screenshot-build-' + $PID)
 $captureDirectory = Join-Path $temporaryDirectory 'captured'
 $exePath = Join-Path $temporaryDirectory 'IdleTrigger-x64-screenshot.exe'
-$reviewFilePrefixes = @('control-panel', 'automation-manager', 'automation-editor', 'process-picker')
+$reviewFilePrefixes = @('control-panel', 'automation-manager', 'automation-editor', 'process-picker', 'settings', 'settings-theme', 'settings-app')
 $files = if ($CaptureSet -eq 'Readme') {
     @('control-panel-en-light.png', 'control-panel-en-dark.png', 'control-panel-zh-CN-light.png', 'control-panel-zh-CN-dark.png')
 } else {
