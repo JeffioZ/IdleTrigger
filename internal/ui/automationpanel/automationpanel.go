@@ -412,6 +412,8 @@ func cloneState(state State) State {
 func Capture(state State, text TextFunc, scale float64, dark, editor bool, capture func(windows.Handle) error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	restoreTextScale := font.OverrideTextScaleFactor(1)
+	defer restoreTextScale()
 	if text == nil {
 		text = func(key string) string { return key }
 	}

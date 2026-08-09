@@ -16,7 +16,7 @@ type Palette struct {
 	Focus, FocusOnAccent                                     uint32
 	DangerBackground, DangerHover, DangerPressed             uint32
 	DangerBorder, DangerHoverBorder, DangerPressedBorder     uint32
-	DangerText, DangerFocus                                  uint32
+	DangerText, DangerSurfaceText, DangerFocus               uint32
 	CloseText, CloseHover, ClosePressed                      uint32
 	CloseActiveText                                          uint32
 	TooltipBackground, TooltipText                           uint32
@@ -40,7 +40,7 @@ func themePalette(dark bool) Palette {
 			Surface:          RGB(43, 48, 54),
 			ElevatedSurface:  RGB(52, 59, 67),
 			HoverSurface:     RGB(54, 61, 69),
-			Border:           RGB(76, 85, 95),
+			Border:           RGB(125, 137, 149),
 			SubtleBorder:     RGB(60, 68, 77),
 			PrimaryText:      RGB(244, 247, 250),
 			SecondaryText:    RGB(204, 212, 220),
@@ -64,6 +64,7 @@ func themePalette(dark bool) Palette {
 			DangerHoverBorder:   RGB(241, 170, 166),
 			DangerPressedBorder: RGB(213, 105, 106),
 			DangerText:          RGB(255, 250, 251),
+			DangerSurfaceText:   RGB(242, 150, 151),
 			DangerFocus:         RGB(255, 229, 227),
 			CloseText:           RGB(182, 199, 212),
 			CloseHover:          RGB(80, 57, 68),
@@ -78,7 +79,7 @@ func themePalette(dark bool) Palette {
 		Surface:          RGB(255, 255, 255),
 		ElevatedSurface:  RGB(251, 253, 255),
 		HoverSurface:     RGB(234, 244, 249),
-		Border:           RGB(203, 211, 220),
+		Border:           RGB(132, 144, 156),
 		SubtleBorder:     RGB(225, 231, 237),
 		PrimaryText:      RGB(25, 30, 36),
 		SecondaryText:    RGB(70, 82, 94),
@@ -102,6 +103,7 @@ func themePalette(dark bool) Palette {
 		DangerHoverBorder:   RGB(255, 180, 175),
 		DangerPressedBorder: RGB(213, 105, 106),
 		DangerText:          RGB(255, 250, 251),
+		DangerSurfaceText:   RGB(154, 39, 47),
 		DangerFocus:         RGB(255, 229, 227),
 		CloseText:           RGB(84, 104, 121),
 		CloseHover:          RGB(244, 231, 235),

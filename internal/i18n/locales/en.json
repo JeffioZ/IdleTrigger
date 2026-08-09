@@ -242,6 +242,7 @@
   "automation_no_processes": "No processes selected",
   "automation_process_count": "%d process conditions selected",
   "automation_process_details_title": "Selected Process Conditions",
+  "automation_process_info_accessible": "Show selected process details",
   "automation_process_detail_name": "%s · all same-name instances",
   "automation_process_detail_path": "%s · specified file: %s",
   "automation_trigger_process_running": "While processes run",

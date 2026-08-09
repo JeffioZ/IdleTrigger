@@ -50,6 +50,8 @@ func Capture(state State, langFn LangFunc, scale float64, capture func(windows.H
 	// stay on the same OS thread throughout a headless capture.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	restoreTextScale := font.OverrideTextScaleFactor(1)
+	defer restoreTextScale()
 
 	p, err := createPanelForHost(state, nil, langFn, scale, true)
 	if err != nil {

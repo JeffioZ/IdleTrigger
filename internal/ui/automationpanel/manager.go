@@ -23,7 +23,18 @@ const (
 
 func (p *panel) showManager() {
 	p.beginRebuild()
-	defer p.endRebuild()
+	defer func() {
+		p.endRebuild()
+		if !p.captureHost {
+			target := p.controls[idList]
+			if len(p.rules) == 0 {
+				target = p.controls[idNew]
+			}
+			if target != 0 {
+				pSetFocus.Call(uintptr(target))
+			}
+		}
+	}()
 	p.closeChoice(false)
 	p.hideControls(editorControlIDs())
 	if p.view != managerView {

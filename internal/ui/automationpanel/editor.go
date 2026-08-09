@@ -19,7 +19,12 @@ import (
 
 func (p *panel) showEditorDraft(index int, draft automation.Rule) {
 	p.beginRebuild()
-	defer p.endRebuild()
+	defer func() {
+		p.endRebuild()
+		if !p.captureHost && p.controls[idName] != 0 {
+			pSetFocus.Call(uintptr(p.controls[idName]))
+		}
+	}()
 	p.closeChoice(false)
 	p.hideControls(managerControlIDs())
 	if p.managerScroll != nil {
@@ -102,7 +107,8 @@ func (p *panel) createEditorControls() {
 	p.combo(idProcessLogic, 0, 0, 314, processLabels(p.text))
 	p.child("BUTTON", p.t("automation_choose_processes"), wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idChooseProcesses, p.font)
 	p.child("STATIC", "", wsChild|ssLeft, 0, 0, 1, 1, idProcessSummary, p.font)
-	p.child("BUTTON", "i", wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idProcessInfo, p.font)
+	processInfo := p.child("BUTTON", "i", wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idProcessInfo, p.font)
+	nativeform.SetAccessibleName(processInfo, p.t("automation_process_info_accessible"))
 	p.namedLabel(idOptionsTitle, p.t("automation_action_options"), p.sectionFont)
 	p.child("BUTTON", p.t("automation_keep_screen"), wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idKeepScreen, p.font)
 	p.namedLabel(idIdleMinutesLabel, p.t("automation_idle_minutes"), p.font)

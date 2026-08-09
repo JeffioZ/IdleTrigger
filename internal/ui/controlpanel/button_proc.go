@@ -5,15 +5,19 @@ import "golang.org/x/sys/windows"
 func buttonWndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 	p := panelForButton(hwnd)
 	var old uintptr
+	var id uint16
 	if p != nil {
 		old = p.oldButtonProc[hwnd]
-		id := p.controlID(hwnd)
+		id = p.controlID(hwnd)
 		if handled, result := p.handleButtonMessage(hwnd, id, msg, wp); handled {
 			return result
 		}
 	}
 	if old != 0 {
 		result, _, _ := pCallWindowProc.Call(old, uintptr(hwnd), uintptr(msg), wp, lp)
+		if msg == wmSetFocus || msg == wmKillFocus || msg == wmEnable {
+			p.updateToggleAccessibility(id)
+		}
 		return result
 	}
 	result, _, _ := pDefWindowProc.Call(uintptr(hwnd), uintptr(msg), wp, lp)

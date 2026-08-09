@@ -123,7 +123,12 @@ func (p *panel) child(className, value string, style uintptr, x, y, width, heigh
 		p.labels[id] = value
 		p.bounds[id] = logicalBounds{X: x, Y: y, Width: width, Height: height}
 		if strings.EqualFold(className, "BUTTON") && style&bsOwnerDraw != 0 {
-			p.interaction.Track(windows.Handle(hwnd), windows.Handle(hwnd))
+			if p.isAccessibleCheck(id) {
+				nativeform.AnnotateCheckButton(windows.Handle(hwnd), value, p.checks[id])
+				p.interaction.TrackCheck(windows.Handle(hwnd), windows.Handle(hwnd), func() bool { return p.checks[id] })
+			} else {
+				p.interaction.Track(windows.Handle(hwnd), windows.Handle(hwnd))
+			}
 		}
 	} else if hwnd != 0 {
 		p.anonymous = append(p.anonymous, windows.Handle(hwnd))
@@ -257,8 +262,13 @@ func (p *panel) comboIndex(id uint16) int {
 func (p *panel) setChecked(id uint16, value bool) {
 	p.checks[id] = value
 	if p.controls[id] != 0 {
+		nativeform.UpdateCheckButtonAccessibility(p.controls[id], value)
 		pInvalidateRect.Call(uintptr(p.controls[id]), 0, 0)
 	}
+}
+
+func (p *panel) isAccessibleCheck(id uint16) bool {
+	return id == idKeepScreen || id >= idWeekdayBase && id < idWeekdayBase+uint16(len(editorWeekdays))
 }
 func (p *panel) checked(id uint16) bool {
 	return p.checks[id]

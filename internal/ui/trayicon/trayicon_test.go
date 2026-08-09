@@ -46,6 +46,19 @@ func TestTabNavigationMessageScope(t *testing.T) {
 	}
 }
 
+func TestDialogEscapeMessageScope(t *testing.T) {
+	dialog, child := windows.Handle(100), windows.Handle(101)
+	if !isDialogEscapeMessage(&message{WindowHandle: dialog, Message: wmKeyDown, Wparam: vkEscape}, dialog, false) {
+		t.Fatal("dialog Escape was not recognized")
+	}
+	if !isDialogEscapeMessage(&message{WindowHandle: child, Message: wmKeyDown, Wparam: vkEscape}, dialog, true) {
+		t.Fatal("child Escape was not recognized")
+	}
+	if isDialogEscapeMessage(&message{WindowHandle: child, Message: wmKeyDown, Wparam: vkEscape}, dialog, false) {
+		t.Fatal("unrelated Escape was intercepted")
+	}
+}
+
 func TestNestedTabNavigationRestoresOwner(t *testing.T) {
 	tabNavigation.Lock()
 	tabNavigation.hwnd = 0

@@ -17,8 +17,8 @@ const (
 	MenuSurfaceInset  = 4
 	MenuAnchorGap     = 0
 	MenuMarkerWidth   = 3
-	ScrollbarWidth    = 10
-	ScrollbarMinThumb = 22
+	ScrollbarWidth    = 16
+	ScrollbarMinThumb = 32
 )
 
 func MenuHeight(rowCount, rowHeight, rowGap, surfaceInset int) int {

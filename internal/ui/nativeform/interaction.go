@@ -22,6 +22,7 @@ type trackedControl struct {
 	oldProc    uintptr
 	invalidate windows.Handle
 	state      InteractionState
+	checked    func() bool
 }
 
 // InteractionTracker subclasses standard Win32 controls only to observe
@@ -68,6 +69,19 @@ var (
 // invalidated when its interaction state changes. Pass zero to invalidate the
 // control itself.
 func (t *InteractionTracker) Track(control, invalidate windows.Handle) {
+	t.track(control, invalidate, nil)
+}
+
+// TrackCheck tracks an owner-drawn checkbox and keeps its dynamic Active
+// Accessibility state synchronized with native focus and enabled changes.
+func (t *InteractionTracker) TrackCheck(control, invalidate windows.Handle, checked func() bool) {
+	t.track(control, invalidate, checked)
+	if checked != nil {
+		UpdateCheckButtonAccessibility(control, checked())
+	}
+}
+
+func (t *InteractionTracker) track(control, invalidate windows.Handle, checked func() bool) {
 	if control == 0 {
 		return
 	}
@@ -85,7 +99,7 @@ func (t *InteractionTracker) Track(control, invalidate windows.Handle) {
 		return
 	}
 	interactionMu.Lock()
-	interactionControls[control] = &trackedControl{owner: t, oldProc: oldProc, invalidate: invalidate}
+	interactionControls[control] = &trackedControl{owner: t, oldProc: oldProc, invalidate: invalidate, checked: checked}
 	interactionMu.Unlock()
 }
 
@@ -208,6 +222,10 @@ func interactionWndProc(hwnd windows.Handle, message uint32, wParam, lParam uint
 		interactionInvalidateRect.Call(uintptr(entry.invalidate), 0, 0)
 	}
 	result, _, _ := interactionCallWindowProc.Call(entry.oldProc, uintptr(hwnd), uintptr(message), wParam, lParam)
+	semanticChanged := message == wmSetFocus || message == wmKillFocus || message == wmEnable
+	if semanticChanged && entry.checked != nil {
+		UpdateCheckButtonAccessibility(hwnd, entry.checked())
+	}
 	if message == wmNCDestroy {
 		interactionMu.Lock()
 		delete(interactionControls, hwnd)

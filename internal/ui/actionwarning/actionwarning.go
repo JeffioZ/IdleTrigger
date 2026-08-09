@@ -133,6 +133,7 @@ var (
 	pDeferWindowPos      = user32.NewProc("DeferWindowPos")
 	pEndDeferWindowPos   = user32.NewProc("EndDeferWindowPos")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	pSetFocus            = user32.NewProc("SetFocus")
 	pShowWindow          = user32.NewProc("ShowWindow")
 	pUpdateWindow        = user32.NewProc("UpdateWindow")
 	pGetDpiForWindow     = user32.NewProc("GetDpiForWindow")
@@ -260,6 +261,7 @@ func showNow(options Options, seq uint64) {
 	position(nil)
 	pShowWindow.Call(hwnd, 5)
 	pSetForegroundWindow.Call(hwnd)
+	pSetFocus.Call(uintptr(cancelControl))
 	pUpdateWindow.Call(hwnd)
 	trayicon.SetTabNavigationWindow(active, nil)
 }

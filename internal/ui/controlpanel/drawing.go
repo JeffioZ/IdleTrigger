@@ -124,15 +124,18 @@ func (p *panel) drawButton(item *drawItem) {
 		nativeform.DrawButton(item.HDC, nativeRect(item.Rect), p.font, p.labels[id], p.palette, p.palette.WindowBackground, nativeControlState(state), int32(p.sc(p.metrics.style.Control.CornerRadius)/2), false)
 		return
 	}
-	danger := id == idExit
 	brush, borderColor, textColor := p.surfaceBrush, p.palette.Border, p.palette.PrimaryText
 	if state.Hovered {
 		brush = p.hoverBrush
 	}
+	danger := id == idExit
 	if danger {
-		brush, borderColor, textColor = p.dangerBrush, p.palette.DangerBorder, p.palette.DangerText
+		// Exit remains semantically distinct without becoming the panel's
+		// strongest default call to action. The solid danger fill is reserved
+		// for deliberate hover/press feedback.
+		brush, borderColor, textColor = p.surfaceBrush, p.palette.DangerSurfaceText, p.palette.DangerSurfaceText
 		if state.Hovered {
-			brush, borderColor = p.dangerHoverBrush, p.palette.DangerHoverBorder
+			brush, borderColor, textColor = p.dangerHoverBrush, p.palette.DangerHoverBorder, p.palette.DangerText
 		}
 	}
 	if state.Pressed {

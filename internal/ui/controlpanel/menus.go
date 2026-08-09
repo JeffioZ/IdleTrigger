@@ -66,6 +66,7 @@ func (p *panel) setDisabled(id uint16, value bool) {
 			enabled = 0
 		}
 		pEnableWindow.Call(uintptr(hwnd), enabled)
+		p.updateToggleAccessibility(id)
 	}
 	p.refreshTooltip(id)
 	p.invalidate(id)

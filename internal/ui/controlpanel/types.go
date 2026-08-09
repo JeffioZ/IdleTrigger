@@ -144,9 +144,11 @@ const (
 	wmThemeChanged     = 0x031A
 	wmDpiChanged       = 0x02E0
 	wmGetDpiScaledSize = 0x02E4
+	wmSetFocus         = 0x0007
 	wmKeyDown          = 0x0100
 	wmSysKeyDown       = 0x0104
 	wmKillFocus        = 0x0008
+	wmEnable           = 0x000A
 	wmOpenChoice       = 0x8001
 	wmApplyDPI         = 0x8002
 	wmCommitDPI        = 0x8003

@@ -71,7 +71,9 @@ const trayHostWindowCoordinate = int32(-32000)
 
 const (
 	wmKeyDown = 0x0100
+	wmClose   = 0x0010
 	vkTab     = 0x09
+	vkEscape  = 0x1b
 )
 
 // message matches the Win32 MSG layout used by GetMessageW and
@@ -182,6 +184,10 @@ func isTabNavigationMessage(m *message, dialog windows.Handle, isChild bool) boo
 	return dialog != 0 && m != nil && m.Message == wmKeyDown && m.Wparam == vkTab && (m.WindowHandle == dialog || isChild)
 }
 
+func isDialogEscapeMessage(m *message, dialog windows.Handle, isChild bool) bool {
+	return dialog != 0 && m != nil && m.Message == wmKeyDown && m.Wparam == vkEscape && (m.WindowHandle == dialog || isChild)
+}
+
 func dispatchTabNavigation(m *message) bool {
 	tabNavigation.RLock()
 	dialog := tabNavigation.hwnd
@@ -194,6 +200,10 @@ func dispatchTabNavigation(m *message) bool {
 	if m.WindowHandle != 0 && m.WindowHandle != dialog {
 		child, _, _ := pIsChild.Call(uintptr(dialog), uintptr(m.WindowHandle))
 		isChild = child != 0
+	}
+	if isDialogEscapeMessage(m, dialog, isChild) {
+		pPostMessage.Call(uintptr(dialog), wmClose, 0, 0)
+		return true
 	}
 	if !isTabNavigationMessage(m, dialog, isChild) {
 		return false

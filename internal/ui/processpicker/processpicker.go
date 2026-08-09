@@ -414,6 +414,7 @@ var (
 	pEndDeferWindowPos    = user32.NewProc("EndDeferWindowPos")
 	pShowWindow           = user32.NewProc("ShowWindow")
 	pSetForeground        = user32.NewProc("SetForegroundWindow")
+	pSetFocus             = user32.NewProc("SetFocus")
 	pEnableWindow         = user32.NewProc("EnableWindow")
 	pIsWindow             = user32.NewProc("IsWindow")
 	pIsWindowEnabled      = user32.NewProc("IsWindowEnabled")
@@ -541,6 +542,8 @@ func Hide() {
 func Capture(options Options, groups []processcatalog.Group, scale float64, dark bool, capture func(windows.Handle) error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	restoreTextScale := font.OverrideTextScaleFactor(1)
+	defer restoreTextScale()
 	if options.Text == nil {
 		options.Text = func(key string) string { return key }
 	}
@@ -870,6 +873,7 @@ func (p *picker) create() (err error) {
 	}
 	if !p.captureHost {
 		pSetForeground.Call(uintptr(hwnd))
+		pSetFocus.Call(uintptr(p.controls[idSearch]))
 		trayicon.SetTabNavigationWindow(p.hwnd, func() { p.interaction.SetFocusVisible(true) })
 	}
 	return nil

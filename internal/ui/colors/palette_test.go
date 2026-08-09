@@ -40,6 +40,17 @@ func TestAccentTextContrast(t *testing.T) {
 		if got := contrast(palette.FocusOnAccent, palette.Accent); got < 3 {
 			t.Fatalf("dark=%v selected focus contrast = %.2f, want >= 3", dark, got)
 		}
+		for _, surface := range []struct {
+			name  string
+			color uint32
+		}{{"window", palette.WindowBackground}, {"surface", palette.Surface}} {
+			if got := contrast(palette.Border, surface.color); got < 3 {
+				t.Fatalf("dark=%v default border/%s contrast = %.2f, want >= 3", dark, surface.name, got)
+			}
+		}
+		if got := contrast(palette.DangerSurfaceText, palette.Surface); got < 4.5 {
+			t.Fatalf("dark=%v danger surface text contrast = %.2f, want >= 4.5", dark, got)
+		}
 		if got := contrast(palette.DangerFocus, palette.DangerBackground); got < 3 {
 			t.Fatalf("dark=%v danger focus contrast = %.2f, want >= 3", dark, got)
 		}

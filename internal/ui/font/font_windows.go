@@ -64,6 +64,7 @@ var (
 // an installed system UI family for the current UI language and always has a
 // system-message-font fallback. Callers own the returned HFONT.
 func New(size, weight int32, chinese bool) (windows.Handle, Choice) {
+	size = scaleRequestedSize(size)
 	choice := resolve(chinese)
 	for _, face := range candidates(chinese) {
 		if font := createNamed(size, weight, face); font != 0 && sameFace(fontFace(font), face) {

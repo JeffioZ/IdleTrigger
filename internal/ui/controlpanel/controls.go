@@ -1,6 +1,7 @@
 package controlpanel
 
 import (
+	"github.com/JeffioZ/idletrigger/internal/ui/nativeform"
 	"golang.org/x/sys/windows"
 	"unsafe"
 )
@@ -26,6 +27,9 @@ func (p *panel) build() error {
 			return err
 		}
 		p.subclassButton(hwnd)
+		if roleForButton(id) == buttonToggle {
+			nativeform.AnnotateCheckButton(hwnd, text, p.toggles[id])
+		}
 		return err
 	}
 	choice := func(id uint16, x, y, width, height int, options []string, current int) error {
@@ -327,13 +331,21 @@ func (p *panel) setChoice(group []uint16, selected uint16) {
 }
 func (p *panel) toggle(id uint16) {
 	p.toggles[id] = !p.toggles[id]
+	p.updateToggleAccessibility(id)
 	p.refreshTooltip(id)
 	p.invalidate(id)
 }
 func (p *panel) setToggle(id uint16, value bool) {
 	p.toggles[id] = value
+	p.updateToggleAccessibility(id)
 	p.refreshTooltip(id)
 	p.invalidate(id)
+}
+
+func (p *panel) updateToggleAccessibility(id uint16) {
+	if roleForButton(id) == buttonToggle {
+		nativeform.UpdateCheckButtonAccessibility(p.controls[id], p.toggles[id])
+	}
 }
 func (p *panel) choose(group []uint16, selected uint16) {
 	p.setChoice(group, selected)

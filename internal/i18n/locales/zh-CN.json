@@ -242,6 +242,7 @@
   "automation_no_processes": "尚未选择进程",
   "automation_process_count": "已选择 %d 个进程条件",
   "automation_process_details_title": "已选择的进程条件",
+  "automation_process_info_accessible": "显示已选进程详情",
   "automation_process_detail_name": "%s · 全部同名实例",
   "automation_process_detail_path": "%s · 指定文件：%s",
   "automation_trigger_process_running": "进程运行期间",

@@ -95,6 +95,7 @@ func systemHighContrastPalette() (Palette, bool) {
 		DangerHoverBorder:   windowText,
 		DangerPressedBorder: windowText,
 		DangerText:          highlightText,
+		DangerSurfaceText:   windowText,
 		DangerFocus:         highlightText,
 		CloseText:           buttonText,
 		CloseHover:          highlight,
