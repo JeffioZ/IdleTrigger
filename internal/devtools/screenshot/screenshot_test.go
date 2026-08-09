@@ -154,6 +154,24 @@ func TestPopupCaptureRejectsAnUnpaintedClient(t *testing.T) {
 	}
 }
 
+func TestVisualDetailScorePrefersRenderedControls(t *testing.T) {
+	blank := image.NewNRGBA(image.Rect(0, 0, 40, 24))
+	for y := 0; y < 24; y++ {
+		for x := 0; x < 40; x++ {
+			blank.SetNRGBA(x, y, color.NRGBA{R: 32, G: 32, B: 32, A: 255})
+		}
+	}
+	rendered := image.NewNRGBA(blank.Bounds())
+	copy(rendered.Pix, blank.Pix)
+	for x := 4; x < 36; x++ {
+		rendered.SetNRGBA(x, 5, color.NRGBA{R: 230, G: 230, B: 230, A: 255})
+		rendered.SetNRGBA(x, 18, color.NRGBA{R: 90, G: 140, B: 240, A: 255})
+	}
+	if got, base := visualDetailScore(rendered), visualDetailScore(blank); got <= base {
+		t.Fatalf("rendered detail score = %d, blank = %d", got, base)
+	}
+}
+
 func TestFixedSnapshotIsExplicit(t *testing.T) {
 	state := fixedSnapshot("zh-CN", controlpanel.ThemeDark)
 	if !state.IsChinese || state.Theme != controlpanel.ThemeDark || !state.NoSleepEnabled || state.IdleEnabled || !state.ThemeSwitchEnabled {

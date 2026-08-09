@@ -92,12 +92,15 @@ type bitmapInfo struct {
 var (
 	user32 = windows.NewLazySystemDLL("user32.dll")
 	gdi32  = windows.NewLazySystemDLL("gdi32.dll")
+	dwmapi = windows.NewLazySystemDLL("dwmapi.dll")
 
 	pGetWindowRect      = user32.NewProc("GetWindowRect")
 	pGetClientRect      = user32.NewProc("GetClientRect")
 	pClientToScreen     = user32.NewProc("ClientToScreen")
 	pPrintWindow        = user32.NewProc("PrintWindow")
+	pRedrawWindow       = user32.NewProc("RedrawWindow")
 	pSendMessage        = user32.NewProc("SendMessageW")
+	pDwmFlush           = dwmapi.NewProc("DwmFlush")
 	pCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	pDeleteDC           = gdi32.NewProc("DeleteDC")
 	pCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -128,22 +131,13 @@ func Run(args []string) error {
 		for _, job := range jobs {
 			darkmode.SetPreferredAppMode(job.theme == controlpanel.ThemeDark)
 			captureWindow := func(hwnd windows.Handle) error {
-				var client *image.NRGBA
-				var err error
-				if strings.HasPrefix(job.surface, "popup-") {
-					client, err = printWindowClient(hwnd)
-				} else {
-					var window *image.NRGBA
-					window, err = printWindow(hwnd)
-					if err == nil {
-						client, err = clientCrop(hwnd, window)
-					}
-				}
+				popup := strings.HasPrefix(job.surface, "popup-")
+				client, err := captureBestClientFrame(hwnd, popup)
 				if err != nil {
 					return err
 				}
-				if strings.HasPrefix(job.surface, "popup-") && !imageHasVisualVariation(client) {
-					return fmt.Errorf("popup capture %s contains no rendered content", job.surface)
+				if !imageHasVisualVariation(client) {
+					return fmt.Errorf("capture %s contains no rendered content", job.surface)
 				}
 				size := client.Bounds().Size()
 				key := fmt.Sprintf("%s/%s/%.2f", job.surface, job.language, job.scale)
@@ -190,6 +184,78 @@ func Run(args []string) error {
 		return nil
 	}
 	return run()
+}
+
+// captureBestClientFrame makes capture resilient to the first compositor
+// frame arriving before native child controls have painted. Each attempt asks
+// the complete child tree to paint synchronously; the frame containing the
+// most real UI detail wins instead of whichever frame happened to arrive first.
+func captureBestClientFrame(hwnd windows.Handle, clientOnly bool) (*image.NRGBA, error) {
+	const (
+		attempts       = 3
+		rdwInvalidate  = 0x0001
+		rdwFrame       = 0x0400
+		rdwUpdateNow   = 0x0100
+		rdwAllChildren = 0x0080
+	)
+	var best *image.NRGBA
+	bestScore := -1
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		pRedrawWindow.Call(uintptr(hwnd), 0, 0, rdwInvalidate|rdwFrame|rdwUpdateNow|rdwAllChildren)
+		pDwmFlush.Call()
+		var frame *image.NRGBA
+		if clientOnly {
+			frame, lastErr = printWindowClient(hwnd)
+		} else {
+			var window *image.NRGBA
+			window, lastErr = printWindow(hwnd)
+			if lastErr == nil {
+				frame, lastErr = clientCrop(hwnd, window)
+			}
+		}
+		if lastErr != nil {
+			continue
+		}
+		if score := visualDetailScore(frame); score > bestScore {
+			best, bestScore = frame, score
+		}
+	}
+	if best == nil {
+		return nil, lastErr
+	}
+	return best, nil
+}
+
+func visualDetailScore(img *image.NRGBA) int {
+	if img == nil || img.Bounds().Empty() {
+		return 0
+	}
+	score := 0
+	bounds := img.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			current := img.NRGBAAt(x, y)
+			if x > bounds.Min.X && colorDistance(current, img.NRGBAAt(x-1, y)) >= 18 {
+				score++
+			}
+			if y > bounds.Min.Y && colorDistance(current, img.NRGBAAt(x, y-1)) >= 18 {
+				score++
+			}
+		}
+	}
+	return score
+}
+
+func colorDistance(a, b color.NRGBA) int {
+	return absInt(int(a.R)-int(b.R)) + absInt(int(a.G)-int(b.G)) + absInt(int(a.B)-int(b.B))
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // framePanelScreenshot gives README captures a transparent rounded frame and
