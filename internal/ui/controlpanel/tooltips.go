@@ -96,42 +96,14 @@ func (p *panel) tooltipText(id uint16) string {
 		key = "tip_automation_master"
 	case idIdle:
 		return p.withPowerStatusTooltip(id, p.idleStatus, p.text("tip_idle"))
-	case idIdleWarning:
-		key = "tip_idle_warning"
-	case idIdleEnhanced:
-		key = "tip_idle_enhanced"
-	case idIdleTimeout:
-		key = "tip_idle_timeout"
-	case idIdleAction:
-		key = "tip_idle_action"
 	case idTheme:
 		key = "tip_theme"
-	case idFullscreen:
-		key = "tip_fullscreen"
-	case idBattery:
-		key = "tip_battery_theme"
-	case idIPLocation:
-		body := p.text("tip_ip_location")
-		if p.ipLocationLabel != "" {
-			body = fmt.Sprintf(p.text("tip_ip_location_current"), p.ipLocationLabel, body)
-		}
-		return p.withStateTooltip(id, body)
 	case idThemeSwitch:
 		key = "tip_theme_switch"
-	case idThemeRepair:
-		key = "tip_theme_repair"
-	case idHotkeys:
-		key = "tip_hotkeys"
-	case idAutostart:
-		key = "tip_autostart"
-	case idLogging:
-		key = "tip_logging"
-	case idLanguage:
-		key = "tip_language"
-	case idConfig:
-		key = "tip_config"
-	case idProjectHome:
-		key = "tip_project_home"
+	case idSettings:
+		key = "tip_settings"
+	case idTestWarning:
+		key = "tip_idle_warning_preview"
 	case idExit:
 		key = "tip_exit"
 	}
@@ -142,12 +114,7 @@ func (p *panel) tooltipText(id uint16) string {
 }
 
 func isThemeControl(id uint16) bool {
-	switch id {
-	case idTheme, idFullscreen, idBattery, idIPLocation, idThemeSwitch, idThemeRepair:
-		return true
-	default:
-		return false
-	}
+	return id == idTheme || id == idThemeSwitch
 }
 
 func (p *panel) withPowerStatusTooltip(id uint16, runtimeStatus, body string) string {
@@ -170,12 +137,6 @@ func (p *panel) withStateTooltip(id uint16, body string) string {
 			key = "tip_state_enabled"
 		}
 		return fmt.Sprintf(p.text("tip_toggle_state"), p.text(key), body)
-	case buttonChoice:
-		key := "tip_state_not_selected"
-		if state.Active {
-			key = "tip_state_selected"
-		}
-		return fmt.Sprintf(p.text("tip_choice_state"), p.text(key), body)
 	default:
 		return body
 	}

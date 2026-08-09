@@ -237,6 +237,9 @@ const (
 	pickerPrivacyY        = pickerPreviewY + pickerPreviewHeight + pickerRelatedGap - pickerTextOpticalBias
 	pickerButtonsY        = pickerPrivacyY + pickerTextHeight + pickerRelatedGap + pickerTextOpticalBias
 	windowHeight          = pickerButtonsY + nativeform.ButtonHeight + pickerBottomPadding
+	pickerButtonWidth     = nativeform.DialogButtonWidth
+	pickerConfirmX        = windowWidth - nativeform.FormPadding - pickerButtonWidth
+	pickerCancelX         = pickerConfirmX - nativeform.ControlGap - pickerButtonWidth
 	processScrollbarLane  = 24
 	idSearch              = 101
 	idRefresh             = 102
@@ -829,8 +832,8 @@ func (p *picker) create() (err error) {
 	p.previewScroll = previewScroll
 	p.syncPreviewScrollbarBounds()
 	p.child("STATIC", p.text("process_picker_privacy"), wsChild|wsVisible|ssLeft, 18, pickerPrivacyY, 664, pickerTextHeight, idPrivacy)
-	p.child("BUTTON", p.text("common_cancel"), wsChild|wsVisible|wsTabStop|bsOwnerDraw, 462, pickerButtonsY, 106, nativeform.ButtonHeight, idCancel)
-	p.child("BUTTON", p.text("process_picker_confirm"), wsChild|wsVisible|wsTabStop|bsOwnerDraw, 576, pickerButtonsY, 106, nativeform.ButtonHeight, idConfirm)
+	p.child("BUTTON", p.text("common_cancel"), wsChild|wsVisible|wsTabStop|bsOwnerDraw, pickerCancelX, pickerButtonsY, pickerButtonWidth, nativeform.ButtonHeight, idCancel)
+	p.child("BUTTON", p.text("process_picker_confirm"), wsChild|wsVisible|wsTabStop|bsOwnerDraw, pickerConfirmX, pickerButtonsY, pickerButtonWidth, nativeform.ButtonHeight, idConfirm)
 	if p.createErr != nil {
 		return p.createErr
 	}

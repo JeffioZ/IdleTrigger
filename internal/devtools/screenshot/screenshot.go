@@ -27,6 +27,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/automationpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/processpicker"
+	"github.com/JeffioZ/idletrigger/internal/ui/settingspanel"
 )
 
 var pngSignature = []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
@@ -165,6 +166,9 @@ func Run(args []string) error {
 				err = automationpanel.Capture(state, text, captureScale, job.theme == controlpanel.ThemeDark, true, captureWindow)
 			case "process-picker":
 				err = processpicker.Capture(fixedProcessPickerOptions(job.language, text), fixedProcessGroups(), captureScale, job.theme == controlpanel.ThemeDark, captureWindow)
+			case "settings", "settings-theme", "settings-app":
+				page := map[string]int{"settings": 0, "settings-theme": 1, "settings-app": 2}[job.surface]
+				err = settingspanel.CapturePage(fixedSettingsSnapshot(job.language), text, captureScale, job.theme == controlpanel.ThemeDark, page, captureWindow)
 			default:
 				err = controlpanel.Capture(fixedSnapshot(job.language, job.theme), text, captureScale, func(hwnd windows.Handle) error {
 					if strings.HasPrefix(job.surface, "popup-") {
@@ -413,8 +417,8 @@ func parse(args []string) (options, error) {
 				if opts.surface != "" {
 					return options{}, fmt.Errorf("screenshot surface specified more than once")
 				}
-				if value != "control" && value != "automation" && value != "automation-editor" && value != "process-picker" {
-					return options{}, fmt.Errorf("screenshot surface must be control, automation, automation-editor, or process-picker")
+				if value != "control" && value != "automation" && value != "automation-editor" && value != "process-picker" && value != "settings" && value != "settings-theme" && value != "settings-app" && value != "popup-system" {
+					return options{}, fmt.Errorf("unsupported screenshot surface %q", value)
 				}
 				opts.surface = value
 			case "--language":
@@ -470,7 +474,7 @@ func parse(args []string) (options, error) {
 }
 
 func usage() string {
-	return "usage:\n  IdleTrigger.exe screenshot --readme-set --output DIRECTORY\n  IdleTrigger.exe screenshot --review-set --output DIRECTORY\n  IdleTrigger.exe screenshot --popup-review-set --output DIRECTORY\n  IdleTrigger.exe screenshot [--surface control|automation|automation-editor|process-picker] --language en|zh-CN --theme light|dark --output FILE.png"
+	return "usage:\n  IdleTrigger.exe screenshot --readme-set --output DIRECTORY\n  IdleTrigger.exe screenshot --review-set --output DIRECTORY\n  IdleTrigger.exe screenshot --popup-review-set --output DIRECTORY\n  IdleTrigger.exe screenshot [--surface control|automation|automation-editor|process-picker|settings|settings-theme|settings-app] --language en|zh-CN --theme light|dark --output FILE.png"
 }
 
 func (opts options) jobs() ([]job, error) {
@@ -496,10 +500,8 @@ func (opts options) jobs() ([]job, error) {
 				name  string
 			}{{controlpanel.ThemeLight, "light"}, {controlpanel.ThemeDark, "dark"}} {
 				for _, language := range []string{"en", "zh-CN"} {
-					for _, surface := range []string{"popup-system", "popup-language", "popup-timeout", "popup-action"} {
-						name := fmt.Sprintf("%s-%s-%s-%s.png", surface, language, theme.name, scale.name)
-						jobs = append(jobs, job{surface: surface, language: language, theme: theme.value, scale: scale.value, path: filepath.Join(opts.output, name)})
-					}
+					name := fmt.Sprintf("popup-system-%s-%s-%s.png", language, theme.name, scale.name)
+					jobs = append(jobs, job{surface: "popup-system", language: language, theme: theme.value, scale: scale.value, path: filepath.Join(opts.output, name)})
 				}
 			}
 		}
@@ -511,7 +513,7 @@ func (opts options) jobs() ([]job, error) {
 		name  string
 	}{{controlpanel.ThemeLight, "light"}, {controlpanel.ThemeDark, "dark"}} {
 		for _, language := range []string{"en", "zh-CN"} {
-			for _, surface := range []string{"control", "automation", "automation-editor", "process-picker"} {
+			for _, surface := range []string{"control", "automation", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app"} {
 				name := fmt.Sprintf("%s-%s-%s.png", screenshotSurfaceFilename(surface), language, theme.name)
 				jobs = append(jobs, job{surface: surface, language: language, theme: theme.value, path: filepath.Join(opts.output, name)})
 			}
@@ -531,35 +533,33 @@ func screenshotSurfaceFilename(surface string) string {
 	}
 }
 
+func fixedSettingsSnapshot(language string) settingspanel.State {
+	return settingspanel.State{KeepScreenOn: true, NoSleepOnBattery: false, NoSleepBatteryThreshold: 20, Version: "devtools",
+		IdleTimeoutMinutes: 30, IdleAction: "lock", IdleWarningSeconds: 30, IdleEnhancedMonitor: true,
+		ThemeMode: "sunrise", ThemeLightTime: "07:00", ThemeDarkTime: "19:00", ThemeIPLocationEnabled: true,
+		ThemeLocationStatus: fmt.Sprintf(i18n.T(language, "settings_location_ip_resolved"), "Shanghai, China"),
+		ThemeDarkOnBattery:  true, ThemeSkipFullscreen: true, Language: "auto", HotkeysEnabled: true,
+		AutostartEnabled: true, LoggingEnabled: false, Chinese: language == "zh-CN"}
+}
+
 func fixedSnapshot(language string, theme controlpanel.Theme) controlpanel.State {
 	chinese := language == "zh-CN"
 	schedule := fmt.Sprintf(i18n.T(language, "theme_schedule_sunrise_format"), "07:00", "19:00")
 	schedule = fmt.Sprintf(i18n.T(language, "theme_schedule_source_format"), schedule, i18n.T(language, "theme_location_utc_offset"))
 	automationSummary := fmt.Sprintf(i18n.T(language, "automation_overview_next"), 2, "2026-07-15 23:00")
 	return controlpanel.State{
-		NoSleepEnabled:      true,
-		NoSleepStatus:       i18n.T(language, "status_enabled"),
-		AutomationEnabled:   true,
-		IdleEnabled:         false,
-		IdleStatus:          i18n.T(language, "status_disabled"),
-		AutomationCount:     2,
-		AutomationSummary:   automationSummary,
-		IdleWarningEnabled:  true,
-		IdleEnhancedMonitor: false,
-		IdleTimeout:         30,
-		IdleWarningSeconds:  30,
-		IdleAction:          "lock",
-		ThemeSwitchEnabled:  true,
-		DarkOnBattery:       true,
-		SkipFullscreen:      true,
-		IPLocationEnabled:   false,
-		HotkeysEnabled:      false,
-		AutostartEnabled:    true,
-		LoggingEnabled:      true,
-		IsChinese:           chinese,
-		ThemeSchedule:       schedule,
-		AppVersion:          "dev",
-		Theme:               theme,
+		NoSleepEnabled:     true,
+		NoSleepStatus:      i18n.T(language, "status_enabled"),
+		AutomationEnabled:  true,
+		IdleEnabled:        false,
+		IdleStatus:         i18n.T(language, "status_disabled"),
+		AutomationCount:    2,
+		AutomationSummary:  automationSummary,
+		ThemeSwitchEnabled: true,
+		IsChinese:          chinese,
+		ThemeSchedule:      schedule,
+		AppVersion:         "dev",
+		Theme:              theme,
 	}
 }
 

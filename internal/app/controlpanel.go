@@ -5,6 +5,7 @@ import (
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/ui/automationpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
+	"github.com/JeffioZ/idletrigger/internal/ui/settingspanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 	"github.com/JeffioZ/idletrigger/internal/version"
 )
@@ -15,7 +16,7 @@ type controlPanelSnapshot struct {
 }
 
 func (s *runtimeState) showControlPanel() {
-	if automationpanel.Focus() {
+	if settingspanel.Focus() || automationpanel.Focus() {
 		return
 	}
 	s.openControlPanel(false)
@@ -42,27 +43,17 @@ func (s *runtimeState) prepareControlPanel(refresh bool) {
 				AutomationEnabled:       s.cfg.AutomationEnabled,
 				AutomationCount:         s.enabledAutomationCount(),
 				AutomationSummary:       s.automationOverviewText(),
-				IdleEnabled:             s.cfg.IdleTimeoutMinutes > 0,
+				IdleEnabled:             s.cfg.IdleEnabled,
 				IdleStatus:              s.monitorStatusText(),
-				IdleWarningEnabled:      s.cfg.IdleWarningSeconds > 0,
-				IdleEnhancedMonitor:     s.cfg.IdleEnhancedMonitor,
-				IdleTimeout:             s.cfg.IdleTimeoutMinutes,
-				IdleWarningSeconds:      s.cfg.IdleWarningSeconds,
-				IdleAction:              string(s.cfg.IdleAction),
 				ThemeSwitchEnabled:      s.cfg.ThemeSwitchEnabled,
 				ThemeUnavailable:        !s.themeAvailable(),
 				ThemeUnavailableDetail:  s.themeUnavailableDetail(),
-				DarkOnBattery:           s.cfg.ThemeDarkOnBattery,
-				SkipFullscreen:          s.cfg.ThemeSkipFullscreen,
-				IPLocationEnabled:       s.cfg.ThemeIPLocationEnabled,
-				HotkeysEnabled:          s.cfg.HotkeysEnabled,
-				AutostartEnabled:        s.cfg.AutostartEnabled,
-				LoggingEnabled:          s.cfg.LoggingEnabled,
 				IsChinese:               i18n.ResolveLanguage(s.lang) == "zh-CN",
 				ThemeSchedule:           s.themeScheduleText(true),
-				IPLocationLabel:         s.ipLocationLabel(),
 				AppVersion:              version.Value,
 				Owner:                   trayicon.WindowHandle(),
+				IdleWarningSeconds:      s.cfg.IdleWarningSeconds,
+				IdleAction:              string(s.cfg.IdleAction),
 				DeveloperCapturePanel:   s.devtools.CapturePanel,
 				DeveloperWarningPreview: s.devtools.WarningPreview,
 			},

@@ -18,12 +18,6 @@ func OpenCapturePopup(panelWindow windows.Handle, surface string) (windows.Handl
 	switch surface {
 	case "popup-system":
 		p.openQuickMenu()
-	case "popup-language":
-		p.openLanguageMenu()
-	case "popup-timeout":
-		p.openChoice(idIdleTimeout)
-	case "popup-action":
-		p.openChoice(idIdleAction)
 	default:
 		return 0, fmt.Errorf("unknown capture popup %q", surface)
 	}

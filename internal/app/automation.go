@@ -15,6 +15,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/automationpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/processpicker"
+	"github.com/JeffioZ/idletrigger/internal/ui/settingspanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 )
 
@@ -95,6 +96,7 @@ func hideAutomationUI() {
 	automationpanel.Hide()
 	processpicker.Hide()
 	actionwarning.Hide()
+	settingspanel.Hide()
 }
 
 func (s *runtimeState) startAutomation() {

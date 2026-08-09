@@ -16,9 +16,15 @@ func (p *panel) namedLabel(id uint16, value string, useFont windows.Handle) {
 	p.child("STATIC", value, wsChild|ssLeft, 0, 0, 1, 1, id, useFont)
 }
 func (p *panel) edit(id uint16, value string) {
+	p.editWithStyle(id, value, 0)
+}
+func (p *panel) numericEdit(id uint16, value string) {
+	p.editWithStyle(id, value, esNumber)
+}
+func (p *panel) editWithStyle(id uint16, value string, extraStyle uintptr) {
 	surfaceID := idFieldSurfaceBase + id
 	surface := p.child("STATIC", "", formSurfaceStyle, 0, 0, 1, 1, surfaceID, p.font)
-	hwnd := p.child("EDIT", value, wsChild|wsTabStop|wsClipSiblings|esAutoHScroll, 0, 0, 1, 1, id, p.font)
+	hwnd := p.child("EDIT", value, wsChild|wsTabStop|wsClipSiblings|esAutoHScroll|extraStyle, 0, 0, 1, 1, id, p.font)
 	cue := ""
 	if id == idName {
 		cue = p.t("automation_name_placeholder")

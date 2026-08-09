@@ -27,20 +27,9 @@ func buttonWndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 func (p *panel) handleButtonMessage(hwnd windows.Handle, id uint16, msg uint32, wp uintptr) (bool, uintptr) {
 	switch msg {
 	case wmMouseMove:
-		if id == idProjectHome {
-			p.setProjectHomeCursor(true)
-		}
 		p.setHover(hwnd)
 	case wmMouseLeave:
 		p.clearHover(hwnd)
-		if id == idProjectHome {
-			p.setProjectHomeCursor(false)
-		}
-	case wmSetCursor:
-		if id == idProjectHome {
-			p.setProjectHomeCursor(true)
-			return true, 1
-		}
 	case wmLButtonDown:
 		p.leaveKeyboardNavigation()
 		if !p.menuClickKeepsOpen(id) {
@@ -73,12 +62,7 @@ func (p *panel) handleButtonKeyDown(id uint16, key uintptr) (bool, uintptr) {
 }
 
 func isPopupTrigger(id uint16) bool {
-	switch id {
-	case idQuickActions, idLanguage, idIdleTimeout, idIdleAction:
-		return true
-	default:
-		return false
-	}
+	return id == idQuickActions
 }
 
 func isChoiceOpenKey(key uintptr) bool {

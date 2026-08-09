@@ -614,6 +614,12 @@ func TestProcessPickerSpacingUsesSharedRhythm(t *testing.T) {
 	if windowHeight-(pickerButtonsY+nativeform.ButtonHeight) != pickerBottomPadding {
 		t.Fatal("process picker buttons should keep the shared bottom inset")
 	}
+	if pickerButtonWidth != nativeform.DialogButtonWidth {
+		t.Fatal("process picker footer buttons should use the shared dialog width")
+	}
+	if pickerConfirmX-(pickerCancelX+pickerButtonWidth) != nativeform.ControlGap {
+		t.Fatal("process picker footer buttons should use the shared control gap")
+	}
 	if emptyY := pickerListY + (pickerListHeight-pickerTextHeight)/2; emptyY*2+pickerTextHeight != pickerListY*2+pickerListHeight {
 		t.Fatal("empty-state text should be vertically centered in the process list")
 	}

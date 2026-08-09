@@ -46,89 +46,35 @@ func TestPowerManagementTooltipSeparatesManualAndRuntimeState(t *testing.T) {
 	}
 }
 
-func TestProjectHomeLinkColorUsesASeparateLightHoverRamp(t *testing.T) {
-	light := colors.ForTheme(false)
-	dark := colors.ForTheme(true)
-
-	if got := projectHomeLinkColor(light, false, buttonVisualState{}, 0); got != light.Accent {
-		t.Fatalf("light normal color = %#x, want %#x", got, light.Accent)
+func TestQuickActionsKeepTheCompleteBuiltInSystemSet(t *testing.T) {
+	want := []uint16{idLock, idSleep, idHibernate, idShutdown, idRestart}
+	got := quickActionIDs()
+	if len(got) != len(want) {
+		t.Fatalf("quick actions = %v", got)
 	}
-	if got := projectHomeLinkColor(light, false, buttonVisualState{Hovered: true}, 0); got != colors.RGB(0, 90, 158) {
-		t.Fatalf("light hover color = %#x", got)
-	}
-	if got := projectHomeLinkColor(light, false, buttonVisualState{Pressed: true}, 0); got != colors.RGB(0, 60, 102) {
-		t.Fatalf("light pressed color = %#x", got)
-	}
-	if got := projectHomeLinkColor(dark, true, buttonVisualState{Hovered: true}, 0); got != dark.AccentHover {
-		t.Fatalf("dark hover color = %#x, want %#x", got, dark.AccentHover)
-	}
-	if got := projectHomeLinkColor(dark, true, buttonVisualState{Pressed: true, Disabled: true}, 0); got != dark.DisabledText {
-		t.Fatalf("disabled color = %#x, want %#x", got, dark.DisabledText)
-	}
-}
-
-func TestTimeoutChoices(t *testing.T) {
-	choices, selected := timeoutChoices(30, true)
-	if len(choices) != 10 || choices[selected].minutes != 30 || choices[selected].label != "30 分钟" {
-		t.Fatalf("unexpected preset choices: %#v, selected=%d", choices, selected)
-	}
-
-	choices, selected = timeoutChoices(90, false)
-	if len(choices) != 10 || choices[selected].minutes != 30 || choices[selected].label != "30 minutes" {
-		t.Fatalf("unsupported timeout was not normalized: %#v, selected=%d", choices, selected)
-	}
-}
-
-func TestChoiceSelectionModelAppliesByOwnerAndIndex(t *testing.T) {
-	var action Action
-	var value int
-	p := &panel{
-		onAction: func(next Action, nextValue int) { action, value = next, nextValue },
-		labels:   map[uint16]string{},
-		choice: choiceSurface{
-			options:  map[uint16][]string{idIdleAction: {"Sleep", "Shutdown"}},
-			selected: map[uint16]int{idIdleAction: 0},
-		},
-	}
-	p.applyChoice(idIdleAction, 1)
-	if p.choice.selected[idIdleAction] != 1 || p.labels[idIdleAction] != "Shutdown" {
-		t.Fatalf("selection was not applied: selected=%d label=%q", p.choice.selected[idIdleAction], p.labels[idIdleAction])
-	}
-	if action != ActIdleAction || value != 1 {
-		t.Fatalf("selection callback = (%v, %d)", action, value)
-	}
-	p.applyChoice(idIdleAction, 1)
-	if value != 1 {
-		t.Fatal("reapplying the selected row should remain a no-op")
-	}
-}
-
-func TestFormatTimeout(t *testing.T) {
-	if got := formatTimeout(60, false); got != "1 hour" {
-		t.Fatalf("formatTimeout(60) = %q", got)
-	}
-	if got := formatTimeout(120, true); got != "2 小时" {
-		t.Fatalf("formatTimeout(120) = %q", got)
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("quick action %d = %d, want %d", index, got[index], want[index])
+		}
 	}
 }
 
 func TestVisualStateForButtonRoles(t *testing.T) {
 	tests := []struct {
-		name                           string
-		id                             uint16
-		toggleOn, choiceSelected, down bool
-		wantRole                       buttonRole
-		wantActive                     bool
+		name           string
+		id             uint16
+		toggleOn, down bool
+		wantRole       buttonRole
+		wantActive     bool
 	}{
 		{name: "toggle on", id: idNoSleep, toggleOn: true, wantRole: buttonToggle, wantActive: true},
 		{name: "toggle off", id: idTheme, wantRole: buttonToggle, wantActive: false},
-		{name: "command remains stateless", id: idIdleAction, toggleOn: true, choiceSelected: true, wantRole: buttonCommand, wantActive: false},
-		{name: "system controls remains a command", id: idQuickActions, toggleOn: true, choiceSelected: true, wantRole: buttonCommand, wantActive: false},
-		{name: "disabled state is retained", id: idIdleWarning, toggleOn: true, down: true, wantRole: buttonToggle, wantActive: true},
+		{name: "system controls remains a command", id: idQuickActions, toggleOn: true, wantRole: buttonCommand, wantActive: false},
+		{name: "disabled state is retained", id: idIdle, toggleOn: true, down: true, wantRole: buttonToggle, wantActive: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := visualStateForButton(tt.id, tt.toggleOn, tt.choiceSelected, tt.down)
+			got := visualStateForButton(tt.id, tt.toggleOn, tt.down)
 			if got.Role != tt.wantRole || got.Active != tt.wantActive || got.Disabled != tt.down {
 				t.Fatalf("visualStateForButton(%d) = %#v, want role=%d active=%v disabled=%v", tt.id, got, tt.wantRole, tt.wantActive, tt.down)
 			}
@@ -139,7 +85,6 @@ func TestVisualStateForButtonRoles(t *testing.T) {
 func TestControlStateRetainsInteractiveFlags(t *testing.T) {
 	p := &panel{
 		toggles:            map[uint16]bool{idNoSleep: true},
-		selected:           map[uint16]bool{},
 		disabled:           map[uint16]bool{idNoSleep: true},
 		hoverID:            idNoSleep,
 		keyboardNavigation: true,
@@ -151,41 +96,31 @@ func TestControlStateRetainsInteractiveFlags(t *testing.T) {
 }
 
 func TestControlStateIncludesNativeDisabledFlag(t *testing.T) {
-	p := &panel{toggles: map[uint16]bool{}, selected: map[uint16]bool{}, disabled: map[uint16]bool{}}
-	if state := p.controlState(idConfig, odsDisabled); !state.Disabled {
+	p := &panel{toggles: map[uint16]bool{}, disabled: map[uint16]bool{}}
+	if state := p.controlState(idSettings, odsDisabled); !state.Disabled {
 		t.Fatalf("native disabled flag was lost: %#v", state)
 	}
 }
 
-func TestMenuTriggersAreLimitedToClickMenus(t *testing.T) {
-	for _, id := range []uint16{idQuickActions, idLanguage} {
-		if !isMenuTrigger(id) {
-			t.Fatalf("menu trigger %d was not recognized", id)
-		}
+func TestPopupTriggerIsLimitedToSystemControls(t *testing.T) {
+	if !isPopupTrigger(idQuickActions) {
+		t.Fatal("system controls must open the shared popup")
 	}
-	for _, id := range []uint16{idConfig, idExit, idSleep} {
-		if isMenuTrigger(id) {
-			t.Fatalf("command %d must not use the menu-trigger style", id)
+	for _, id := range []uint16{idSettings, idExit, idSleep, idThemeSwitch} {
+		if isPopupTrigger(id) {
+			t.Fatalf("command %d must not be a popup trigger", id)
 		}
 	}
 }
 
 func TestTriggerOpenUsesOnlyItsRealMenuState(t *testing.T) {
 	p := &panel{}
-	if p.triggerOpen(idQuickActions) || p.triggerOpen(idLanguage) || p.triggerOpen(idIdleTimeout) {
+	if p.triggerOpen(idQuickActions) {
 		t.Fatal("fresh panel must not report any trigger as open")
 	}
 	p.choice.openID = idQuickActions
-	if !p.triggerOpen(idQuickActions) || p.triggerOpen(idLanguage) {
+	if !p.triggerOpen(idQuickActions) || p.triggerOpen(idSettings) {
 		t.Fatal("quick menu open state was not isolated")
-	}
-	p.choice.openID = idLanguage
-	if p.triggerOpen(idQuickActions) || !p.triggerOpen(idLanguage) {
-		t.Fatal("language menu open state was not isolated")
-	}
-	p.choice.openID = idIdleAction
-	if p.triggerOpen(idIdleTimeout) || !p.triggerOpen(idIdleAction) {
-		t.Fatal("choice trigger must use its matching open ID")
 	}
 }
 
@@ -203,7 +138,7 @@ func TestDangerQuickActionsAreLimitedToShutdownAndRestart(t *testing.T) {
 }
 
 func TestPopupMenuItemsKeepOnlySemanticDifferences(t *testing.T) {
-	p := &panel{lang: func(key string) string { return key }, selected: map[uint16]bool{idLangZH: true}}
+	p := &panel{lang: func(key string) string { return key }}
 	quick := p.quickMenuItems()
 	if len(quick) != len(quickActionIDs()) {
 		t.Fatalf("quick items = %d", len(quick))
@@ -214,19 +149,15 @@ func TestPopupMenuItemsKeepOnlySemanticDifferences(t *testing.T) {
 			t.Fatalf("quick item %+v danger = %v, want %v", item, item.Danger, wantDanger)
 		}
 	}
-	languages, selected := p.languageMenuItems()
-	if len(languages) != 2 || selected != 1 || languages[0].Danger || languages[1].Danger {
-		t.Fatalf("language items = %+v, selected = %d", languages, selected)
-	}
 }
 
 func TestButtonRoleMappingCoversEveryPanelAction(t *testing.T) {
-	for _, id := range []uint16{idNoSleep, idAutomationEnabled, idIdle, idIdleWarning, idIdleEnhanced, idTheme, idBattery, idFullscreen, idIPLocation, idHotkeys, idAutostart, idLogging} {
+	for _, id := range []uint16{idNoSleep, idAutomationEnabled, idIdle, idTheme} {
 		if got := roleForButton(id); got != buttonToggle {
 			t.Fatalf("toggle id %d has role %d", id, got)
 		}
 	}
-	for _, id := range []uint16{idQuickActions, idAutomation, idLock, idSleep, idHibernate, idShutdown, idRestart, idThemeSwitch, idThemeRepair, idConfig, idProjectHome, idExit, idTestWarning} {
+	for _, id := range []uint16{idQuickActions, idAutomation, idLock, idSleep, idHibernate, idShutdown, idRestart, idThemeSwitch, idSettings, idExit} {
 		if got := roleForButton(id); got != buttonCommand {
 			t.Fatalf("command id %d has role %d", id, got)
 		}
@@ -280,18 +211,26 @@ func TestWindowIconThemeAndReloadDecisions(t *testing.T) {
 }
 
 func TestRefreshActionsKeepPanelOpen(t *testing.T) {
-	for _, action := range []Action{ActLanguage, ActSwitchTheme, ActRepairTheme} {
+	for _, action := range []Action{ActSwitchTheme, ActSettingsOpen, ActAutomationOpen} {
 		if actionClosesPanel(action) {
 			t.Fatalf("action %d should keep the panel available for an immediate refresh", action)
 		}
 	}
-	for _, action := range []Action{ActSleep, ActRestart, ActConfig, ActExit} {
+	for _, action := range []Action{ActSleep, ActRestart, ActExit} {
 		if !actionClosesPanel(action) {
 			t.Fatalf("action %d should close the panel", action)
 		}
 	}
-	if actionClosesPanel(ActProjectHome) {
-		t.Fatal("project home should keep the panel open")
+}
+
+func TestIdlePreviewActionTranslationKey(t *testing.T) {
+	for _, action := range []string{"lock", "sleep", "hibernate", "shutdown", "restart"} {
+		if got, want := idlePreviewActionTranslationKey(action), "menu_action_"+action; got != want {
+			t.Fatalf("idlePreviewActionTranslationKey(%q) = %q, want %q", action, got, want)
+		}
+	}
+	if got := idlePreviewActionTranslationKey("invalid"); got != "menu_action_lock" {
+		t.Fatalf("invalid preview action key = %q", got)
 	}
 }
 
@@ -408,9 +347,6 @@ func TestVisualStateTokensKeepSpecifiedLogicalSizes(t *testing.T) {
 	if control.FocusInset != 2 || control.FocusRingWidth != 2 {
 		t.Fatalf("focus tokens = inset %d width %d, want 2/2", control.FocusInset, control.FocusRingWidth)
 	}
-	if control.ArrowWidth != 8 || control.ArrowHeight != 4 {
-		t.Fatalf("disclosure tokens = arrow %dx%d, want 8x4", control.ArrowWidth, control.ArrowHeight)
-	}
 	metrics := newPanelMetrics(defaultPanelStyle, 1.5)
 	if got := metrics.px(control.FocusRingWidth); got != 3 {
 		t.Fatalf("scaled focus ring width = %d, want 3", got)
@@ -519,7 +455,6 @@ func TestThemeRepairCompletionForcesCompleteFrame(t *testing.T) {
 func TestControlStateCombinesModelAndNativeState(t *testing.T) {
 	p := &panel{
 		toggles:            map[uint16]bool{idIdle: true},
-		selected:           map[uint16]bool{},
 		disabled:           map[uint16]bool{},
 		hoverID:            idIdle,
 		keyboardNavigation: true,
@@ -539,33 +474,24 @@ func TestUnavailableThemeDisablesEveryThemeControl(t *testing.T) {
 		tooltips:         map[uint16][]uint16{},
 	}
 	p.applyDependentStates()
-	for _, id := range []uint16{idTheme, idFullscreen, idBattery, idIPLocation, idThemeSwitch, idThemeRepair} {
+	for _, id := range []uint16{idTheme, idThemeSwitch} {
 		if !p.disabled[id] {
 			t.Fatalf("theme control %d remained enabled", id)
 		}
 	}
 }
 
-func TestIdleMonitorDisablesEveryDependentControl(t *testing.T) {
+func TestAvailableThemeLeavesItsVisibleControlsEnabled(t *testing.T) {
 	p := &panel{
-		toggles:  map[uint16]bool{},
+		toggles:  map[uint16]bool{idTheme: true},
 		disabled: map[uint16]bool{},
 		controls: map[uint16]windows.Handle{},
 		tooltips: map[uint16][]uint16{},
 	}
-	ids := []uint16{idIdleWarning, idIdleEnhanced, idIdleTimeout, idIdleAction, idTestWarning}
 	p.applyDependentStates()
-	for _, id := range ids {
-		if !p.disabled[id] {
-			t.Fatalf("idle-monitor control %d remained enabled", id)
-		}
-	}
-
-	p.toggles[idIdle] = true
-	p.applyDependentStates()
-	for _, id := range ids {
+	for _, id := range []uint16{idTheme, idThemeSwitch} {
 		if p.disabled[id] {
-			t.Fatalf("idle-monitor control %d remained disabled", id)
+			t.Fatalf("theme control %d remained disabled", id)
 		}
 	}
 }
@@ -573,15 +499,14 @@ func TestIdleMonitorDisablesEveryDependentControl(t *testing.T) {
 func TestOwnerDrawnButtonsIgnoreStaleNativeHotlight(t *testing.T) {
 	p := &panel{
 		toggles:  map[uint16]bool{},
-		selected: map[uint16]bool{},
 		disabled: map[uint16]bool{},
 	}
-	for _, id := range []uint16{idNoSleep, idThemeSwitch, idQuickActions, idLanguage, idIdleTimeout, idIdleAction, idProjectHome, idExit} {
+	for _, id := range []uint16{idNoSleep, idThemeSwitch, idQuickActions, idSettings, idExit} {
 		if state := p.controlState(id, odsHotlight); state.Hovered {
 			t.Fatalf("owner-drawn control %d retained stale native hotlight", id)
 		}
 	}
-	sequence := []uint16{idNoSleep, idIdle, idThemeSwitch, idLanguage, idExit}
+	sequence := []uint16{idNoSleep, idIdle, idThemeSwitch, idSettings, idExit}
 	for index, current := range sequence {
 		p.hoverID = current
 		if state := p.controlState(current, 0); !state.Hovered {
@@ -609,21 +534,21 @@ func TestChoiceTriggerKeyboardKeysOpenTheSharedPopup(t *testing.T) {
 	}
 }
 
-func TestChoiceTriggerTogglesARealSharedPopup(t *testing.T) {
+func TestSystemControlsTriggerTogglesARealSharedPopup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping native Win32 integration test in short mode")
 	}
-	err := Capture(State{IdleEnabled: true, IdleTimeout: 30}, func(key string) string { return key }, 1, func(hwnd windows.Handle) error {
+	err := Capture(State{}, func(key string) string { return key }, 1, func(hwnd windows.Handle) error {
 		p := panelFor(hwnd)
 		if p == nil {
 			t.Fatal("capture panel is not active")
 		}
-		p.openChoice(idIdleTimeout)
+		p.openQuickMenu()
 		popup := p.choice.popup
-		if p.choice.openID != idIdleTimeout || popup == nil || !popup.IsOpen() || popup.Window() == 0 {
-			t.Fatal("choice trigger did not create the shared native popup")
+		if p.choice.openID != idQuickActions || popup == nil || !popup.IsOpen() || popup.Window() == 0 {
+			t.Fatal("system controls did not create the shared native popup")
 		}
-		p.openChoice(idIdleTimeout)
+		p.openQuickMenu()
 		if p.choice.openID != 0 || p.choice.popup != nil || popup.IsOpen() {
 			t.Fatal("clicking the open choice trigger did not close its popup")
 		}
@@ -634,7 +559,7 @@ func TestChoiceTriggerTogglesARealSharedPopup(t *testing.T) {
 	}
 }
 
-func TestFixedMenuTriggersUseTheSharedPopup(t *testing.T) {
+func TestSystemControlsUseTheSharedPopup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping native Win32 integration test in short mode")
 	}
@@ -643,7 +568,7 @@ func TestFixedMenuTriggersUseTheSharedPopup(t *testing.T) {
 		if p == nil {
 			t.Fatal("capture panel is not active")
 		}
-		for _, id := range append(quickActionIDs(), languageIDs()...) {
+		for _, id := range quickActionIDs() {
 			if p.controls[id] != 0 {
 				t.Fatalf("legacy fixed-menu child %d still exists", id)
 			}
@@ -653,14 +578,9 @@ func TestFixedMenuTriggersUseTheSharedPopup(t *testing.T) {
 		if p.choice.openID != idQuickActions || quick == nil || !quick.IsOpen() {
 			t.Fatal("system controls did not open the shared popup")
 		}
-		p.openLanguageMenu()
-		language := p.choice.popup
-		if quick.IsOpen() || p.choice.openID != idLanguage || language == nil || !language.IsOpen() {
-			t.Fatal("language settings did not replace the system-controls popup")
-		}
 		p.closeChoice(false)
-		if language.IsOpen() || p.choice.openID != 0 || p.choice.popup != nil {
-			t.Fatal("language popup did not close through the shared lifecycle")
+		if quick.IsOpen() || p.choice.openID != 0 || p.choice.popup != nil {
+			t.Fatal("system-controls popup did not close through the shared lifecycle")
 		}
 		return nil
 	})
@@ -689,16 +609,8 @@ func TestMenuClickKeepsOnlyTheOpenSurfaceInteractive(t *testing.T) {
 	if p.menuClickKeepsOpen(idSleep) {
 		t.Fatal("popup values are no longer owner child controls")
 	}
-	if p.menuClickKeepsOpen(idLanguage) {
+	if p.menuClickKeepsOpen(idSettings) {
 		t.Fatal("another trigger must close the current menu before switching")
-	}
-
-	p = &panel{choice: choiceSurface{openID: idIdleTimeout}}
-	if !p.menuClickKeepsOpen(idIdleTimeout) {
-		t.Fatal("clicking the open choice trigger should keep its popup alive until the deferred toggle")
-	}
-	if p.menuClickKeepsOpen(idIdleAction) {
-		t.Fatal("another choice trigger must close the open choice before switching")
 	}
 }
 
@@ -714,9 +626,7 @@ func TestCommandActionMapsDirectCommands(t *testing.T) {
 		{idLock, ActLock},
 		{idRestart, ActRestart},
 		{idThemeSwitch, ActSwitchTheme},
-		{idThemeRepair, ActRepairTheme},
-		{idConfig, ActConfig},
-		{idProjectHome, ActProjectHome},
+		{idSettings, ActSettingsOpen},
 		{idExit, ActExit},
 	}
 	for _, test := range tests {
@@ -744,21 +654,11 @@ func TestToggleCommandsPreserveIdleMutualExclusion(t *testing.T) {
 	}
 }
 
-func TestLanguageCommandDispatchesOnlyForAChange(t *testing.T) {
-	var actions []Action
-	var values []int
-	p := &panel{
-		selected: map[uint16]bool{idLangEN: true},
-		controls: map[uint16]windows.Handle{},
-		onAction: func(action Action, value int) {
-			actions = append(actions, action)
-			values = append(values, value)
-		},
-	}
-	p.selectLanguage(idLangEN, 0)
-	p.selectLanguage(idLangZH, 1)
-	if len(actions) != 1 || actions[0] != ActLanguage || values[0] != 1 {
-		t.Fatalf("language actions = %v, values = %v", actions, values)
+func TestSettingsCommandOpensTheDedicatedSettingsWindow(t *testing.T) {
+	p := &panel{}
+	action, value, ok := p.commandAction(idSettings)
+	if !ok || action != ActSettingsOpen || value != 0 {
+		t.Fatalf("settings command = (%v, %d, %v)", action, value, ok)
 	}
 }
 
@@ -767,14 +667,10 @@ func TestEveryControlPanelActionHasAUICommandPath(t *testing.T) {
 		toggles:  map[uint16]bool{},
 		disabled: map[uint16]bool{},
 	}
-	mapped := map[Action]bool{
-		ActIdleTimeout: true,
-		ActIdleAction:  true,
-		ActLanguage:    true,
-	}
+	mapped := map[Action]bool{}
 	for _, id := range []uint16{
 		idAutomation, idSleep, idHibernate, idShutdown, idLock, idRestart,
-		idThemeSwitch, idThemeRepair, idConfig, idProjectHome, idExit,
+		idThemeSwitch, idSettings, idExit,
 	} {
 		action, _, ok := p.commandAction(id)
 		if !ok {
@@ -783,9 +679,7 @@ func TestEveryControlPanelActionHasAUICommandPath(t *testing.T) {
 		mapped[action] = true
 	}
 	for _, id := range []uint16{
-		idNoSleep, idAutomationEnabled, idIdle, idIdleWarning, idIdleEnhanced,
-		idTheme, idBattery, idFullscreen, idIPLocation,
-		idHotkeys, idAutostart, idLogging,
+		idNoSleep, idAutomationEnabled, idIdle, idTheme,
 	} {
 		action, ok := p.toggleCommand(id)
 		if !ok {
@@ -799,7 +693,7 @@ func TestEveryControlPanelActionHasAUICommandPath(t *testing.T) {
 			t.Errorf("control panel action %d has no UI command path", action)
 		}
 	}
-	for action := ActIdleTimeout; action <= ActExit; action++ {
+	for action := ActThemeToggle; action <= ActExit; action++ {
 		if !mapped[action] {
 			t.Errorf("control panel action %d has no UI command path", action)
 		}

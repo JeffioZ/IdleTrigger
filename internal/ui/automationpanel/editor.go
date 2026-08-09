@@ -112,13 +112,13 @@ func (p *panel) createEditorControls() {
 	p.namedLabel(idOptionsTitle, p.t("automation_action_options"), p.sectionFont)
 	p.child("BUTTON", p.t("automation_keep_screen"), wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idKeepScreen, p.font)
 	p.namedLabel(idIdleMinutesLabel, p.t("automation_idle_minutes"), p.font)
-	p.edit(idIdleMinutes, "")
+	p.numericEdit(idIdleMinutes, "")
 	p.namedLabel(idWarningLabel, p.t("automation_warning_seconds"), p.font)
-	p.edit(idWarningSeconds, "")
+	p.numericEdit(idWarningSeconds, "")
 	p.namedLabel(idBlockedLabel, p.t("automation_blocked_policy"), p.font)
 	p.combo(idBlockedPolicy, 0, 0, 314, blockedLabels(p.text))
 	p.namedLabel(idMaxWaitLabel, p.t("automation_max_wait"), p.font)
-	p.edit(idMaxWait, "")
+	p.numericEdit(idMaxWait, "")
 	p.namedLabel(idNoOptions, p.t("automation_no_action_options"), p.font)
 	p.namedLabel(idValidation, p.t("automation_runtime_note"), p.font)
 	p.child("BUTTON", p.t("common_cancel"), wsChild|wsTabStop|bsOwnerDraw, 0, 0, 1, 1, idCancel, p.font)
@@ -334,7 +334,11 @@ func (p *panel) layoutEditorContent(layoutWidth int) int {
 	y += labelH + formContentGap
 	switch action {
 	case automation.ActionStayAwake:
-		p.place(idKeepScreen, pad, y, contentW, checkboxRowHeight, true)
+		checkWidth := nativeform.CheckboxHitWidth(p.hwnd, p.font, p.labels[idKeepScreen], p.scale())
+		if checkWidth <= 0 {
+			checkWidth = contentW
+		}
+		p.place(idKeepScreen, pad, y, min(contentW, checkWidth), checkboxRowHeight, true)
 		y += checkboxRowHeight
 	case automation.ActionEnableIdle:
 		p.place(idIdleMinutesLabel, pad, y, columnW, labelH, true)
@@ -364,8 +368,8 @@ func (p *panel) layoutEditorContent(layoutWidth int) int {
 	y += formRelatedGap
 	p.place(idValidation, pad, y, contentW, labelH, true)
 	y += labelH + formSectionGap
-	p.place(idCancel, pad+contentW-220, y, 102, nativeform.ButtonHeight, true)
-	p.place(idSave, pad+contentW-110, y, 110, nativeform.ButtonHeight, true)
+	p.place(idSave, pad+contentW-nativeform.DialogButtonWidth, y, nativeform.DialogButtonWidth, nativeform.ButtonHeight, true)
+	p.place(idCancel, pad+contentW-2*nativeform.DialogButtonWidth-nativeform.ControlGap, y, nativeform.DialogButtonWidth, nativeform.ButtonHeight, true)
 	y += nativeform.ButtonHeight + formEdgePadding
 	return y
 }
@@ -445,7 +449,10 @@ func (p *panel) handleManager(id, notification uint16) {
 func (p *panel) handleEditor(id, notification uint16) {
 	if notification == enChange {
 		switch id {
-		case idName, idDate, idTime, idEndTime, idIdleMinutes, idWarningSeconds, idMaxWait:
+		case idIdleMinutes, idWarningSeconds, idMaxWait:
+			p.sanitizeNumericEdit(id)
+			p.clearEditorError()
+		case idName, idDate, idTime, idEndTime:
 			p.clearEditorError()
 		}
 	}
@@ -505,6 +512,21 @@ func (p *panel) handleEditor(id, notification uint16) {
 			p.cancelEditor()
 		}
 	}
+}
+
+func (p *panel) sanitizeNumericEdit(id uint16) {
+	value := p.controlText(id)
+	filtered := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, value)
+	if filtered == value {
+		return
+	}
+	p.setText(id, filtered)
+	pSendMessage.Call(uintptr(p.controls[id]), emSetSel, ^uintptr(0), ^uintptr(0))
 }
 
 func ownerDrawButtonClicked(notification uint16) bool {

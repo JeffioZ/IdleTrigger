@@ -94,13 +94,13 @@ func TestReviewSetCoversEverySurfaceLanguageAndTheme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 16 {
-		t.Fatalf("review job count = %d, want 16", len(jobs))
+	if len(jobs) != 28 {
+		t.Fatalf("review job count = %d, want 28", len(jobs))
 	}
 	want := map[string]bool{}
 	for _, theme := range []string{"light", "dark"} {
 		for _, language := range []string{"en", "zh-CN"} {
-			for _, surface := range []string{"control-panel", "automation-manager", "automation-editor", "process-picker"} {
+			for _, surface := range []string{"control-panel", "automation-manager", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app"} {
 				want[surface+"-"+language+"-"+theme+".png"] = true
 			}
 		}
@@ -126,8 +126,8 @@ func TestPopupReviewSetCoversEveryScaleLanguageThemeAndPopup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 48 {
-		t.Fatalf("popup review job count = %d, want 48", len(jobs))
+	if len(jobs) != 12 {
+		t.Fatalf("popup review job count = %d, want 12", len(jobs))
 	}
 	wantScales := map[float64]bool{1: true, 1.5: true, 2: true}
 	seen := make(map[string]bool)
@@ -180,7 +180,7 @@ func TestFixedSnapshotIsExplicit(t *testing.T) {
 	if state.NoSleepStatus != "已启用" || state.IdleStatus != "已禁用" {
 		t.Fatalf("fixture runtime status is not explicit: %#v", state)
 	}
-	if state.IPLocationEnabled || state.HotkeysEnabled || state.Theme == controlpanel.ThemeFollowSystem {
+	if state.Theme == controlpanel.ThemeFollowSystem {
 		t.Fatalf("fixture permits external state: %#v", state)
 	}
 }

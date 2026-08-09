@@ -1,11 +1,15 @@
 package app
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/JeffioZ/idletrigger/internal/config"
 	"github.com/JeffioZ/idletrigger/internal/feature/theme"
+	"github.com/JeffioZ/idletrigger/internal/i18n"
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
+	"github.com/JeffioZ/idletrigger/internal/ui/settingspanel"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
-	"time"
 )
 
 func (s *runtimeState) restartThemeScheduler() {
@@ -18,8 +22,23 @@ func (s *runtimeState) restartThemeScheduler() {
 func (s *runtimeState) refreshControlPanelThemeSchedule() {
 	text := s.themeScheduleText(true)
 	trayicon.Post(func() {
-		controlpanel.UpdateThemeSchedule(text, s.ipLocationLabel())
+		controlpanel.UpdateThemeSchedule(text)
+		settingspanel.UpdateLocationStatus(s.themeLocationStatusText())
 	})
+}
+
+func (s *runtimeState) themeLocationStatusText() string {
+	if s.cfg.ThemeMode != "sunrise" {
+		return ""
+	}
+	loc := s.themeLocationInfo(false)
+	if loc.Source == theme.LocationSourceIP && loc.LocationLabel != "" {
+		return fmt.Sprintf(i18n.T(s.lang, "settings_location_ip_resolved"), loc.LocationLabel)
+	}
+	if s.cfg.ThemeIPLocationEnabled {
+		return fmt.Sprintf(i18n.T(s.lang, "settings_location_ip_pending"), s.locationSourceShort(loc))
+	}
+	return fmt.Sprintf(i18n.T(s.lang, "settings_location_auto_status"), s.locationSourceShort(loc))
 }
 
 func (s *runtimeState) startIPLocationCycle() {
@@ -70,7 +89,7 @@ func (s *runtimeState) queryIPLocationInBackground(generation uint64) {
 }
 
 func ipLocationLookupEnabled(cfg config.Config) bool {
-	return cfg.ThemeIPLocationEnabled && cfg.ThemeMode == "sunrise" && cfg.ThemeLatitude == 0 && cfg.ThemeLongitude == 0
+	return cfg.ThemeIPLocationEnabled && cfg.ThemeMode == "sunrise"
 }
 
 func (s *runtimeState) themeIPLocationLookupEnabled() bool {

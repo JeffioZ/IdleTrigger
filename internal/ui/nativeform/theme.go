@@ -68,8 +68,14 @@ func ApplyControl(hwnd windows.Handle, dark bool) {
 		return
 	}
 	name := "Explorer"
-	if dark {
-		name = darkControlTheme(hwnd)
+	className := controlClassName(hwnd)
+	// EDIT backgrounds are painted by the parent through WM_CTLCOLOREDIT.
+	// Disabling the visual-style renderer prevents Windows from painting a
+	// second, mismatched disabled surface inside the owner-drawn field.
+	if className == "EDIT" {
+		name = ""
+	} else if dark {
+		name = darkControlTheme(className)
 	}
 	value, err := windows.UTF16PtrFromString(name)
 	if err != nil {
@@ -78,14 +84,18 @@ func ApplyControl(hwnd windows.Handle, dark bool) {
 	pSetWindowTheme.Call(uintptr(hwnd), uintptr(unsafe.Pointer(value)), 0)
 }
 
-func darkControlTheme(hwnd windows.Handle) string {
+func controlClassName(hwnd windows.Handle) string {
 	buffer := make([]uint16, 64)
 	length, _, _ := pGetClassName.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
 	if length > 0 {
-		className := strings.ToUpper(windows.UTF16ToString(buffer[:length]))
-		if className == "EDIT" || className == "COMBOBOX" {
-			return "DarkMode_CFD"
-		}
+		return strings.ToUpper(windows.UTF16ToString(buffer[:length]))
+	}
+	return ""
+}
+
+func darkControlTheme(className string) string {
+	if className == "COMBOBOX" {
+		return "DarkMode_CFD"
 	}
 	return "DarkMode_Explorer"
 }

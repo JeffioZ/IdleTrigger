@@ -25,6 +25,7 @@ const (
 	drawCenter      = 0x00000001
 	drawVCenter     = 0x00000004
 	drawSingleLine  = 0x00000020
+	drawCalcRect    = 0x00000400
 	drawLeft        = 0x00000000
 	drawPSolid      = 0
 )
@@ -44,7 +45,97 @@ var (
 	controlLineTo       = controlGDI32.NewProc("LineTo")
 	controlSetTextColor = controlGDI32.NewProc("SetTextColor")
 	controlSetBkMode    = controlGDI32.NewProc("SetBkMode")
+	controlTextExtent   = controlGDI32.NewProc("GetTextExtentPoint32W")
+	controlGetDC        = controlUser32.NewProc("GetDC")
+	controlReleaseDC    = controlUser32.NewProc("ReleaseDC")
 )
+
+type textExtent struct{ Width, Height int32 }
+
+// TextWidth returns the rendered width of a single-line label in physical
+// pixels. Native form layouts use it to keep adjacent labels and text links
+// aligned across languages and DPI scales without language-specific offsets.
+func TextWidth(hwnd, font windows.Handle, label string) int {
+	text, err := windows.UTF16FromString(label)
+	if err != nil || len(text) < 2 || hwnd == 0 || font == 0 {
+		return 0
+	}
+	dc, _, _ := controlGetDC.Call(uintptr(hwnd))
+	if dc == 0 {
+		return 0
+	}
+	defer controlReleaseDC.Call(uintptr(hwnd), dc)
+	old, _, _ := controlSelectObject.Call(dc, uintptr(font))
+	defer controlSelectObject.Call(dc, old)
+	bounds := Rect{}
+	if height, _, _ := controlDrawText.Call(dc, uintptr(unsafe.Pointer(&text[0])), ^uintptr(0), uintptr(unsafe.Pointer(&bounds)), drawLeft|drawSingleLine|drawCalcRect); height == 0 {
+		return 0
+	}
+	return int(bounds.Right - bounds.Left)
+}
+
+// CheckboxHitWidth returns the compact logical width that contains the
+// checkbox glyph, its label, and the focus inset. Keeping the native BUTTON
+// window to this width makes its click and tooltip area match what is drawn.
+func CheckboxHitWidth(hwnd, font windows.Handle, label string, scale float64) int {
+	if scale <= 0 {
+		scale = 1
+	}
+	physicalTextWidth := TextWidth(hwnd, font, label)
+	if physicalTextWidth <= 0 {
+		return 0
+	}
+	logicalTextWidth := int(float64(physicalTextWidth)/scale + 0.999)
+	return checkboxHitWidthForText(logicalTextWidth)
+}
+
+func checkboxHitWidthForText(textWidth int) int {
+	if textWidth < 0 {
+		textWidth = 0
+	}
+	// DrawCheckbox uses 2 px before the glyph and 8 px before the label.
+	// The final 2 px keeps the focus frame from touching the last glyph.
+	return 2 + CheckboxSize + 8 + textWidth + 2
+}
+
+// DrawTextLink renders a native owner-drawn button as a conventional text
+// hyperlink while retaining keyboard focus and pressed-state feedback.
+func DrawTextLink(dc windows.Handle, bounds Rect, font windows.Handle, label string, palette colors.Palette, background uint32, state ControlState, scale float64) {
+	fillRect(dc, bounds, background)
+	color := palette.Accent
+	if state.Hovered {
+		color = palette.AccentHover
+	}
+	if state.Pressed {
+		color = palette.AccentPressed
+	}
+	text, err := windows.UTF16FromString(label)
+	if err != nil || len(text) < 2 {
+		return
+	}
+	old, _, _ := controlSelectObject.Call(uintptr(dc), uintptr(font))
+	controlSetTextColor.Call(uintptr(dc), uintptr(color))
+	controlSetBkMode.Call(uintptr(dc), drawTransparent)
+	textBounds := bounds
+	controlDrawText.Call(uintptr(dc), uintptr(unsafe.Pointer(&text[0])), ^uintptr(0), uintptr(unsafe.Pointer(&textBounds)), drawLeft|drawVCenter|drawSingleLine)
+	var extent textExtent
+	controlTextExtent.Call(uintptr(dc), uintptr(unsafe.Pointer(&text[0])), uintptr(len(text)-1), uintptr(unsafe.Pointer(&extent)))
+	underlineY := bounds.Top + (bounds.Bottom-bounds.Top+extent.Height)/2
+	pen, _, _ := controlCreatePen.Call(drawPSolid, uintptr(max32(1, scaledPixels(1, scale))), uintptr(color))
+	if pen != 0 {
+		oldPen, _, _ := controlSelectObject.Call(uintptr(dc), pen)
+		controlMoveToEx.Call(uintptr(dc), uintptr(bounds.Left), uintptr(underlineY), 0)
+		controlLineTo.Call(uintptr(dc), uintptr(min(bounds.Right, bounds.Left+extent.Width)), uintptr(underlineY))
+		controlSelectObject.Call(uintptr(dc), oldPen)
+		controlDeleteObject.Call(pen)
+	}
+	controlSelectObject.Call(uintptr(dc), old)
+	if state.Focused {
+		frame := bounds
+		frame.Bottom--
+		frameRect(dc, frame, palette.Focus)
+	}
+}
 
 func DrawSurface(dc windows.Handle, bounds Rect, palette colors.Palette, background, fill, border uint32, radius int32) {
 	fillRect(dc, bounds, background)

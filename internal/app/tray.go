@@ -10,6 +10,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/version"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 func (s *runtimeState) updateIcon() {
@@ -31,7 +32,11 @@ func (s *runtimeState) refreshTrayThemeIcon() {
 
 func (s *runtimeState) buildTooltip() string {
 	lines := []string{tooltipTitle(version.Value)}
-	lines = append(lines, s.statusLine("tooltip_nosleep", shortStatus(s.lang, keepawake.IsEnabled())))
+	stayAwake := shortStatus(s.lang, keepawake.IsEnabled())
+	if s.noSleepAutomationPaused() || (s.noSleepRequested() && s.batteryBlocked) {
+		stayAwake = i18n.T(s.lang, "status_paused")
+	}
+	lines = append(lines, s.statusLine("tooltip_nosleep", stayAwake))
 	if s.idleSuspended() {
 		lines = append(lines, s.statusLine("tooltip_idle", i18n.T(s.lang, "status_paused")))
 	} else if s.idleAutomationPaused() {
@@ -97,7 +102,7 @@ func (s *runtimeState) formatThemeSchedule(showSource, short bool) string {
 	if !s.themeAvailable() {
 		return i18n.T(s.lang, "theme_unavailable")
 	}
-	loc := theme.LocationInfo{Latitude: s.cfg.ThemeLatitude, Longitude: s.cfg.ThemeLongitude, Source: theme.LocationSourceConfigured}
+	loc := theme.AutoLocationInfo(false, false)
 	if s.cfg.ThemeMode == "sunrise" {
 		loc = s.themeLocationInfo(false)
 	}
@@ -129,8 +134,6 @@ func (s *runtimeState) formatThemeSchedule(showSource, short bool) string {
 
 func (s *runtimeState) locationSourceShort(loc theme.LocationInfo) string {
 	switch loc.Source {
-	case theme.LocationSourceConfigured:
-		return i18n.T(s.lang, "theme_location_configured")
 	case theme.LocationSourceIP:
 		return i18n.T(s.lang, "theme_location_ip")
 	case theme.LocationSourceTimezone:
@@ -143,22 +146,7 @@ func (s *runtimeState) locationSourceShort(loc theme.LocationInfo) string {
 }
 
 func (s *runtimeState) themeLocationInfo(blockIPLookup bool) theme.LocationInfo {
-	lat, lon := s.cfg.ThemeLatitude, s.cfg.ThemeLongitude
-	if lat != 0 || lon != 0 {
-		return theme.LocationInfo{Latitude: lat, Longitude: lon, Source: theme.LocationSourceConfigured}
-	}
 	return theme.AutoLocationInfo(s.cfg.ThemeIPLocationEnabled, blockIPLookup)
-}
-
-func (s *runtimeState) ipLocationLabel() string {
-	if !s.cfg.ThemeIPLocationEnabled {
-		return ""
-	}
-	loc := s.themeLocationInfo(false)
-	if loc.Source == theme.LocationSourceIP {
-		return loc.LocationLabel
-	}
-	return ""
 }
 
 func tooltipText(lines []string) string {
@@ -169,7 +157,14 @@ func tooltipText(lines []string) string {
 			clean = append(clean, line)
 		}
 	}
-	return strings.Join(clean, "\n")
+	encoded := utf16.Encode([]rune(strings.Join(clean, "\n")))
+	if len(encoded) > 120 {
+		encoded = encoded[:120]
+		if len(encoded) > 0 && encoded[len(encoded)-1] >= 0xD800 && encoded[len(encoded)-1] <= 0xDBFF {
+			encoded = encoded[:len(encoded)-1]
+		}
+	}
+	return string(utf16.Decode(encoded))
 }
 
 // ---- idle monitor -----------------------------------------------------

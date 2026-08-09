@@ -6,6 +6,15 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/colors"
 )
 
+func TestCheckboxHitWidthForTextMatchesDrawnContent(t *testing.T) {
+	if got, want := checkboxHitWidthForText(80), 108; got != want {
+		t.Fatalf("checkbox hit width = %d, want %d", got, want)
+	}
+	if got, want := checkboxHitWidthForText(-1), 28; got != want {
+		t.Fatalf("empty checkbox hit width = %d, want %d", got, want)
+	}
+}
+
 func TestScaledPixelsPreservesFractionalDPI(t *testing.T) {
 	tests := []struct {
 		scale float64

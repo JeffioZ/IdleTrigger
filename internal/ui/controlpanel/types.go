@@ -26,7 +26,6 @@ type buttonRole uint8
 const (
 	buttonCommand buttonRole = iota
 	buttonToggle
-	buttonChoice
 )
 
 type buttonVisualState struct {
@@ -72,48 +71,30 @@ const (
 	ActAutomationOpen
 	ActAutomationToggle
 	ActIdleToggle
-	ActIdleTimeout Action = 100 + iota
-	ActIdleAction
-	ActIdleWarningToggle
-	ActIdleEnhancedMonitorToggle
 	ActThemeToggle
-	ActBatteryToggle
-	ActFullscreenToggle
-	ActIPLocationToggle
 	ActSwitchTheme
-	ActRepairTheme
-	ActHotkeyToggle
-	ActAutostartToggle
-	ActLoggingToggle
-	ActLanguage
-	ActConfig
-	ActProjectHome
+	ActSettingsOpen
 	ActExit
 )
 
 type State struct {
-	NoSleepEnabled, IdleEnabled                       bool
-	NoSleepStatus, IdleStatus                         string
-	AutomationEnabled                                 bool
-	AutomationCount                                   int
-	AutomationSummary                                 string
-	IdleWarningEnabled                                bool
-	IdleEnhancedMonitor                               bool
-	IdleTimeout                                       int
-	IdleWarningSeconds                                int
-	IdleAction                                        string
-	ThemeSwitchEnabled, DarkOnBattery, SkipFullscreen bool
-	ThemeUnavailable                                  bool
-	ThemeUnavailableDetail                            string
-	IPLocationEnabled                                 bool
-	HotkeysEnabled, AutostartEnabled, LoggingEnabled  bool
-	IsChinese                                         bool
-	ThemeSchedule                                     string
-	IPLocationLabel                                   string
-	AppVersion                                        string
-	Theme                                             Theme
-	Owner                                             windows.Handle
-	DeveloperCapturePanel, DeveloperWarningPreview    bool
+	NoSleepEnabled, IdleEnabled bool
+	NoSleepStatus, IdleStatus   string
+	AutomationEnabled           bool
+	AutomationCount             int
+	AutomationSummary           string
+	ThemeSwitchEnabled          bool
+	ThemeUnavailable            bool
+	ThemeUnavailableDetail      string
+	IsChinese                   bool
+	ThemeSchedule               string
+	IdleWarningSeconds          int
+	IdleAction                  string
+	AppVersion                  string
+	Theme                       Theme
+	Owner                       windows.Handle
+	DeveloperCapturePanel       bool
+	DeveloperWarningPreview     bool
 }
 
 type LangFunc func(key string) string
@@ -130,7 +111,6 @@ const (
 	wmLButtonUp        = 0x0202
 	wmMouseWheel       = 0x020A
 	wmMouseLeave       = 0x02A3
-	wmSetCursor        = 0x0020
 	wmNcLButtonDown    = 0x00A1
 	wmParentNotify     = 0x0210
 	wmEraseBkgnd       = 0x0014
@@ -195,19 +175,18 @@ const (
 	vkF4                          = 0x73
 	vkEscape                      = 0x1B
 
-	odsSelected  = 0x0001
-	odsDisabled  = 0x0004
-	odsFocus     = 0x0010
-	odsHotlight  = 0x0040
-	psSolid      = 0
-	dtCenter     = 0x00000001
-	dtVCenter    = 0x00000004
-	dtLeft       = 0x00000000
-	dtWordBreak  = 0x00000010
-	dtCalcRect   = 0x00000400
-	dtSingleLine = 0x00000020
-	transparent  = 1
-	tmeLeave     = 0x00000002
+	odsSelected = 0x0001
+	odsDisabled = 0x0004
+	odsFocus    = 0x0010
+	odsHotlight = 0x0040
+	psSolid     = 0
+	dtCenter    = 0x00000001
+	dtVCenter   = 0x00000004
+	dtLeft      = 0x00000000
+	dtWordBreak = 0x00000010
+	dtCalcRect  = 0x00000400
+	transparent = 1
+	tmeLeave    = 0x00000002
 
 	ttsAlwaysTip       = 0x0001
 	ttsNoPrefix        = 0x0002
@@ -237,24 +216,9 @@ const (
 	idAutomation        = 11
 	idAutomationEnabled = 12
 	idIdle              = 20
-	idIdleWarning       = 21
-	idIdleEnhanced      = 22
 	idTheme             = 30
-	idBattery           = 32
-	idFullscreen        = 33
 	idThemeSwitch       = 34
-	idThemeRepair       = 35
-	idIPLocation        = 36
-	idHotkeys           = 40
-	idAutostart         = 41
-	idLogging           = 42
-	idIdleTimeout       = 120
-	idIdleAction        = 121
-	idLanguage          = 150
-	idLangEN            = 152
-	idLangZH            = 153
-	idConfig            = 500
-	idProjectHome       = 501
+	idSettings          = 499
 	idExit              = 502
 	idTestWarning       = 600
 )
@@ -289,7 +253,6 @@ var (
 	pGetDpiForSystem       = user32.NewProc("GetDpiForSystem")
 	pSetForeground         = user32.NewProc("SetForegroundWindow")
 	pLoadCursor            = user32.NewProc("LoadCursorW")
-	pSetCursor             = user32.NewProc("SetCursor")
 	pSetFocus              = user32.NewProc("SetFocus")
 	pEnableWindow          = user32.NewProc("EnableWindow")
 	pFillRect              = user32.NewProc("FillRect")
@@ -307,8 +270,6 @@ var (
 	pSetTextColor          = gdi32.NewProc("SetTextColor")
 	pSetBkColor            = gdi32.NewProc("SetBkColor")
 	pSetBkMode             = gdi32.NewProc("SetBkMode")
-	pMoveToEx              = gdi32.NewProc("MoveToEx")
-	pLineTo                = gdi32.NewProc("LineTo")
 	pSelectObject          = gdi32.NewProc("SelectObject")
 	pInitCommonControlsEx  = comctl.NewProc("InitCommonControlsEx")
 	pDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -359,9 +320,6 @@ type panel struct {
 	metrics                 panelMetrics
 	clientH                 int
 	appVersion              string
-	idleTimeout             int
-	idleWarningSeconds      int
-	idleAction              string
 	isChinese               bool
 	owner                   windows.Handle
 	iconThemeDark           bool
@@ -374,7 +332,7 @@ type panel struct {
 	labels                  map[uint16]string
 	staticKinds             map[uint16]staticKind
 	tooltips                map[uint16][]uint16
-	toggles, selected       map[uint16]bool
+	toggles                 map[uint16]bool
 	disabled                map[uint16]bool
 	oldButtonProc           map[windows.Handle]uintptr
 	hoverID                 uint16
@@ -384,15 +342,16 @@ type panel struct {
 	automationSummaryID     uint16
 	noSleepStatus           string
 	idleStatus              string
+	powerSummaryID          uint16
 	automationCount         int
 	automationSummary       string
 	developerCapturePanel   bool
 	developerWarningPreview bool
+	idleWarningSeconds      int
+	idleAction              string
 	themeSchedule           string
 	themeUnavailable        bool
 	themeUnavailableDetail  string
-	ipLocationLabel         string
-	timeoutOptions          []timeoutChoice
 	choice                  choiceSurface
 	themeRefreshing         bool
 	style, exStyle          uint32
@@ -413,11 +372,9 @@ type panel struct {
 // choiceSurface retains selector data while nativeform owns the one shared
 // popup implementation used by both the main panel and form windows.
 type choiceSurface struct {
-	options  map[uint16][]string
-	selected map[uint16]int
-	openID   uint16
-	serial   uint64
-	popup    *nativeform.ChoicePopup
+	openID uint16
+	serial uint64
+	popup  *nativeform.ChoicePopup
 }
 
 // Show opens the panel or closes the currently open panel. It must be called

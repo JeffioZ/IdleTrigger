@@ -23,29 +23,6 @@ func (p *panel) quickMenuItems() []nativeform.ChoicePopupItem {
 	return items
 }
 
-func (p *panel) openLanguageMenu() {
-	items, selected := p.languageMenuItems()
-	ids := languageIDs()
-	p.openPopup(idLanguage, selected, true, items, func(index int) {
-		if index >= 0 && index < len(ids) {
-			p.selectLanguage(ids[index], index)
-		}
-	})
-}
-
-func (p *panel) languageMenuItems() ([]nativeform.ChoicePopupItem, int) {
-	selected := 0
-	if p.selected[idLangZH] {
-		selected = 1
-	}
-	labels := []string{p.text("menu_lang_en"), p.text("menu_lang_zh")}
-	items := make([]nativeform.ChoicePopupItem, len(labels))
-	for index, label := range labels {
-		items[index] = nativeform.ChoicePopupItem{Label: label, Value: index}
-	}
-	return items, selected
-}
-
 // closeOpenMenus handles an in-panel click outside the currently open menu.
 func (p *panel) closeOpenMenus() {
 	p.closeChoice(false)
@@ -73,19 +50,8 @@ func (p *panel) setDisabled(id uint16, value bool) {
 }
 
 func (p *panel) applyDependentStates() {
-	monitorEnabled := p.toggles[idIdle]
-	p.setDisabled(idIdleWarning, !monitorEnabled)
-	p.setDisabled(idIdleEnhanced, !monitorEnabled)
-	p.setDisabled(idIdleTimeout, !monitorEnabled)
-	p.setDisabled(idIdleAction, !monitorEnabled)
-	p.setDisabled(idTestWarning, !monitorEnabled)
-	themeEnabled := p.toggles[idTheme] && !p.themeUnavailable
 	p.setDisabled(idTheme, p.themeUnavailable)
-	p.setDisabled(idFullscreen, !themeEnabled)
-	p.setDisabled(idBattery, !themeEnabled)
-	p.setDisabled(idIPLocation, !themeEnabled)
 	p.setDisabled(idThemeSwitch, p.themeUnavailable)
-	p.setDisabled(idThemeRepair, p.themeUnavailable)
 }
 
 func (p *panel) setKeyboardNavigation(active bool) {

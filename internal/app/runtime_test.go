@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 
@@ -116,7 +117,7 @@ func TestNoSleepRequestSources(t *testing.T) {
 
 func TestDeveloperIdleMonitorUsesSafeRuntimeSettings(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.IdleTimeoutMinutes = 0
+	cfg.IdleEnabled = false
 	cfg.IdleAction = config.ActionShutdown
 	state := runtimeState{
 		cfg:      cfg,
@@ -129,7 +130,7 @@ func TestDeveloperIdleMonitorUsesSafeRuntimeSettings(t *testing.T) {
 	if !active || threshold != 10*time.Second || warning != 5*time.Second || action != config.ActionLock {
 		t.Fatalf("developer idle settings = %s/%s/%s/%v", threshold, warning, action, active)
 	}
-	if state.cfg.IdleTimeoutMinutes != 0 || state.cfg.IdleAction != config.ActionShutdown {
+	if state.cfg.IdleEnabled || state.cfg.IdleTimeoutMinutes != config.DefaultIdleTimeoutMinutes || state.cfg.IdleAction != config.ActionShutdown {
 		t.Fatalf("developer idle monitor changed config: %+v", state.cfg)
 	}
 }
@@ -311,13 +312,15 @@ func TestPowerEventClassification(t *testing.T) {
 
 func TestRuntimeModeConfigTransitions(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.IdleEnabled = true
 	setNoSleepConfig(&cfg, true, true)
-	if !cfg.NoSleepEnabled || !cfg.KeepScreenOn || cfg.IdleTimeoutMinutes != 0 {
+	if !cfg.NoSleepEnabled || !cfg.KeepScreenOn || cfg.IdleEnabled || cfg.IdleTimeoutMinutes != config.DefaultIdleTimeoutMinutes {
 		t.Fatalf("Stay Awake transition = %+v", cfg)
 	}
 
-	setIdleTimeoutConfig(&cfg, 90)
-	if cfg.NoSleepEnabled || cfg.IdleTimeoutMinutes != 90 {
+	cfg.IdleTimeoutMinutes = 90
+	setIdleEnabledConfig(&cfg, true)
+	if cfg.NoSleepEnabled || !cfg.IdleEnabled || cfg.IdleTimeoutMinutes != 90 {
 		t.Fatalf("idle-monitor transition = %+v", cfg)
 	}
 }
@@ -334,6 +337,7 @@ func TestActionAvailability(t *testing.T) {
 		{config.ActionHibernate, powerstate.Capabilities{HibernateAvailable: true}, true},
 		{config.ActionShutdown, powerstate.Capabilities{}, true},
 		{config.ActionLock, powerstate.Capabilities{}, true},
+		{config.ActionRestart, powerstate.Capabilities{}, true},
 	}
 	for _, tt := range tests {
 		if got := actionAvailable(tt.action, tt.caps); got != tt.want {
@@ -347,13 +351,8 @@ func TestIPLocationLookupEligibility(t *testing.T) {
 	cfg.ThemeMode = "sunrise"
 	cfg.ThemeIPLocationEnabled = true
 	if !ipLocationLookupEnabled(cfg) {
-		t.Fatal("IP lookup should be enabled for sunrise mode without coordinates")
+		t.Fatal("IP lookup should be enabled for sunrise mode")
 	}
-	cfg.ThemeLatitude = 31.2
-	if ipLocationLookupEnabled(cfg) {
-		t.Fatal("manual coordinates should disable IP lookup")
-	}
-	cfg.ThemeLatitude = 0
 	cfg.ThemeMode = "fixed"
 	if ipLocationLookupEnabled(cfg) {
 		t.Fatal("fixed mode should disable IP lookup")
@@ -456,8 +455,8 @@ func TestTooltipStaysWithinTrayLimit(t *testing.T) {
 		if hasDanglingTooltipSuffix(got) {
 			t.Fatalf("tooltip has dangling suffix for %s: %q", lang, got)
 		}
-		if length := len([]rune(got)); length > 120 {
-			t.Fatalf("tooltip is too long for %s: %d %q", lang, length, got)
+		if length := len(utf16.Encode([]rune(got))); length > 120 {
+			t.Fatalf("tooltip is too long for %s: %d UTF-16 units %q", lang, length, got)
 		}
 	}
 }
@@ -541,6 +540,7 @@ func TestIdleSuspendedByEffectiveKeepAwake(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Language = "zh-CN"
 	cfg.NoSleepEnabled = true
+	cfg.IdleEnabled = true
 	cfg.IdleTimeoutMinutes = 30
 	state := runtimeState{cfg: cfg, lang: "zh-CN"}
 	if !state.idleSuspended() {
@@ -557,7 +557,7 @@ func TestIdleSuspendedByEffectiveKeepAwake(t *testing.T) {
 func TestAutomaticIdleStatusUsesEffectiveDuration(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Language = "zh-CN"
-	cfg.IdleTimeoutMinutes = 0
+	cfg.IdleEnabled = false
 	cfg.IdleAction = config.ActionLock
 	state := runtimeState{
 		cfg:       cfg,
@@ -576,6 +576,7 @@ func TestAutomaticIdleStatusUsesEffectiveDuration(t *testing.T) {
 func TestAutomaticIdlePauseIsVisibleInTooltip(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Language = "zh-CN"
+	cfg.IdleEnabled = true
 	cfg.IdleTimeoutMinutes = 30
 	state := runtimeState{
 		cfg:       cfg,

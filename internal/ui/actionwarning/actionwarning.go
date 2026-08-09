@@ -66,8 +66,8 @@ const (
 	warningPadding      = 16
 	warningBodyHeight   = 76
 	warningButtonGap    = 8
-	warningButtonWidth  = 100
-	warningButtonHeight = 36
+	warningButtonWidth  = nativeform.DialogButtonWidth
+	warningButtonHeight = nativeform.ButtonHeight
 	warningBodyX        = warningPadding
 	warningBodyY        = warningPadding
 	warningBodyWidth    = warningWidth - 2*warningPadding

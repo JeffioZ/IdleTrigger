@@ -248,6 +248,7 @@ const (
 	wsExTopmost         = 0x00000008
 	wsExAppWindow       = 0x00040000
 	esAutoHScroll       = 0x0080
+	esNumber            = 0x2000
 	lbsNotify           = 0x0001
 	lbsNoIntegralHeight = 0x0100
 	bsOwnerDraw         = 0x0000000B
@@ -263,6 +264,7 @@ const (
 	wmGetTextLength     = 0x000E
 	wmGetText           = 0x000D
 	emSetMargins        = 0x00D3
+	emSetSel            = 0x00B1
 	bnClicked           = 0
 	lbnDblClk           = 2
 	lbnSelChange        = 1

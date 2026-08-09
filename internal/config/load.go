@@ -49,12 +49,22 @@ func loadFrom(p string) (Config, error) {
 		cfg.LoadError = loadErr.Error()
 		return cfg, loadErr
 	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	metadata, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		loadErr := fmt.Errorf("parse config: %w", err)
 		cfg = DefaultConfig()
 		cfg.SourceRevision = configRevision(data)
 		cfg.LoadError = loadErr.Error()
 		return cfg, loadErr
+	}
+	// Before template v14, zero overloaded both "disabled" and the timeout
+	// value. Preserve the old enabled state while giving disabled users a
+	// useful remembered timeout for the settings UI.
+	if !metadata.IsDefined("idle_enabled") {
+		cfg.IdleEnabled = cfg.IdleTimeoutMinutes > 0
+		if cfg.IdleTimeoutMinutes == 0 {
+			cfg.IdleTimeoutMinutes = DefaultIdleTimeoutMinutes
+		}
 	}
 	normalized := NormalizeConfig(cfg)
 	normalized.SourceRevision = configRevision(data)

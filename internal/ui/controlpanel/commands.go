@@ -44,18 +44,41 @@ func (p *panel) commandAction(id uint16) (Action, int, bool) {
 		return ActAutomationOpen, 0, true
 	case idThemeSwitch:
 		return ActSwitchTheme, 0, true
-	case idThemeRepair:
-		return ActRepairTheme, 0, true
-	case idConfig:
-		return ActConfig, 0, true
-	case idProjectHome:
-		return ActProjectHome, 0, true
+	case idSettings:
+		return ActSettingsOpen, 0, true
 	case idExit:
 		return ActExit, 0, true
 	case idTestWarning:
 		p.showWarningPreview()
+		return 0, 0, false
 	}
 	return 0, 0, false
+}
+
+func (p *panel) showWarningPreview() {
+	Hide()
+	idlewarning.SetLanguage(p.isChinese)
+	seconds := p.idleWarningSeconds
+	if seconds <= 0 {
+		seconds = 30
+	}
+	actionName := p.text(idlePreviewActionTranslationKey(p.idleAction))
+	title := p.text("idle_warning_title")
+	idlewarning.ShowCountdown(title, seconds, func(remaining int) string {
+		if remaining < 0 {
+			remaining = 0
+		}
+		return fmt.Sprintf(p.text("msg_idle_warning"), actionName, remaining)
+	})
+}
+
+func idlePreviewActionTranslationKey(action string) string {
+	switch action {
+	case "lock", "sleep", "hibernate", "shutdown", "restart":
+		return "menu_action_" + action
+	default:
+		return "menu_action_lock"
+	}
 }
 
 func (p *panel) handleMenuCommand(id uint16) bool {
@@ -63,28 +86,8 @@ func (p *panel) handleMenuCommand(id uint16) bool {
 	case idQuickActions:
 		p.openQuickMenu()
 		return true
-	case idLanguage:
-		p.openLanguageMenu()
-		return true
-	case idLangEN:
-		p.selectLanguage(idLangEN, 0)
-		return true
-	case idLangZH:
-		p.selectLanguage(idLangZH, 1)
-		return true
 	default:
 		return false
-	}
-}
-
-func (p *panel) selectLanguage(id uint16, value int) {
-	if p.selected[id] {
-		return
-	}
-	p.choose(languageIDs(), id)
-	p.closeChoice(false)
-	if p.onAction != nil {
-		p.onAction(ActLanguage, value)
 	}
 }
 
@@ -97,24 +100,8 @@ func (p *panel) toggleCommand(id uint16) (Action, bool) {
 		action = ActAutomationToggle
 	case idIdle:
 		action = ActIdleToggle
-	case idIdleWarning:
-		action = ActIdleWarningToggle
-	case idIdleEnhanced:
-		action = ActIdleEnhancedMonitorToggle
 	case idTheme:
 		action = ActThemeToggle
-	case idBattery:
-		action = ActBatteryToggle
-	case idFullscreen:
-		action = ActFullscreenToggle
-	case idIPLocation:
-		action = ActIPLocationToggle
-	case idHotkeys:
-		action = ActHotkeyToggle
-	case idAutostart:
-		action = ActAutostartToggle
-	case idLogging:
-		action = ActLoggingToggle
 	default:
 		return 0, false
 	}
@@ -131,23 +118,6 @@ func (p *panel) toggleCommand(id uint16) (Action, bool) {
 	return action, true
 }
 
-func (p *panel) showWarningPreview() {
-	Hide()
-	idlewarning.SetLanguage(p.isChinese)
-	seconds := p.idleWarningSeconds
-	if seconds <= 0 {
-		seconds = 30
-	}
-	actionName := p.text(actionTranslationKey(p.idleAction))
-	title := p.text("idle_warning_title")
-	idlewarning.ShowCountdown(title, seconds, func(remaining int) string {
-		if remaining < 0 {
-			remaining = 0
-		}
-		return fmt.Sprintf(p.text("msg_idle_warning"), actionName, remaining)
-	})
-}
-
 func actionClosesPanel(action Action) bool {
-	return action <= ActRestart || action == ActConfig || action == ActExit
+	return action <= ActRestart || action == ActExit
 }

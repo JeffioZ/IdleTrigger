@@ -89,19 +89,17 @@ func createPanelForHost(state State, onAction OnAction, langFn LangFunc, capture
 		themeSchedule:           state.ThemeSchedule,
 		themeUnavailable:        state.ThemeUnavailable,
 		themeUnavailableDetail:  state.ThemeUnavailableDetail,
-		ipLocationLabel:         state.IPLocationLabel,
 		appVersion:              state.AppVersion,
 		noSleepStatus:           state.NoSleepStatus,
 		idleStatus:              state.IdleStatus,
-		idleTimeout:             state.IdleTimeout,
-		idleWarningSeconds:      state.IdleWarningSeconds,
-		idleAction:              state.IdleAction,
 		isChinese:               state.IsChinese,
 		owner:                   state.Owner,
 		automationCount:         state.AutomationCount,
 		automationSummary:       state.AutomationSummary,
 		developerCapturePanel:   state.DeveloperCapturePanel,
 		developerWarningPreview: state.DeveloperWarningPreview,
+		idleWarningSeconds:      state.IdleWarningSeconds,
+		idleAction:              state.IdleAction,
 		controls:                make(map[uint16]windows.Handle),
 		labels:                  make(map[uint16]string),
 		staticKinds:             make(map[uint16]staticKind),
@@ -109,30 +107,14 @@ func createPanelForHost(state State, onAction OnAction, langFn LangFunc, capture
 		tooltips:                make(map[uint16][]uint16),
 		toggles: map[uint16]bool{
 			idNoSleep: state.NoSleepEnabled, idAutomationEnabled: state.AutomationEnabled,
-			idIdle: state.IdleEnabled, idIdleWarning: state.IdleWarningEnabled,
-			idIdleEnhanced: state.IdleEnhancedMonitor,
-			idTheme:        state.ThemeSwitchEnabled,
-			idBattery:      state.DarkOnBattery,
-			idFullscreen:   state.SkipFullscreen,
-			idIPLocation:   state.IPLocationEnabled,
-			idHotkeys:      state.HotkeysEnabled,
-			idAutostart:    state.AutostartEnabled, idLogging: state.LoggingEnabled,
+			idIdle: state.IdleEnabled, idTheme: state.ThemeSwitchEnabled,
 		},
-		selected:      make(map[uint16]bool),
 		disabled:      make(map[uint16]bool),
 		oldButtonProc: make(map[windows.Handle]uintptr),
 		controlBounds: make(map[uint16]logicalBounds),
-		choice: choiceSurface{
-			options:  make(map[uint16][]string),
-			selected: make(map[uint16]int),
-		},
-		captureScale: captureScale,
-		captureHost:  captureHost,
-	}
-	if state.IsChinese {
-		p.setChoice(languageIDs(), idLangZH)
-	} else {
-		p.setChoice(languageIDs(), idLangEN)
+		choice:        choiceSurface{},
+		captureScale:  captureScale,
+		captureHost:   captureHost,
 	}
 	panelMu.Lock()
 	active = p
@@ -209,16 +191,24 @@ func UpdatePowerManagementStatus(noSleepStatus, idleStatus string) {
 	}
 	p.noSleepStatus = noSleepStatus
 	p.idleStatus = idleStatus
+	id := p.powerSummaryID
+	hwnd := p.controls[id]
+	if id != 0 {
+		p.labels[id] = p.text("power_overview_prefix") + noSleepStatus + p.text("power_overview_separator") + idleStatus
+	}
 	panelMu.Unlock()
 
 	p.refreshTooltip(idNoSleep)
 	p.refreshTooltip(idIdle)
+	if hwnd != 0 {
+		pInvalidateRect.Call(uintptr(hwnd), 0, 1)
+	}
 }
 
 // UpdateThemeSchedule refreshes the already visible Day/Night schedule line.
 // It is intentionally layout-preserving; callers should still recreate the
 // panel when a future change needs to add or remove controls.
-func UpdateThemeSchedule(text, ipLocationLabel string) {
+func UpdateThemeSchedule(text string) {
 	panelMu.Lock()
 	p := active
 	if p == nil || p.themeScheduleID == 0 {
@@ -228,13 +218,11 @@ func UpdateThemeSchedule(text, ipLocationLabel string) {
 	id := p.themeScheduleID
 	hwnd := p.controls[id]
 	p.labels[id] = text
-	p.ipLocationLabel = ipLocationLabel
 	panelMu.Unlock()
 
 	if hwnd != 0 {
 		pInvalidateRect.Call(uintptr(hwnd), 0, 1)
 	}
-	p.refreshTooltip(idIPLocation)
 }
 
 // RefreshTheme refreshes the visible panel after the system theme changes.
@@ -334,11 +322,8 @@ func (p *panel) create() error {
 	p.font = p.makeFont(p.metrics.style.Fonts.BodySize, p.metrics.style.Fonts.BodyWeight)
 	p.sectionFont = p.makeFont(p.metrics.style.Fonts.SectionSize, p.metrics.style.Fonts.SectionWeight)
 	p.subtitleFont = p.makeFont(p.metrics.style.Fonts.SubtitleSize, p.metrics.style.Fonts.SubtitleWeight)
-	// Choice rows use the body size and family with a stronger weight only. Do
-	// not reuse sectionFont: its type role may evolve independently.
-	p.choiceSelectedFont = p.makeFont(p.metrics.style.Fonts.BodySize, p.metrics.style.Fonts.SectionWeight)
 	p.createTooltip()
-	if p.font == 0 || p.sectionFont == 0 || p.subtitleFont == 0 || p.choiceSelectedFont == 0 {
+	if p.font == 0 || p.sectionFont == 0 || p.subtitleFont == 0 {
 		pDestroyWindow.Call(uintptr(p.hwnd))
 		return fmt.Errorf("create control panel fonts failed")
 	}

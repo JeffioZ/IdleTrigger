@@ -13,11 +13,12 @@ const (
 	ActionHibernate Action = "hibernate"
 	ActionShutdown  Action = "shutdown"
 	ActionLock      Action = "lock"
+	ActionRestart   Action = "restart"
 
 	DefaultIdleTimeoutMinutes = 30
 )
 
-var idleActions = [...]Action{ActionSleep, ActionHibernate, ActionShutdown, ActionLock}
+var idleActions = [...]Action{ActionLock, ActionSleep, ActionHibernate, ActionShutdown, ActionRestart}
 
 // ValidIdleAction reports whether action can be used by the idle monitor.
 func ValidIdleAction(action Action) bool {
@@ -42,15 +43,18 @@ func IdleActionIndex(action Action) int {
 	return -1
 }
 
-const configTemplateVersion = 13
+const configTemplateVersion = 14
 
 // Config holds all user-configurable settings.
 type Config struct {
 	// Language for UI strings: "auto" (follow OS), "en", "zh-CN".
 	Language string `toml:"language"`
 
+	// IdleEnabled controls the user's manual idle-monitor request.
+	IdleEnabled bool `toml:"idle_enabled"`
+
 	// IdleTimeoutMinutes is the idle time in minutes before the selected
-	// action runs after no keyboard or mouse input. 0 disables the monitor.
+	// action runs after no keyboard or mouse input.
 	IdleTimeoutMinutes int `toml:"idle_timeout_minutes"`
 
 	// IdleAction is the system action to run after the idle time is reached.
@@ -109,12 +113,8 @@ type Config struct {
 	// ThemeMode: "fixed" (use times above) or "sunrise" (calculate from location).
 	ThemeMode string `toml:"theme_mode"`
 
-	// ThemeLatitude / ThemeLongitude override automatic sunrise/sunset location.
-	ThemeLatitude  float64 `toml:"theme_latitude"`
-	ThemeLongitude float64 `toml:"theme_longitude"`
-
-	// ThemeIPLocationEnabled allows an HTTPS IP geolocation lookup when
-	// sunrise/sunset mode has no explicit coordinates.
+	// ThemeIPLocationEnabled allows an HTTPS IP geolocation lookup for
+	// sunrise/sunset mode before falling back to timezone-based estimates.
 	ThemeIPLocationEnabled bool `toml:"theme_ip_location_enabled"`
 
 	// ThemeDarkOnBattery switches to dark mode when on battery.
@@ -133,6 +133,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Language:                "auto",
+		IdleEnabled:             false,
 		IdleTimeoutMinutes:      DefaultIdleTimeoutMinutes,
 		IdleAction:              ActionSleep,
 		IdleWarningSeconds:      30,
@@ -149,8 +150,6 @@ func DefaultConfig() Config {
 		ThemeLightTime:          "07:00",
 		ThemeDarkTime:           "19:00",
 		ThemeMode:               "sunrise",
-		ThemeLatitude:           0,
-		ThemeLongitude:          0,
 		ThemeIPLocationEnabled:  false,
 		ThemeDarkOnBattery:      true,
 		ThemeSkipFullscreen:     true,

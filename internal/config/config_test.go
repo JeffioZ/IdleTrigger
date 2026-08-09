@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,36 +14,18 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/automation"
 )
 
-func TestCoordinatesRejectNonFiniteValues(t *testing.T) {
-	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
-		cfg := DefaultConfig()
-		cfg.ThemeLatitude = value
-		if err := cfg.Validate(); err == nil {
-			t.Fatalf("Validate accepted non-finite latitude %v", value)
-		}
-		if got := NormalizeConfig(cfg).ThemeLatitude; got != DefaultConfig().ThemeLatitude {
-			t.Fatalf("normalized latitude = %v, want default", got)
-		}
-
-		cfg = DefaultConfig()
-		cfg.ThemeLongitude = value
-		if err := cfg.Validate(); err == nil {
-			t.Fatalf("Validate accepted non-finite longitude %v", value)
-		}
-		if got := NormalizeConfig(cfg).ThemeLongitude; got != DefaultConfig().ThemeLongitude {
-			t.Fatalf("normalized longitude = %v, want default", got)
-		}
-	}
-}
-
 func TestIdleActionIndexRoundTrip(t *testing.T) {
+	want := []Action{ActionLock, ActionSleep, ActionHibernate, ActionShutdown, ActionRestart}
 	for index := 0; ; index++ {
 		action, ok := IdleActionAt(index)
 		if !ok {
-			if index != 4 {
-				t.Fatalf("idle action count = %d, want 4", index)
+			if index != len(want) {
+				t.Fatalf("idle action count = %d, want %d", index, len(want))
 			}
 			break
+		}
+		if action != want[index] {
+			t.Fatalf("idle action %d = %q, want %q", index, action, want[index])
 		}
 		if got := IdleActionIndex(action); got != index {
 			t.Fatalf("IdleActionIndex(%q) = %d, want %d", action, got, index)
@@ -113,10 +94,9 @@ func TestValidateRejectsUnsafeValues(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{"action", func(c *Config) { c.IdleAction = "format" }},
-		{"negative timeout", func(c *Config) { c.IdleTimeoutMinutes = -1 }},
+		{"zero timeout", func(c *Config) { c.IdleTimeoutMinutes = 0 }},
 		{"battery threshold", func(c *Config) { c.NoSleepBatteryThreshold = 101 }},
 		{"theme time", func(c *Config) { c.ThemeDarkTime = "not-a-time" }},
-		{"latitude", func(c *Config) { c.ThemeLatitude = 91 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -187,8 +167,6 @@ func TestSaveToWritesAnnotatedConfigThatParses(t *testing.T) {
 		Processes:    []automation.ProcessTarget{{Match: automation.MatchName, Executable: "powerpnt.exe"}},
 		IdleMinutes:  automation.DefaultIdleMinutes,
 	}}
-	cfg.ThemeLatitude = 31.2304
-	cfg.ThemeLongitude = 121.4737
 	if err := saveTo(path, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -206,8 +184,6 @@ func TestSaveToWritesAnnotatedConfigThatParses(t *testing.T) {
 		"# -- 设置 / Settings --",
 		"[[automation_rules]]",
 		"executable = \"powerpnt.exe\"",
-		"theme_latitude = 31.2304",
-		"theme_longitude = 121.4737",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("saved config missing %q:\n%s", want, text)
@@ -223,7 +199,7 @@ func TestSaveToWritesAnnotatedConfigThatParses(t *testing.T) {
 	if err := parsed.Validate(); err != nil {
 		t.Fatalf("validate saved config: %v", err)
 	}
-	if len(parsed.AutomationRules) != 1 || parsed.AutomationRules[0].ID != "presentation-awake" || parsed.ThemeLatitude != 31.2304 {
+	if len(parsed.AutomationRules) != 1 || parsed.AutomationRules[0].ID != "presentation-awake" {
 		t.Fatalf("parsed config mismatch: %+v", parsed)
 	}
 }
@@ -320,6 +296,28 @@ func TestLoadFromRefreshesExistingPlainConfig(t *testing.T) {
 	}
 	if !infoAfterSecondLoad.ModTime().Equal(stableTime) {
 		t.Fatal("annotated config modification time changed on the second load")
+	}
+}
+
+func TestLoadFromMigratesLegacyDisabledIdleTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	if err := os.WriteFile(path, []byte("idle_timeout_minutes = 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IdleEnabled || cfg.IdleTimeoutMinutes != DefaultIdleTimeoutMinutes {
+		t.Fatalf("legacy disabled idle settings = enabled %v, timeout %d", cfg.IdleEnabled, cfg.IdleTimeoutMinutes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "idle_enabled = false") || !strings.Contains(text, "idle_timeout_minutes = 30") {
+		t.Fatalf("migrated config did not retain a usable timeout:\n%s", text)
 	}
 }
 
@@ -632,6 +630,7 @@ func assertConfigFieldsPresent(t *testing.T, text string) {
 		"nosleep_on_battery =",
 		"nosleep_battery_threshold =",
 		"automation_enabled =",
+		"idle_enabled =",
 		"idle_timeout_minutes =",
 		"idle_action =",
 		"idle_warning_seconds =",
@@ -640,8 +639,6 @@ func assertConfigFieldsPresent(t *testing.T, text string) {
 		"theme_mode =",
 		"theme_light_time =",
 		"theme_dark_time =",
-		"theme_latitude =",
-		"theme_longitude =",
 		"theme_ip_location_enabled =",
 		"theme_dark_on_battery =",
 		"theme_skip_fullscreen =",
@@ -666,6 +663,7 @@ func assertConfigOrder(t *testing.T, text string) {
 		"# -- 自动任务 / Automatic Tasks --",
 		"automation_enabled =",
 		"# -- 空闲监测 / Idle Monitoring --",
+		"idle_enabled =",
 		"idle_timeout_minutes =",
 		"# -- 昼夜主题 / Day/Night Theme --",
 		"theme_switch_enabled =",

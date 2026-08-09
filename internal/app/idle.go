@@ -188,7 +188,7 @@ func (s *runtimeState) idleMonitorRequested() bool {
 }
 
 func (s *runtimeState) idleMonitorDemanded() bool {
-	return s.cfg.IdleTimeoutMinutes > 0 || s.autoState.EnableIdle || s.devtools.IdleMonitorEnabled()
+	return s.cfg.IdleEnabled || s.autoState.EnableIdle || s.devtools.IdleMonitorEnabled()
 }
 
 func (s *runtimeState) idleAutomationPaused() bool {
@@ -199,7 +199,10 @@ func (s *runtimeState) effectiveIdleMonitorSettings() (time.Duration, time.Durat
 	if s.devtools.IdleMonitorEnabled() {
 		return time.Duration(s.devtools.IdleMonitorSeconds) * time.Second, 5 * time.Second, config.ActionLock, true
 	}
-	minutes := s.cfg.IdleTimeoutMinutes
+	minutes := 0
+	if s.cfg.IdleEnabled {
+		minutes = s.cfg.IdleTimeoutMinutes
+	}
 	if minutes <= 0 && s.autoState.EnableIdle {
 		minutes = s.autoState.IdleMinutes
 	}

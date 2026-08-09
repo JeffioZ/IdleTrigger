@@ -15,12 +15,10 @@ import (
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 )
 
-// LocationSource describes how automatic sunrise/sunset coordinates were
-// resolved when the config does not provide explicit coordinates.
+// LocationSource describes how automatic sunrise/sunset coordinates were resolved.
 type LocationSource string
 
 const (
-	LocationSourceConfigured LocationSource = "configured"
 	LocationSourceIP         LocationSource = "ip"
 	LocationSourceTimezone   LocationSource = "timezone"
 	LocationSourceUTCOffset  LocationSource = "utc_offset"

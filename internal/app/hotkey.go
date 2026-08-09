@@ -67,8 +67,8 @@ func (s *runtimeState) setNoSleep(enabled, keepScreenOn bool) {
 	s.updateIcon()
 }
 
-func (s *runtimeState) setIdleTimeout(minutes int) {
-	setIdleTimeoutConfig(&s.cfg, minutes)
+func (s *runtimeState) setIdleEnabled(enabled bool) {
+	setIdleEnabledConfig(&s.cfg, enabled)
 	s.reconcileRuntime()
 	s.updateIcon()
 }
@@ -77,13 +77,13 @@ func setNoSleepConfig(cfg *config.Config, enabled, keepScreenOn bool) {
 	cfg.NoSleepEnabled = enabled
 	if enabled {
 		cfg.KeepScreenOn = keepScreenOn
-		cfg.IdleTimeoutMinutes = 0
+		cfg.IdleEnabled = false
 	}
 }
 
-func setIdleTimeoutConfig(cfg *config.Config, minutes int) {
-	cfg.IdleTimeoutMinutes = minutes
-	if minutes > 0 {
+func setIdleEnabledConfig(cfg *config.Config, enabled bool) {
+	cfg.IdleEnabled = enabled
+	if enabled {
 		cfg.NoSleepEnabled = false
 	}
 }

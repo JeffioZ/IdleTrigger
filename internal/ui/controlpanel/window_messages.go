@@ -43,20 +43,6 @@ func (p *panel) controlID(hwnd windows.Handle) uint16 {
 	return 0
 }
 
-func (p *panel) setProjectHomeCursor(onText bool) {
-	const (
-		idcArrow = 32512
-		idcHand  = 32649
-	)
-	cursorID := uintptr(idcArrow)
-	if onText {
-		cursorID = idcHand
-	}
-	if cursor, _, _ := pLoadCursor.Call(0, cursorID); cursor != 0 {
-		pSetCursor.Call(cursor)
-	}
-}
-
 func panelOrigin(work rect, width, height, margin int32) (int32, int32) {
 	x := work.Right - width - margin
 	y := work.Bottom - height - margin
@@ -350,13 +336,8 @@ func wndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 				p.leaveKeyboardNavigation()
 			}
 		case wmOpenChoice:
-			switch id := uint16(wp); id {
-			case idQuickActions:
+			if uint16(wp) == idQuickActions {
 				p.openQuickMenu()
-			case idLanguage:
-				p.openLanguageMenu()
-			default:
-				p.openChoice(id)
 			}
 			return 0
 		case wmDestroy:
@@ -399,10 +380,6 @@ func wndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 		case wmCommand:
 			id, notification := uint16(wp), uint16(wp>>16)
 			if notification == bnClicked {
-				if id == idIdleTimeout || id == idIdleAction {
-					p.openChoice(id)
-					return 0
-				}
 				p.handleCommand(id)
 				return 0
 			}
@@ -424,9 +401,8 @@ func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 	newFont := p.makeFont(p.metrics.style.Fonts.BodySize, p.metrics.style.Fonts.BodyWeight)
 	newSectionFont := p.makeFont(p.metrics.style.Fonts.SectionSize, p.metrics.style.Fonts.SectionWeight)
 	newSubtitleFont := p.makeFont(p.metrics.style.Fonts.SubtitleSize, p.metrics.style.Fonts.SubtitleWeight)
-	newChoiceSelectedFont := p.makeFont(p.metrics.style.Fonts.BodySize, p.metrics.style.Fonts.SectionWeight)
-	if newFont == 0 || newSectionFont == 0 || newSubtitleFont == 0 || newChoiceSelectedFont == 0 {
-		for _, font := range []windows.Handle{newFont, newSectionFont, newSubtitleFont, newChoiceSelectedFont} {
+	if newFont == 0 || newSectionFont == 0 || newSubtitleFont == 0 {
+		for _, font := range []windows.Handle{newFont, newSectionFont, newSubtitleFont} {
 			if font != 0 {
 				pDeleteObject.Call(uintptr(font))
 			}
@@ -434,8 +410,8 @@ func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 		p.metrics, p.fontChoice = oldMetrics, oldChoice
 		return false
 	}
-	oldFont, oldSection, oldSubtitle, oldChoiceSelected := p.font, p.sectionFont, p.subtitleFont, p.choiceSelectedFont
-	p.font, p.sectionFont, p.subtitleFont, p.choiceSelectedFont = newFont, newSectionFont, newSubtitleFont, newChoiceSelectedFont
+	oldFont, oldSection, oldSubtitle := p.font, p.sectionFont, p.subtitleFont
+	p.font, p.sectionFont, p.subtitleFont = newFont, newSectionFont, newSubtitleFont
 	p.setWindowIcons(p.resolveTheme(), true)
 	p.positionDPIControls()
 	for id, hwnd := range p.controls {
@@ -448,7 +424,7 @@ func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 	if p.tooltip != 0 {
 		pSendMessage.Call(uintptr(p.tooltip), ttmSetMaxTipWidth, 0, uintptr(p.sc(360)))
 	}
-	for _, font := range []windows.Handle{oldFont, oldSection, oldSubtitle, oldChoiceSelected} {
+	for _, font := range []windows.Handle{oldFont, oldSection, oldSubtitle} {
 		if font != 0 {
 			pDeleteObject.Call(uintptr(font))
 		}

@@ -34,7 +34,7 @@ func (s *runtimeState) startThemeScheduler() {
 	if !s.themeAvailable() || s.cfg.ThemeLightTime == "" || s.cfg.ThemeDarkTime == "" {
 		return
 	}
-	loc := theme.LocationInfo{Latitude: s.cfg.ThemeLatitude, Longitude: s.cfg.ThemeLongitude, Source: theme.LocationSourceConfigured}
+	loc := theme.AutoLocationInfo(false, false)
 	if s.cfg.ThemeMode == "sunrise" {
 		loc = s.themeLocationInfo(false)
 	}

@@ -60,17 +60,13 @@ func (s *runtimeState) handleIPCState(cmd string) string {
 		return s.fmtNoSleepStatus()
 
 	case "monitor:on":
-		minutes := s.cfg.IdleTimeoutMinutes
-		if minutes <= 0 {
-			minutes = config.DefaultIdleTimeoutMinutes
-		}
-		s.setIdleTimeout(minutes)
+		s.setIdleEnabled(true)
 		if err := s.saveConfigErr(); err != nil {
 			return "err: " + err.Error()
 		}
 		return "ok"
 	case "monitor:off":
-		s.setIdleTimeout(0)
+		s.setIdleEnabled(false)
 		if err := s.saveConfigErr(); err != nil {
 			return "err: " + err.Error()
 		}

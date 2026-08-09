@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/JeffioZ/idletrigger/internal/automation"
@@ -36,9 +35,11 @@ func renderAnnotatedTOML(cfg Config) string {
 	b.WriteString("\n")
 
 	b.WriteString("# -- 空闲监测 / Idle Monitoring --\n")
-	b.WriteString("# 空闲时长：无键鼠操作多少分钟后触发动作，设为 0 禁用 / Idle time in minutes before triggering after no keyboard or mouse input, 0 = disabled\n")
+	b.WriteString("# 手动启用空闲监测；关闭时仍保留下方参数供下次启用 / Manually enable idle monitoring; settings below are retained while disabled\n")
+	fmt.Fprintf(&b, "idle_enabled = %t\n", cfg.IdleEnabled)
+	b.WriteString("# 空闲时长：无键鼠操作多少分钟后触发动作 / Idle time in minutes before triggering after no keyboard or mouse input\n")
 	fmt.Fprintf(&b, "idle_timeout_minutes = %d\n", cfg.IdleTimeoutMinutes)
-	b.WriteString("# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: \"sleep\", \"hibernate\", \"shutdown\", \"lock\"\n")
+	b.WriteString("# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: \"sleep\", \"hibernate\", \"shutdown\", \"lock\", \"restart\"\n")
 	fmt.Fprintf(&b, "idle_action = %s\n", tomlString(string(cfg.IdleAction)))
 	b.WriteString("# 触发前多少秒显示不抢焦点的应用内提醒；键鼠操作或关闭提醒会取消本次动作，设为 0 静默执行 / Seconds before trigger to show a non-activating in-app reminder; keyboard/mouse input or closing it cancels this action, 0 = silent\n")
 	fmt.Fprintf(&b, "idle_warning_seconds = %d\n", cfg.IdleWarningSeconds)
@@ -54,11 +55,7 @@ func renderAnnotatedTOML(cfg Config) string {
 	fmt.Fprintf(&b, "theme_light_time = %s\n", tomlString(cfg.ThemeLightTime))
 	b.WriteString("# 深色开始时间，HH:MM；fixed 模式使用，日出日落不可用时也作为兜底 / Dark theme start time, HH:MM; used by fixed mode and as fallback when sunrise/sunset is unavailable\n")
 	fmt.Fprintf(&b, "theme_dark_time = %s\n", tomlString(cfg.ThemeDarkTime))
-	b.WriteString("# 日出日落计算纬度，范围 -90 到 90；经纬度都为 0 时优先看下方 IP 定位开关，未开启或失败则按时区、UTC 偏移和默认位置依次回退 / Latitude for sunrise mode, -90..90; when both lat/lon are 0, the IP location option below is used first; otherwise falls back to timezone, UTC offset, then default location\n")
-	fmt.Fprintf(&b, "theme_latitude = %s\n", tomlFloat(cfg.ThemeLatitude))
-	b.WriteString("# 日出日落计算经度，范围 -180 到 180；经纬度都为 0 时优先看下方 IP 定位开关，未开启或失败则按时区、UTC 偏移和默认位置依次回退 / Longitude for sunrise mode, -180..180; when both lat/lon are 0, the IP location option below is used first; otherwise falls back to timezone, UTC offset, then default location\n")
-	fmt.Fprintf(&b, "theme_longitude = %s\n", tomlFloat(cfg.ThemeLongitude))
-	b.WriteString("# 经纬度都为 0 时，通过 https://ipwho.is/ 估算公网 IP 所在城市；成功结果仅内存缓存 24 小时，每次启动或手动重新开启定位时，首次失败后会在 30 分钟后补试一次；关闭或失败时按时区、UTC 偏移和默认位置依次回退 / When coordinates are 0, estimate city via https://ipwho.is/; successful results are cached in memory for 24 hours, and one retry is made 30 minutes after the first failure on app start or explicit re-enable; falls back to timezone, UTC offset, then default location when off or failed\n")
+	b.WriteString("# 通过 https://ipwho.is/ 估算公网 IP 所在城市；成功结果仅内存缓存 24 小时，失败 30 分钟后重试；关闭或失败时按时区、UTC 偏移和默认位置依次回退 / Estimate the public IP city through https://ipwho.is/; successful results are cached in memory for 24 hours and failures retry after 30 minutes; falls back to timezone, UTC offset, then default location when off or unavailable\n")
 	fmt.Fprintf(&b, "theme_ip_location_enabled = %t\n", cfg.ThemeIPLocationEnabled)
 	b.WriteString("# 电池供电时自动切换深色，接入电源后按当前计划恢复 / Switch to dark on battery, then restore by schedule on AC power\n")
 	fmt.Fprintf(&b, "theme_dark_on_battery = %t\n", cfg.ThemeDarkOnBattery)
@@ -173,8 +170,4 @@ func writeAutomationRule(b *strings.Builder, rule automation.Rule) {
 	if rule.BlockedPolicy == automation.BlockedWait && rule.MaxWaitMinutes > 0 {
 		fmt.Fprintf(b, "max_wait_minutes = %d\n", rule.MaxWaitMinutes)
 	}
-}
-
-func tomlFloat(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
 }

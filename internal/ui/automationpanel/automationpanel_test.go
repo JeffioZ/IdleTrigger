@@ -330,6 +330,7 @@ func TestAutomationSpacingUsesSharedRhythm(t *testing.T) {
 		option := p.bounds[idKeepScreen]
 		status := p.bounds[idValidation]
 		button := p.bounds[idCancel]
+		saveButton := p.bounds[idSave]
 		for name, value := range map[string]int{
 			"basics-to-name-label":     nameLabel.Y - (basics.Y + basics.Height),
 			"options-title-to-control": option.Y - (optionsTitle.Y + optionsTitle.Height),
@@ -368,6 +369,12 @@ func TestAutomationSpacingUsesSharedRhythm(t *testing.T) {
 		}
 		if got := p.clientHeight - (button.Y + button.Height); got != formEdgePadding {
 			t.Fatalf("editor bottom padding = %d, want %d", got, formEdgePadding)
+		}
+		if button.Width != nativeform.DialogButtonWidth || saveButton.Width != nativeform.DialogButtonWidth {
+			t.Fatalf("editor dialog button widths = %d/%d, want %d", button.Width, saveButton.Width, nativeform.DialogButtonWidth)
+		}
+		if got := saveButton.X - (button.X + button.Width); got != nativeform.ControlGap {
+			t.Fatalf("editor dialog button gap = %d, want %d", got, nativeform.ControlGap)
 		}
 		return nil
 	})

@@ -45,8 +45,8 @@ func (s *runtimeState) reloadConfig() error {
 	keepawake.Disable()
 	// Config compatibility: if both NoSleep and idle monitor are enabled,
 	// resolve the conflict — NoSleep takes priority.
-	if s.cfg.NoSleepEnabled && s.cfg.IdleTimeoutMinutes > 0 {
-		s.cfg.IdleTimeoutMinutes = 0
+	if s.cfg.NoSleepEnabled && s.cfg.IdleEnabled {
+		s.cfg.IdleEnabled = false
 	}
 	s.lang = s.cfg.Language
 	s.applyLanguage()
@@ -177,6 +177,8 @@ func executeActionWithLanguage(a config.Action, lang string) error {
 		return systemaction.Shutdown()
 	case config.ActionLock:
 		return systemaction.Lock()
+	case config.ActionRestart:
+		return systemaction.Restart()
 	default:
 		return fmt.Errorf("unsupported action %q", a)
 	}

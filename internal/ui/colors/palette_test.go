@@ -19,6 +19,7 @@ func TestAccentTextContrast(t *testing.T) {
 			{"secondary", palette.SecondaryText, palette.WindowBackground, 4.5},
 			{"muted", palette.MutedText, palette.WindowBackground, 3},
 			{"disabled", palette.DisabledText, palette.DisabledSurface, 3},
+			{"disabled label", palette.DisabledText, palette.WindowBackground, 3},
 			{"tooltip", palette.TooltipText, palette.TooltipBackground, 4.5},
 			{"danger default", palette.DangerText, palette.DangerBackground, 4.5},
 			{"danger hover", palette.DangerText, palette.DangerHover, 4.5},

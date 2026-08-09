@@ -29,7 +29,6 @@ type fontTokens struct {
 type controlTokens struct {
 	CornerRadius, ButtonTextInset int
 	FocusInset, FocusRingWidth    int
-	ArrowWidth, ArrowHeight       int
 	IconLarge, IconSmall          int
 }
 
@@ -53,7 +52,6 @@ var defaultPanelStyle = panelStyle{
 	Control: controlTokens{
 		CornerRadius: nativeform.CornerRadius, ButtonTextInset: 8,
 		FocusInset: 2, FocusRingWidth: 2,
-		ArrowWidth: 8, ArrowHeight: 4,
 		IconLarge: 32, IconSmall: 16,
 	},
 }

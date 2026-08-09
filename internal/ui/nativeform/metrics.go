@@ -9,6 +9,7 @@ const (
 	SectionGap        = 14
 	LabelGap          = 2
 	ButtonHeight      = 36
+	DialogButtonWidth = 104
 	FieldHeight       = 34
 	CheckboxSize      = 16
 	CornerRadius      = 6

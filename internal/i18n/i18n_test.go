@@ -46,6 +46,20 @@ func TestLocalesUseMatchingFormatVerbs(t *testing.T) {
 	}
 }
 
+func TestTooltipCopyHasNoTrailingSentencePunctuation(t *testing.T) {
+	for language, values := range store {
+		for key, value := range values {
+			if !strings.HasPrefix(key, "tip_") {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			if strings.HasSuffix(value, ".") || strings.HasSuffix(value, "。") {
+				t.Errorf("%s tooltip %q ends with sentence punctuation: %q", language, key, value)
+			}
+		}
+	}
+}
+
 func TestLiteralLocaleKeysUsedBySourceExist(t *testing.T) {
 	missing := map[string][]string{}
 	root := filepath.Join("..", "..")

@@ -289,7 +289,7 @@ func (p *picker) layout() {
 	p.place(idPreview, pad+2, pickerPreviewY+2, max(1, contentWidth-4), pickerPreviewHeight-4)
 	p.place(idPrivacy, pad, pickerPrivacyY, contentWidth, pickerTextHeight)
 	buttonGap := gap
-	buttonWidth := min(106, max(1, (contentWidth-buttonGap)/2))
+	buttonWidth := min(nativeform.DialogButtonWidth, max(1, (contentWidth-buttonGap)/2))
 	p.place(idCancel, pad+contentWidth-2*buttonWidth-buttonGap, pickerButtonsY, buttonWidth, nativeform.ButtonHeight)
 	p.place(idConfirm, pad+contentWidth-buttonWidth, pickerButtonsY, buttonWidth, nativeform.ButtonHeight)
 	p.resizeColumns()
