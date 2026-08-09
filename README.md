@@ -31,7 +31,7 @@
   </picture>
 </p>
 
-<p align="center"><sub>Follows Windows light/dark mode and display DPI. The screenshot follows your GitHub theme.</sub></p>
+<p align="center"><sub>Adapts to Windows light/dark mode and display DPI.</sub></p>
 
 Left-click the tray icon for quick controls, then open **Settings** for all persistent preferences.
 

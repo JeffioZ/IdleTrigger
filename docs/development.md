@@ -121,8 +121,8 @@ Use the relevant row before considering a change complete:
   at least one running target. Process-exit events continue to wait for every
   matching instance plus the 5-second grace period, preventing startup and
   brief-restart false positives.
-- **Native form window:** automatic-task, task-editor, process-picker, and action-
-  countdown windows should share `internal/ui/nativeform` caption, theme-aware
+- **Native form window:** Settings, automatic-task, task-editor, process-picker,
+  and action-countdown windows should share `internal/ui/nativeform` caption, theme-aware
   icons, control theming, rounded field surfaces, and hover/press/focus/disabled
   states. Owner-drawn choices and checkboxes should follow the control panel's
   visual language instead of falling back to unthemed native dropdowns.
@@ -204,9 +204,9 @@ temporary output directory:
 .\tools\capture-screenshots.ps1 -OutputDirectory (Join-Path $env:TEMP "IdleTrigger-screenshots")
 ```
 
-For visual review of every native surface, generate the control panel,
-automatic-task manager, task editor, and process picker in both languages and
-themes. This writes 16 ignored images to `dist/ui-review/` by default and does
+For visual review, generate the control panel, automatic-task manager, task
+editor, process picker, and all three Settings pages in both languages and
+themes. This writes 28 ignored images to `dist/ui-review/` by default and does
 not replace the four README images:
 
 ```powershell

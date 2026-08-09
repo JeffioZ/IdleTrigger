@@ -11,15 +11,26 @@ IdleTrigger supports Windows 10 / Windows Server 2016 and later. Use x64 on most
 3. Run the EXE. IdleTrigger appears in the notification area without opening a main window.
 4. Left-click the tray icon for the control panel; right-click for **Open** and **Exit**.
 
-## 🪟 Control Panel
+## 🪟 Control Panel and Settings
 
-| Section | What it controls |
+The control panel keeps frequent actions and live status in one compact view:
+
+| Area | What it provides |
 | --- | --- |
-| **Power Management** | Stay Awake, Idle Monitoring, idle timeout, and idle action |
-| **Automatic Tasks** | Master switch, enabled count, next run, and task manager |
-| **Day / Night** | Scheduled theme switching and battery/fullscreen behavior |
-| **General Settings** | Global hotkeys, auto-start, debug logging, language, and configuration |
-| **System Controls** | Lock, sleep, hibernate, shut down, or restart immediately |
+| **Power Management** | Manual Stay Awake and Idle Monitoring switches, plus their effective runtime status |
+| **Automatic Tasks** | Master switch, enabled count, next run, and entry to the task manager |
+| **Day / Night** | Automatic switching, an immediate theme switch, and the next scheduled transition |
+| **Bottom actions** | Built-in system actions, Settings, and Exit |
+
+Open **Settings** for persistent feature behavior:
+
+| Settings page | Available preferences |
+| --- | --- |
+| **Power** | Keep the display on, battery policy and threshold, idle timeout, reminder countdown, timeout action, and Enhanced Monitoring |
+| **Day / Night** | Fixed-time or sunrise/sunset schedule, time-zone or approximate IP location, battery/fullscreen behavior, and theme repair |
+| **Application** | Display language, global hotkeys, auto-start, debug logging, and the project link |
+
+The Settings header always shows the current version. Every saved preference has a home in the control panel, Settings, or the automatic-task manager, so editing TOML is not required for normal use.
 
 Use `Tab` / `Shift+Tab` to move and `Space` to activate the focused control.
 
@@ -55,7 +66,7 @@ Tasks run only while IdleTrigger is running. Processes are checked about every f
 
 Switch Windows light and dark themes at fixed times or at sunrise and sunset. You can use dark mode on battery or postpone a scheduled change during fullscreen apps and games.
 
-Sunrise and sunset use the Windows time zone by default, with optional approximate IP-based location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
+Sunrise and sunset use the Windows time zone by default, with optional approximate IP-based location. IP results are kept in memory only; if lookup is disabled or unavailable, IdleTrigger falls back to the Windows time zone, UTC offset, and finally a built-in default location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
 
 ## ⚙️ Configuration
 
@@ -65,13 +76,13 @@ Sunrise and sunset use the Windows time zone by default, with optional approxima
 | `IdleTrigger.state.json` | Scheduler state used to avoid repeated task execution |
 | `IdleTrigger.log` | Optional diagnostic log |
 
-IdleTrigger creates these files beside the EXE when needed. See [IdleTrigger.example.toml](../IdleTrigger.example.toml) for every field. Valid edits apply within a few seconds. To reload immediately, run:
+IdleTrigger creates these files beside the EXE when needed. Prefer **Settings** and the automatic-task manager for everyday changes. [IdleTrigger.example.toml](../IdleTrigger.example.toml) remains the complete reference for portable or advanced manual configuration. Valid file edits apply within a few seconds. To reload immediately, run:
 
 ```powershell
 .\IdleTrigger-x64.exe config:reload
 ```
 
-Auto-start is managed by the panel or CLI and is stored in the current user's Windows Run registry key.
+Auto-start is managed in **Settings > Application** or by CLI and is stored in the current user's Windows Run registry key.
 
 ## ⌨️ Command Line
 
@@ -101,4 +112,4 @@ Use [SHA256SUMS.txt](https://github.com/JeffioZ/IdleTrigger/releases/latest/down
 
 ## 🧰 Logs
 
-Enable **Debug Log** in the panel or set `logging_enabled = true`. Logs are stored beside the EXE. If that folder is not writable, IdleTrigger uses `%TEMP%`.
+Enable **Debug Log** in **Settings > Application** or set `logging_enabled = true`. Logs are stored beside the EXE. If that folder is not writable, IdleTrigger uses `%TEMP%`.

@@ -9,7 +9,7 @@ Write for people deciding whether to update, not as a copy of the commit log. / 
 - Lead with user-visible results, not commit order. / 先写用户可感知的结果，不按提交顺序。
 - Use plain-text headings without decorative emoji. / 标题只用文字，不添加装饰性图标。
 - With one to three highlights, list them directly. With four to eight, use two or three bold product-area labels. / 只有 1–3 条时直接列出；有 4–8 条时，使用 2–3 个粗体产品模块标签。
-- Prefer Automatic Tasks, Day / Night, Interface, and Other Changes over Added / Changed / Fixed. / 优先使用“自动任务”“昼夜模式”“界面”“其他变化”，不按“新增 / 变更 / 修复”机械分类。
+- Prefer Automatic Tasks, Day / Night, Interface, and Other Changes over Added / Changed / Fixed. / 优先使用“自动任务”“昼夜主题”“界面”“其他变化”，不按“新增 / 变更 / 修复”机械分类。
 - Keep one result in each bullet. Use a short sentence; split long or compound items. / 每条只说一个结果，尽量只用一个短句；内容过长或包含多个结果时拆开。
 - Be specific: “preserves the selection while refreshing” is better than “improved refresh logic.” / 写清结果：“刷新时保留选择”优于“优化刷新逻辑”。
 - Keep one to eight aligned highlights per language. Translate meaning, not sentence structure. / 每种语言保留 1–8 条对应重点；翻译含义，不照搬句式。

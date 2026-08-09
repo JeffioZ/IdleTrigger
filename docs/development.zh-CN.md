@@ -112,7 +112,7 @@ go build -trimpath "-ldflags=$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletri
   同时收到启用和暂停请求时，暂停优先。进程启动事件必须先建立运行基线，只在所选目标
   从全部未运行变为至少一个运行时触发；进程退出事件继续等待全部匹配实例退出并遵守
   5 秒宽限，避免程序刚启动或短暂重启造成误触发。
-- **原生表单窗口：** 自动任务、任务编辑、进程选择和动作倒计时应复用
+- **原生表单窗口：** 设置、自动任务、任务编辑、进程选择和动作倒计时应复用
   `internal/ui/nativeform` 的标题栏、深浅色图标、圆角输入外框及 hover/press/focus/disabled
   状态；下拉选项和复选框应延续控制浮层的视觉语言，不得退回未适配主题的原生样式。
   长下拉浮层与报表列表应复用同一套菜单行距、圆角和主题滚动条；owner-draw 控件须先在
@@ -174,9 +174,9 @@ devtools EXE、重新生成四张受版本管理的图片、校验 PNG 尺寸，
 .\tools\capture-screenshots.ps1 -OutputDirectory (Join-Path $env:TEMP "IdleTrigger-screenshots")
 ```
 
-如需审查全部原生界面，可一次生成主界面、自动任务管理器、任务编辑器和进程选择器的
-中英文、深浅色共 16 张图片。默认输出到已忽略的 `dist/ui-review/`，不会覆盖 README
-现有四张公开截图：
+如需视觉审查，可一次生成主界面、自动任务管理器、任务编辑器、进程选择器和设置三个
+页面的中英文、深浅色组合，共 28 张图片。默认输出到已忽略的 `dist/ui-review/`，不会
+覆盖 README 现有四张公开截图：
 
 ```powershell
 .\tools\capture-screenshots.ps1 -CaptureSet Review
