@@ -34,7 +34,7 @@ Stay Awake prevents automatic sleep through Windows power requests. You can opti
 
 ### Idle Monitoring
 
-Idle Monitoring reads Windows' last-input time. After real keyboard and mouse inactivity, it can lock, sleep, hibernate, or shut down. The default is 30 minutes and Sleep.
+Idle Monitoring reads Windows' last-input time. After real keyboard and mouse inactivity, it can lock, sleep, hibernate, shut down, or restart. The default is 30 minutes and Sleep.
 
 The optional pre-action reminder can be cancelled by input or by closing it. Use **Enhanced Monitoring** when a device or app repeatedly resets Windows idle time.
 
@@ -55,7 +55,7 @@ Tasks run only while IdleTrigger is running. Processes are checked about every f
 
 Switch Windows light and dark themes at fixed times or at sunrise and sunset. You can use dark mode on battery or postpone a scheduled change during fullscreen apps and games.
 
-Sunrise and sunset can use manual coordinates or optional IP-based location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
+Sunrise and sunset use the Windows time zone by default, with optional approximate IP-based location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
 
 ## ⚙️ Configuration
 

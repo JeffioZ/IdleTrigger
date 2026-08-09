@@ -1,7 +1,7 @@
 # IdleTrigger 配置示例 / Configuration Example
 # 复制为 IdleTrigger.toml 放在 EXE 同目录即可生效
 # Copy to IdleTrigger.toml next to the EXE to apply
-# config_template_version = 13
+# config_template_version = 14
 
 # -- 保持唤醒 / Stay Awake --
 # 手动启用保持唤醒，阻止系统自动睡眠 / Manually keep the system awake and prevent automatic sleep
@@ -22,9 +22,11 @@ automation_enabled = true
 # 自动系统操作始终显示至少 10 秒的可取消倒计时 / Automatic system actions always show a cancellable countdown of at least 10 seconds
 
 # -- 空闲监测 / Idle Monitoring --
-# 空闲时长：无键鼠操作多少分钟后触发动作，设为 0 禁用 / Idle time in minutes before triggering after no keyboard or mouse input, 0 = disabled
+# 手动启用空闲监测；关闭时仍保留下方参数供下次启用 / Manually enable idle monitoring; settings below are retained while disabled
+idle_enabled = false
+# 空闲时长：无键鼠操作多少分钟后触发动作 / Idle time in minutes before triggering after no keyboard or mouse input
 idle_timeout_minutes = 30
-# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: "sleep", "hibernate", "shutdown", "lock"
+# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: "sleep", "hibernate", "shutdown", "lock", "restart"
 idle_action = "sleep"
 # 触发前多少秒显示不抢焦点的应用内提醒；键鼠操作或关闭提醒会取消本次动作，设为 0 静默执行 / Seconds before trigger to show a non-activating in-app reminder; keyboard/mouse input or closing it cancels this action, 0 = silent
 idle_warning_seconds = 30
@@ -40,11 +42,7 @@ theme_mode = "sunrise"
 theme_light_time = "07:00"
 # 深色开始时间，HH:MM；fixed 模式使用，日出日落不可用时也作为兜底 / Dark theme start time, HH:MM; used by fixed mode and as fallback when sunrise/sunset is unavailable
 theme_dark_time = "19:00"
-# 日出日落计算纬度，范围 -90 到 90；经纬度都为 0 时优先看下方 IP 定位开关，未开启或失败则按时区、UTC 偏移和默认位置依次回退 / Latitude for sunrise mode, -90..90; when both lat/lon are 0, the IP location option below is used first; otherwise falls back to timezone, UTC offset, then default location
-theme_latitude = 0
-# 日出日落计算经度，范围 -180 到 180；经纬度都为 0 时优先看下方 IP 定位开关，未开启或失败则按时区、UTC 偏移和默认位置依次回退 / Longitude for sunrise mode, -180..180; when both lat/lon are 0, the IP location option below is used first; otherwise falls back to timezone, UTC offset, then default location
-theme_longitude = 0
-# 经纬度都为 0 时，通过 https://ipwho.is/ 估算公网 IP 所在城市；成功结果仅内存缓存 24 小时，每次启动或手动重新开启定位时，首次失败后会在 30 分钟后补试一次；关闭或失败时按时区、UTC 偏移和默认位置依次回退 / When coordinates are 0, estimate city via https://ipwho.is/; successful results are cached in memory for 24 hours, and one retry is made 30 minutes after the first failure on app start or explicit re-enable; falls back to timezone, UTC offset, then default location when off or failed
+# 通过 https://ipwho.is/ 估算公网 IP 所在城市；成功结果仅内存缓存 24 小时，失败 30 分钟后重试；关闭或失败时按时区、UTC 偏移和默认位置依次回退 / Estimate the public IP city through https://ipwho.is/; successful results are cached in memory for 24 hours and failures retry after 30 minutes; falls back to timezone, UTC offset, then default location when off or unavailable
 theme_ip_location_enabled = false
 # 电池供电时自动切换深色，接入电源后按当前计划恢复 / Switch to dark on battery, then restore by schedule on AC power
 theme_dark_on_battery = true

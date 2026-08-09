@@ -33,14 +33,14 @@
 
 <p align="center"><sub>Follows Windows light/dark mode and display DPI. The screenshot follows your GitHub theme.</sub></p>
 
-Left-click the tray icon for everyday settings; advanced options remain in TOML.
+Left-click the tray icon for quick controls, then open **Settings** for all persistent preferences.
 
 ## ✨ At a Glance
 
 | | Capability | Built for |
 | --- | --- | --- |
 | ⚡ | **Stay Awake** | Downloads, renders, backups, and remote sessions that must keep running. |
-| ⏱️ | **Idle Actions** | Lock, sleep, hibernate, or shut down after real keyboard and mouse inactivity. |
+| ⏱️ | **Idle Actions** | Lock, sleep, hibernate, shut down, or restart after real keyboard and mouse inactivity. |
 | 🔁 | **Automatic Tasks** | Control power features or run built-in actions by schedule and process state. |
 | 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, with battery and fullscreen options. |
 
