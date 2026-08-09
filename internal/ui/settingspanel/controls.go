@@ -365,16 +365,6 @@ func (p *panel) setVisible(id uint16, visible bool) {
 	}
 }
 
-func (p *panel) setControlTop(id uint16, top int) {
-	b, ok := p.bounds[id]
-	if !ok || b.y == top {
-		return
-	}
-	b.y = top
-	p.bounds[id] = b
-	p.positionControl(id)
-}
-
 func (p *panel) position(suggested *nativeform.Rect) {
 	scale := p.scale()
 	nativeform.PlaceWindow(nativeform.WindowPlacement{Window: p.hwnd, Anchor: p.hwnd, Owner: p.state.Owner,

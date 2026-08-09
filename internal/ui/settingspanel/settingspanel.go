@@ -101,7 +101,6 @@ type panel struct {
 	icons                                    nativeform.WindowIcons
 	style, exStyle                           uintptr
 	dpiScale                                 float64
-	pendingSuggested                         *nativeform.Rect
 	ownerDisabled                            bool
 	captureHost                              bool
 	captureScale                             float64
@@ -264,7 +263,6 @@ var (
 	pDefWindowProc   = user32.NewProc("DefWindowProcW")
 	pRegisterClassEx = user32.NewProc("RegisterClassExW")
 	pSendMessage     = user32.NewProc("SendMessageW")
-	pPostMessage     = user32.NewProc("PostMessageW")
 	pSetWindowText   = user32.NewProc("SetWindowTextW")
 	pSetWindowPos    = user32.NewProc("SetWindowPos")
 	pShowWindow      = user32.NewProc("ShowWindow")

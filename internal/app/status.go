@@ -199,17 +199,6 @@ func actionTranslationKey(a config.Action) string {
 	return "menu_action_" + string(a)
 }
 
-// switchLanguage updates the active language, refreshes all menu text,
-// and persists the choice.
-func (s *runtimeState) switchLanguage(lang string) {
-	trayicon.Post(hideAutomationUI)
-	s.lang = lang
-	s.cfg.Language = lang
-	s.applyLanguage()
-	mylog.Info("Language switched: %s", lang)
-	s.saveConfig()
-}
-
 func (s *runtimeState) applyLanguage() {
 	T := func(key string) string { return i18n.T(s.lang, key) }
 	trayicon.SetTitle(T("app_title"))

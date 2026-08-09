@@ -19,10 +19,10 @@ import (
 type LocationSource string
 
 const (
-	LocationSourceIP         LocationSource = "ip"
-	LocationSourceTimezone   LocationSource = "timezone"
-	LocationSourceUTCOffset  LocationSource = "utc_offset"
-	LocationSourceDefault    LocationSource = "default"
+	LocationSourceIP        LocationSource = "ip"
+	LocationSourceTimezone  LocationSource = "timezone"
+	LocationSourceUTCOffset LocationSource = "utc_offset"
+	LocationSourceDefault   LocationSource = "default"
 )
 
 // LocationInfo is the resolved coordinate pair used for sunrise/sunset mode.

@@ -48,10 +48,18 @@ var (
 type accPropServices struct{ vtable *accPropServicesVTable }
 
 type accPropServicesVTable struct {
-	queryInterface, addRef, release                            uintptr
-	setPropValue, setPropServer, clearProps                    uintptr
-	setHwndProp, setHwndPropStr, setHwndPropServer             uintptr
-	clearHwndProps, composeHwndIdentity, decomposeHwndIdentity uintptr
+	_              uintptr // QueryInterface
+	_              uintptr // AddRef
+	release        uintptr
+	_              uintptr // SetPropValue
+	_              uintptr // SetPropServer
+	_              uintptr // ClearProps
+	setHwndProp    uintptr
+	setHwndPropStr uintptr
+	_              uintptr // SetHwndPropServer
+	_              uintptr // ClearHwndProps
+	_              uintptr // ComposeHwndIdentityString
+	_              uintptr // DecomposeHwndIdentityString
 }
 
 type accVariant struct {
