@@ -102,7 +102,9 @@ func TestActivityCallbackFollowsWarning(t *testing.T) {
 	activity := make(chan struct{}, 1)
 	var input atomic.Uint32
 	input.Store(1)
-	m := New(40*time.Millisecond, 20*time.Millisecond, func() {
+	// Make the warning eligible on the first sample. The test exercises the
+	// warning-to-activity transition, not scheduler timing within a short window.
+	m := New(time.Hour, time.Hour, func() {
 		input.Store(2)
 		warned <- struct{}{}
 	}, nil, time.Millisecond)
