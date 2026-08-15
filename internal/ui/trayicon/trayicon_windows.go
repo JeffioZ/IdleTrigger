@@ -25,40 +25,42 @@ var (
 	shcore                    = windows.NewLazySystemDLL("Shcore.dll")
 	pGetScaleFactorForMonitor = shcore.NewProc("GetScaleFactorForMonitor")
 
-	u32                    = windows.NewLazySystemDLL("User32.dll")
-	pCreateMenu            = u32.NewProc("CreateMenu")
-	pCreatePopupMenu       = u32.NewProc("CreatePopupMenu")
-	pCreateWindowEx        = u32.NewProc("CreateWindowExW")
-	pDefWindowProc         = u32.NewProc("DefWindowProcW")
-	pRemoveMenu            = u32.NewProc("RemoveMenu")
-	pDestroyWindow         = u32.NewProc("DestroyWindow")
-	pDispatchMessage       = u32.NewProc("DispatchMessageW")
-	pDrawIconEx            = u32.NewProc("DrawIconEx")
-	pGetCursorPos          = u32.NewProc("GetCursorPos")
-	pGetDC                 = u32.NewProc("GetDC")
-	pGetMessage            = u32.NewProc("GetMessageW")
-	pIsChild               = u32.NewProc("IsChild")
-	pIsDialogMessage       = u32.NewProc("IsDialogMessageW")
-	pGetSystemMetrics      = u32.NewProc("GetSystemMetrics")
-	pInsertMenuItem        = u32.NewProc("InsertMenuItemW")
-	pKillTimer             = u32.NewProc("KillTimer")
-	pLoadCursor            = u32.NewProc("LoadCursorW")
-	pDestroyIcon           = u32.NewProc("DestroyIcon")
-	pLoadIcon              = u32.NewProc("LoadIconW")
-	pLoadImage             = u32.NewProc("LoadImageW")
-	pMonitorFromRect       = u32.NewProc("MonitorFromRect")
-	pPostMessage           = u32.NewProc("PostMessageW")
-	pPostQuitMessage       = u32.NewProc("PostQuitMessage")
-	pRegisterClass         = u32.NewProc("RegisterClassExW")
-	pRegisterWindowMessage = u32.NewProc("RegisterWindowMessageW")
-	pReleaseDC             = u32.NewProc("ReleaseDC")
-	pSetForegroundWindow   = u32.NewProc("SetForegroundWindow")
-	pSetMenuInfo           = u32.NewProc("SetMenuInfo")
-	pSetMenuItemInfo       = u32.NewProc("SetMenuItemInfoW")
-	pSetTimer              = u32.NewProc("SetTimer")
-	pTrackPopupMenu        = u32.NewProc("TrackPopupMenu")
-	pTranslateMessage      = u32.NewProc("TranslateMessage")
-	pUnregisterClass       = u32.NewProc("UnregisterClassW")
+	u32                                 = windows.NewLazySystemDLL("User32.dll")
+	pCreateMenu                         = u32.NewProc("CreateMenu")
+	pCreatePopupMenu                    = u32.NewProc("CreatePopupMenu")
+	pCreateWindowEx                     = u32.NewProc("CreateWindowExW")
+	pDefWindowProc                      = u32.NewProc("DefWindowProcW")
+	pRemoveMenu                         = u32.NewProc("RemoveMenu")
+	pDestroyWindow                      = u32.NewProc("DestroyWindow")
+	pDispatchMessage                    = u32.NewProc("DispatchMessageW")
+	pDrawIconEx                         = u32.NewProc("DrawIconEx")
+	pGetCursorPos                       = u32.NewProc("GetCursorPos")
+	pGetDC                              = u32.NewProc("GetDC")
+	pGetMessage                         = u32.NewProc("GetMessageW")
+	pIsChild                            = u32.NewProc("IsChild")
+	pIsDialogMessage                    = u32.NewProc("IsDialogMessageW")
+	pGetSystemMetrics                   = u32.NewProc("GetSystemMetrics")
+	pInsertMenuItem                     = u32.NewProc("InsertMenuItemW")
+	pKillTimer                          = u32.NewProc("KillTimer")
+	pLoadCursor                         = u32.NewProc("LoadCursorW")
+	pDestroyIcon                        = u32.NewProc("DestroyIcon")
+	pLoadIcon                           = u32.NewProc("LoadIconW")
+	pLoadImage                          = u32.NewProc("LoadImageW")
+	pMonitorFromRect                    = u32.NewProc("MonitorFromRect")
+	pPostMessage                        = u32.NewProc("PostMessageW")
+	pPostQuitMessage                    = u32.NewProc("PostQuitMessage")
+	pRegisterClass                      = u32.NewProc("RegisterClassExW")
+	pRegisterWindowMessage              = u32.NewProc("RegisterWindowMessageW")
+	pRegisterPowerSettingNotification   = u32.NewProc("RegisterPowerSettingNotification")
+	pUnregisterPowerSettingNotification = u32.NewProc("UnregisterPowerSettingNotification")
+	pReleaseDC                          = u32.NewProc("ReleaseDC")
+	pSetForegroundWindow                = u32.NewProc("SetForegroundWindow")
+	pSetMenuInfo                        = u32.NewProc("SetMenuInfo")
+	pSetMenuItemInfo                    = u32.NewProc("SetMenuItemInfoW")
+	pSetTimer                           = u32.NewProc("SetTimer")
+	pTrackPopupMenu                     = u32.NewProc("TrackPopupMenu")
+	pTranslateMessage                   = u32.NewProc("TranslateMessage")
+	pUnregisterClass                    = u32.NewProc("UnregisterClassW")
 )
 
 // The notification-area host must remain a real hidden top-level window so it
@@ -118,7 +120,7 @@ func isTrayIconRefreshMessage(message uint32) bool {
 }
 
 func notifyThemeChange() {
-	_, _, callback := callbacks()
+	_, _, _, callback := callbacks()
 	if callback == nil || !themeChangePending.CompareAndSwap(false, true) {
 		return
 	}
@@ -385,11 +387,12 @@ type winTray struct {
 	muNID sync.RWMutex
 	wcex  *wndClassEx
 
-	uiTasks      []func()
-	uiStopped    chan struct{}
-	uiClosing    bool
-	muUITasks    sync.Mutex
-	shutdownOnce sync.Once
+	uiTasks            []func()
+	uiStopped          chan struct{}
+	uiClosing          bool
+	muUITasks          sync.Mutex
+	shutdownOnce       sync.Once
+	powerNotifications []windows.Handle
 
 	wmSystrayMessage,
 	wmTaskbarCreated uint32

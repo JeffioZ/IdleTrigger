@@ -104,6 +104,7 @@ func (t *winTray) beginUIShutdown() {
 
 func (t *winTray) shutdown() {
 	t.shutdownOnce.Do(func() {
+		t.unregisterPowerNotifications()
 		t.beginUIShutdown()
 		t.removeNotificationIcon()
 		systrayExit()

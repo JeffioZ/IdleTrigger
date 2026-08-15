@@ -8,6 +8,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/feature/keepawake"
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/powerstate"
+	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 )
 
 // syncBatteryLoop keeps the periodic battery poll dormant when neither
@@ -36,12 +37,10 @@ func (s *runtimeState) stopBatteryLoop() {
 	s.batteryDone = nil
 }
 
-// batteryLoop periodically checks power state and auto-disables NoSleep
-// when the system switches to battery or drops below the configured threshold.
-// It also nudges the theme scheduler so dark-on-battery reacts within a few
-// seconds instead of waiting for the regular theme schedule tick.
+// batteryLoop is a low-frequency fallback for firmware or drivers that miss
+// registered AC/DC and battery-percentage notifications.
 func (s *runtimeState) batteryLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	defer close(doneCh)
 	for {
@@ -66,11 +65,15 @@ func (s *runtimeState) refreshBatteryPolicy() {
 }
 
 func (s *runtimeState) refreshBatteryPolicyWithStatus(ps powerstate.Status) bool {
+	powerSourceChanged := ps.Valid && (!s.powerStatusKnown || powerStatusSourceChanged(s.lastPowerStatus, ps))
+	s.lastPowerStatus = ps
+	if ps.Valid {
+		s.powerStatusKnown = true
+	}
 	blocked := batteryPolicyBlocks(s.cfg, ps)
-	if s.themeSched != nil {
+	if powerSourceChanged && s.themeSched != nil {
 		s.themeSched.CheckNow()
 	}
-	s.refreshTrayThemeIcon()
 	if blocked == s.batteryBlocked {
 		return false
 	}
@@ -83,16 +86,46 @@ func (s *runtimeState) refreshBatteryPolicyWithStatus(ps powerstate.Status) bool
 	return true
 }
 
-func (s *runtimeState) handlePowerEvent(event uint32) {
+func (s *runtimeState) handlePowerEvent(event trayicon.PowerEvent) {
 	ps := powerstate.GetStatus()
-	s.logPowerState(fmt.Sprintf("event:%s(0x%04x)", powerEventName(event), event), ps)
+	s.logPowerState(fmt.Sprintf("event:%s(0x%04x) setting=%s value=%s", powerEventName(event.Code), event.Code,
+		powerSettingName(event.Setting), powerSettingValue(event)), ps)
 	changed := s.refreshBatteryPolicyWithStatus(ps)
-	if isResumePowerEvent(event) && !changed {
+	if event.Setting == trayicon.PowerSettingACSource || event.Code == pbtAPMPowerStatusChange {
+		if s.themeSched != nil {
+			s.themeSched.CheckNow()
+		}
+		// Some drivers broadcast the setting just before GetSystemPowerStatus
+		// converges. One delayed read avoids waiting for the polling fallback.
+		time.AfterFunc(time.Second, func() {
+			if s.exiting.Load() {
+				return
+			}
+			s.post(s.refreshBatteryPolicy)
+		})
+	}
+	if isResumePowerEvent(event.Code) {
+		if s.themeSched != nil {
+			s.themeSched.CheckNow()
+		}
+		s.requestThemeEnvironmentRecovery(themeSourceResume)
+	}
+	if isResumePowerEvent(event.Code) && !changed {
 		if s.noSleepRequested() && !s.batteryBlocked {
 			mylog.Info("Power resume: reasserting effective Stay Awake request")
 		}
 		s.reconcileRuntime()
 	}
+}
+
+func powerStatusSourceChanged(previous, current powerstate.Status) bool {
+	if !current.Valid {
+		return false
+	}
+	if !previous.Valid {
+		return true
+	}
+	return previous.ACLine != current.ACLine || previous.Battery != current.Battery
 }
 
 func (s *runtimeState) logPowerState(source string, ps powerstate.Status) {

@@ -24,25 +24,46 @@ func TestAutomationTooltipFormatsCountSummaryAndExplanation(t *testing.T) {
 
 func TestPowerManagementTooltipSeparatesManualAndRuntimeState(t *testing.T) {
 	texts := map[string]string{
-		"tip_power_setting_status": "Manual setting: %s.\nRuntime status: %s.\n%s",
-		"tip_state_enabled":        "on",
-		"tip_state_disabled":       "off",
-		"tip_nosleep":              "Stay Awake help.",
-		"tip_idle":                 "Idle help.",
-		"status_unknown":           "Unknown",
+		"tip_power_setting_status":     "Manual setting: %s.\nRuntime status: %s.\n%s",
+		"tip_state_enabled":            "on",
+		"tip_state_disabled":           "off",
+		"tip_nosleep":                  "Stay Awake help.",
+		"tip_idle":                     "Idle help.",
+		"tip_idle_manual_plan_warning": "Manual plan: after %d idle minutes, run %s with a %d-second reminder",
+		"menu_action_lock":             "Lock",
+		"status_unknown":               "Unknown",
 	}
 	p := panel{
-		lang:          func(key string) string { return texts[key] },
-		noSleepStatus: "Enabled by an automatic task",
-		idleStatus:    "Paused by Stay Awake",
-		toggles:       map[uint16]bool{idNoSleep: false, idIdle: true},
-		disabled:      map[uint16]bool{},
+		lang:               func(key string) string { return texts[key] },
+		noSleepStatus:      "Enabled by an automatic task",
+		idleStatus:         "Paused by Stay Awake",
+		idleTimeoutMinutes: 30,
+		idleWarningSeconds: 20,
+		idleAction:         "lock",
+		toggles:            map[uint16]bool{idNoSleep: false, idIdle: true},
+		disabled:           map[uint16]bool{},
 	}
 	if got := p.tooltipText(idNoSleep); got != "Manual setting: off.\nRuntime status: Enabled by an automatic task.\nStay Awake help." {
 		t.Fatalf("Stay Awake tooltip = %q", got)
 	}
-	if got := p.tooltipText(idIdle); got != "Manual setting: on.\nRuntime status: Paused by Stay Awake.\nIdle help." {
+	if got := p.tooltipText(idIdle); got != "Manual setting: on.\nRuntime status: Paused by Stay Awake.\nManual plan: after 30 idle minutes, run Lock with a 20-second reminder\nIdle help." {
 		t.Fatalf("idle tooltip = %q", got)
+	}
+}
+
+func TestIdleTooltipExplainsSilentManualPlan(t *testing.T) {
+	texts := map[string]string{
+		"tip_idle":                    "Idle help.",
+		"tip_idle_manual_plan_silent": "Manual plan: after %d idle minutes, run %s without a reminder",
+		"menu_action_shutdown":        "Shut down",
+	}
+	p := panel{
+		lang:               func(key string) string { return texts[key] },
+		idleTimeoutMinutes: 45,
+		idleAction:         "shutdown",
+	}
+	if got := p.idleTooltipBody(); got != "Manual plan: after 45 idle minutes, run Shut down without a reminder\nIdle help." || strings.Contains(got, "%!") {
+		t.Fatalf("idle tooltip body = %q", got)
 	}
 }
 
@@ -106,7 +127,7 @@ func TestPopupTriggerIsLimitedToSystemControls(t *testing.T) {
 	if !isPopupTrigger(idQuickActions) {
 		t.Fatal("system controls must open the shared popup")
 	}
-	for _, id := range []uint16{idSettings, idExit, idSleep, idThemeSwitch} {
+	for _, id := range []uint16{idSettings, idExit, idSleep, idThemeSwitch, idThemeRepair} {
 		if isPopupTrigger(id) {
 			t.Fatalf("command %d must not be a popup trigger", id)
 		}
@@ -157,7 +178,7 @@ func TestButtonRoleMappingCoversEveryPanelAction(t *testing.T) {
 			t.Fatalf("toggle id %d has role %d", id, got)
 		}
 	}
-	for _, id := range []uint16{idQuickActions, idAutomation, idLock, idSleep, idHibernate, idShutdown, idRestart, idThemeSwitch, idSettings, idExit} {
+	for _, id := range []uint16{idQuickActions, idAutomation, idLock, idSleep, idHibernate, idShutdown, idRestart, idThemeSwitch, idThemeRepair, idSettings, idExit} {
 		if got := roleForButton(id); got != buttonCommand {
 			t.Fatalf("command id %d has role %d", id, got)
 		}
@@ -211,7 +232,7 @@ func TestWindowIconThemeAndReloadDecisions(t *testing.T) {
 }
 
 func TestRefreshActionsKeepPanelOpen(t *testing.T) {
-	for _, action := range []Action{ActSwitchTheme, ActSettingsOpen, ActAutomationOpen} {
+	for _, action := range []Action{ActSwitchTheme, ActRepairTheme, ActSettingsOpen, ActAutomationOpen} {
 		if actionClosesPanel(action) {
 			t.Fatalf("action %d should keep the panel available for an immediate refresh", action)
 		}
@@ -452,6 +473,44 @@ func TestThemeRepairCompletionForcesCompleteFrame(t *testing.T) {
 	}
 }
 
+func TestThemeActionsShareOneEqualGridRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping native Win32 integration test in short mode")
+	}
+	labels := map[string]string{
+		"menu_theme_enable":     "Enable Auto Switch",
+		"menu_theme_switch_now": "Switch Theme",
+		"menu_theme_repair":     "Repair Theme",
+	}
+	err := Capture(State{Theme: ThemeLight}, func(key string) string {
+		if label := labels[key]; label != "" {
+			return label
+		}
+		return key
+	}, 1, func(hwnd windows.Handle) error {
+		p := panelFor(hwnd)
+		if p == nil {
+			t.Fatal("capture panel is not active")
+		}
+		toggle := p.controlBounds[idTheme]
+		switchTheme := p.controlBounds[idThemeSwitch]
+		repairTheme := p.controlBounds[idThemeRepair]
+		if toggle.x >= switchTheme.x || switchTheme.x >= repairTheme.x {
+			t.Fatalf("theme controls are not in visual order: toggle=%+v switch=%+v repair=%+v", toggle, switchTheme, repairTheme)
+		}
+		if switchTheme.y != repairTheme.y || switchTheme.width != repairTheme.width || switchTheme.height != repairTheme.height {
+			t.Fatalf("theme action grid is uneven: switch=%+v repair=%+v", switchTheme, repairTheme)
+		}
+		if gap := repairTheme.x - switchTheme.x - switchTheme.width; gap != p.metrics.style.Layout.Gap {
+			t.Fatalf("theme action gap = %d, want %d", gap, p.metrics.style.Layout.Gap)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestControlStateCombinesModelAndNativeState(t *testing.T) {
 	p := &panel{
 		toggles:            map[uint16]bool{idIdle: true},
@@ -474,7 +533,7 @@ func TestUnavailableThemeDisablesEveryThemeControl(t *testing.T) {
 		tooltips:         map[uint16][]uint16{},
 	}
 	p.applyDependentStates()
-	for _, id := range []uint16{idTheme, idThemeSwitch} {
+	for _, id := range []uint16{idTheme, idThemeSwitch, idThemeRepair} {
 		if !p.disabled[id] {
 			t.Fatalf("theme control %d remained enabled", id)
 		}
@@ -489,10 +548,47 @@ func TestAvailableThemeLeavesItsVisibleControlsEnabled(t *testing.T) {
 		tooltips: map[uint16][]uint16{},
 	}
 	p.applyDependentStates()
-	for _, id := range []uint16{idTheme, idThemeSwitch} {
+	for _, id := range []uint16{idTheme, idThemeSwitch, idThemeRepair} {
 		if p.disabled[id] {
 			t.Fatalf("theme control %d remained disabled", id)
 		}
+	}
+}
+
+func TestBusyThemeOperationDisablesActionsButKeepsScheduleToggle(t *testing.T) {
+	p := &panel{
+		themeOperationBusy: true,
+		toggles:            map[uint16]bool{idTheme: true},
+		disabled:           map[uint16]bool{},
+		controls:           map[uint16]windows.Handle{},
+		tooltips:           map[uint16][]uint16{},
+	}
+	p.applyDependentStates()
+	if p.disabled[idTheme] {
+		t.Fatal("busy manual operation disabled the independent schedule toggle")
+	}
+	for _, id := range []uint16{idThemeSwitch, idThemeRepair} {
+		if !p.disabled[id] {
+			t.Fatalf("busy theme action %d remained enabled", id)
+		}
+	}
+}
+
+func TestThemeActionBusyLabelsRemainRoleSpecific(t *testing.T) {
+	texts := map[string]string{
+		"menu_theme_switch_now": "Switch Theme", "menu_theme_repair": "Repair Theme",
+		"menu_theme_switching": "Switching…", "menu_theme_repairing": "Repairing…",
+	}
+	p := &panel{lang: func(key string) string { return texts[key] }}
+	if got := p.themeActionLabel(idThemeSwitch); got != "Switch Theme" {
+		t.Fatalf("idle switch label = %q", got)
+	}
+	p.themeOperationBusy = true
+	if got := p.themeActionLabel(idThemeSwitch); got != "Switching…" {
+		t.Fatalf("busy switch label = %q", got)
+	}
+	if got := p.themeActionLabel(idThemeRepair); got != "Repairing…" {
+		t.Fatalf("busy repair label = %q", got)
 	}
 }
 
@@ -501,12 +597,12 @@ func TestOwnerDrawnButtonsIgnoreStaleNativeHotlight(t *testing.T) {
 		toggles:  map[uint16]bool{},
 		disabled: map[uint16]bool{},
 	}
-	for _, id := range []uint16{idNoSleep, idThemeSwitch, idQuickActions, idSettings, idExit} {
+	for _, id := range []uint16{idNoSleep, idThemeSwitch, idThemeRepair, idQuickActions, idSettings, idExit} {
 		if state := p.controlState(id, odsHotlight); state.Hovered {
 			t.Fatalf("owner-drawn control %d retained stale native hotlight", id)
 		}
 	}
-	sequence := []uint16{idNoSleep, idIdle, idThemeSwitch, idSettings, idExit}
+	sequence := []uint16{idNoSleep, idIdle, idThemeSwitch, idThemeRepair, idSettings, idExit}
 	for index, current := range sequence {
 		p.hoverID = current
 		if state := p.controlState(current, 0); !state.Hovered {
@@ -626,6 +722,7 @@ func TestCommandActionMapsDirectCommands(t *testing.T) {
 		{idLock, ActLock},
 		{idRestart, ActRestart},
 		{idThemeSwitch, ActSwitchTheme},
+		{idThemeRepair, ActRepairTheme},
 		{idSettings, ActSettingsOpen},
 		{idExit, ActExit},
 	}
@@ -670,7 +767,7 @@ func TestEveryControlPanelActionHasAUICommandPath(t *testing.T) {
 	mapped := map[Action]bool{}
 	for _, id := range []uint16{
 		idAutomation, idSleep, idHibernate, idShutdown, idLock, idRestart,
-		idThemeSwitch, idSettings, idExit,
+		idThemeSwitch, idThemeRepair, idSettings, idExit,
 	} {
 		action, _, ok := p.commandAction(id)
 		if !ok {

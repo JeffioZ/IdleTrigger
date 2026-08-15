@@ -126,21 +126,3 @@ func (s *runtimeState) cancelIPLocationRetry() {
 	s.ipLocationRetry.Stop()
 	s.ipLocationRetry = nil
 }
-
-func (s *runtimeState) runThemeOperation(actionKey string, fn func() error, onSuccess func()) {
-	go func() {
-		if err := fn(); err != nil {
-			s.post(func() {
-				s.showError(actionKey, err)
-			})
-			return
-		}
-		s.post(func() {
-			if onSuccess != nil {
-				onSuccess()
-			}
-			s.refreshTrayThemeIcon()
-			trayicon.Post(controlpanel.RefreshTheme)
-		})
-	}()
-}

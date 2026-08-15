@@ -32,6 +32,32 @@ func TestScaledPixelsPreservesFractionalDPI(t *testing.T) {
 	}
 }
 
+func TestCenteredTextTopKeepsOddRemainderBelowLabel(t *testing.T) {
+	// At 150% DPI a 36 px logical button is 54 physical pixels while the
+	// Chinese UI font commonly measures 25 pixels high. The spare 29th pixel
+	// belongs below the label so its optical center does not drift downward.
+	if got, want := centeredTextTop(100, 154, 25), int32(114); got != want {
+		t.Fatalf("centered text top = %d, want %d", got, want)
+	}
+	if got, want := centeredTextTop(100, 136, 17), int32(109); got != want {
+		t.Fatalf("96-DPI centered text top = %d, want %d", got, want)
+	}
+	if got := centeredTextTop(100, 120, 20); got != 100 {
+		t.Fatalf("oversized text top = %d, want unchanged bounds", got)
+	}
+}
+
+func TestHanOpticalLiftDoesNotChangeLatinButtons(t *testing.T) {
+	if !needsHanOpticalLift("切换主题") {
+		t.Fatal("Han button label did not request its optical lift")
+	}
+	for _, label := range []string{"Switch Theme", "Repairing…", "123"} {
+		if needsHanOpticalLift(label) {
+			t.Fatalf("Latin label %q requested a Han optical lift", label)
+		}
+	}
+}
+
 func TestButtonVisualStatePriority(t *testing.T) {
 	palette := colors.ForTheme(false)
 	tests := []struct {

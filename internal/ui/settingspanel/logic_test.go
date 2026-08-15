@@ -121,7 +121,7 @@ func TestEverySettingsControlHasLocalizedHelp(t *testing.T) {
 		idIdleTimeout: true, idIdleAction: true, idWarningSeconds: true, idIdleEnhanced: true,
 		idThemeMode: true, idLightTime: true, idDarkTime: true, idLocationSource: true,
 		idThemeBattery: true, idThemeFullscreen: true,
-		idThemeRepair: true, idLanguage: true, idHotkeys: true, idAutostart: true,
+		idLanguage: true, idHotkeys: true, idAutostart: true,
 		idLogging: true, idProjectHome: true, idCancel: true, idSave: true,
 	}
 	for _, binding := range settingsTooltipBindings() {

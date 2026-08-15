@@ -85,7 +85,9 @@ func (p *panel) build() error {
 		return err
 	}
 	y += sectionH + labelGap
-	height, err = row(y, []string{p.text("menu_theme_enable"), p.text("menu_theme_switch_now")}, []uint16{idTheme, idThemeSwitch})
+	height, err = row(y,
+		[]string{p.text("menu_theme_enable"), p.themeActionLabel(idThemeSwitch), p.themeActionLabel(idThemeRepair)},
+		[]uint16{idTheme, idThemeSwitch, idThemeRepair})
 	if err != nil {
 		return err
 	}
@@ -105,4 +107,17 @@ func (p *panel) build() error {
 	p.clientH = y + height + gap
 	p.applyDependentStates()
 	return nil
+}
+
+func (p *panel) themeActionLabel(id uint16) string {
+	if p.themeOperationBusy {
+		if id == idThemeRepair {
+			return p.text("menu_theme_repairing")
+		}
+		return p.text("menu_theme_switching")
+	}
+	if id == idThemeRepair {
+		return p.text("menu_theme_repair")
+	}
+	return p.text("menu_theme_switch_now")
 }

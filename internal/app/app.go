@@ -85,6 +85,8 @@ type runtimeState struct {
 	automationWarningOpen bool
 	automationGeneration  uint64
 	themeSched            *theme.Scheduler
+	themeCoordinator      *themeTransitionCoordinator
+	themeOperationBusy    bool
 	themeSupportChecked   bool
 	themeSupported        bool
 	themeSupportErr       error
@@ -94,6 +96,8 @@ type runtimeState struct {
 	ipLocationGeneration  uint64
 	ipLocationRetried     bool
 	batteryBlocked        bool
+	lastPowerStatus       powerstate.Status
+	powerStatusKnown      bool
 	trayThemeDark         bool
 	menuOpen              *trayicon.MenuItem
 	menuExit              *trayicon.MenuItem
@@ -172,6 +176,8 @@ func Run(cfg config.Config, cbs Callbacks) {
 		}
 		powerStatus := powerstate.GetStatus()
 		s.batteryBlocked = batteryPolicyBlocks(s.cfg, powerStatus)
+		s.lastPowerStatus = powerStatus
+		s.powerStatusKnown = powerStatus.Valid
 		s.logPowerState("startup", powerStatus)
 		s.reconcileRuntime()
 
@@ -183,6 +189,7 @@ func Run(cfg config.Config, cbs Callbacks) {
 		}
 
 		s.startAutomation()
+		s.startThemeCoordinator()
 		if s.cfg.ThemeSwitchEnabled {
 			s.startThemeScheduler()
 		}
@@ -204,8 +211,11 @@ func Run(cfg config.Config, cbs Callbacks) {
 		}
 
 		trayicon.SetOnLeftClick(func() { s.showControlPanel() })
-		trayicon.SetOnPowerChange(func(event uint32) {
+		trayicon.SetOnPowerChange(func(event trayicon.PowerEvent) {
 			s.post(func() { s.handlePowerEvent(event) })
+		})
+		trayicon.SetOnDisplayChange(func() {
+			s.post(func() { s.requestThemeEnvironmentRecovery(themeSourceDisplay) })
 		})
 		trayicon.SetOnThemeChange(func() {
 			s.post(s.refreshTrayThemeIcon)
@@ -225,6 +235,7 @@ func Run(cfg config.Config, cbs Callbacks) {
 			s.stopHotkeys()
 			s.stopAutomation()
 			s.stopThemeScheduler()
+			s.stopThemeCoordinator()
 			s.stopBatteryLoop()
 			keepawake.Disable()
 			return ""

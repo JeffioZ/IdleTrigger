@@ -11,16 +11,17 @@ import (
 )
 
 var (
-	systrayReady  func()
-	systrayExit   func()
-	menuItems     = make(map[uint32]*MenuItem)
-	menuItemsLock sync.RWMutex
-	errorHandler  = func(string, ...interface{}) {}
-	errorLock     sync.RWMutex
-	callbackLock  sync.RWMutex
-	onLeftClick   func()
-	onPowerChange func(uint32)
-	onThemeChange func()
+	systrayReady    func()
+	systrayExit     func()
+	menuItems       = make(map[uint32]*MenuItem)
+	menuItemsLock   sync.RWMutex
+	errorHandler    = func(string, ...interface{}) {}
+	errorLock       sync.RWMutex
+	callbackLock    sync.RWMutex
+	onLeftClick     func()
+	onPowerChange   func(PowerEvent)
+	onDisplayChange func()
+	onThemeChange   func()
 
 	currentID = uint32(0)
 	quitOnce  sync.Once
@@ -263,9 +264,18 @@ func SetOnLeftClick(fn func()) {
 }
 
 // SetOnPowerChange sets the callback used for Windows power-state changes.
-func SetOnPowerChange(fn func(uint32)) {
+func SetOnPowerChange(fn func(PowerEvent)) {
 	callbackLock.Lock()
 	onPowerChange = fn
+	callbackLock.Unlock()
+}
+
+// SetOnDisplayChange sets the callback used when Windows reports a display
+// topology change. The callback is separate from tray-icon convergence so the
+// application can delay theme recovery until the desktop is stable.
+func SetOnDisplayChange(fn func()) {
+	callbackLock.Lock()
+	onDisplayChange = fn
 	callbackLock.Unlock()
 }
 
@@ -276,8 +286,27 @@ func SetOnThemeChange(fn func()) {
 	callbackLock.Unlock()
 }
 
-func callbacks() (leftClick func(), powerChange func(uint32), themeChange func()) {
+func callbacks() (leftClick func(), powerChange func(PowerEvent), displayChange func(), themeChange func()) {
 	callbackLock.RLock()
 	defer callbackLock.RUnlock()
-	return onLeftClick, onPowerChange, onThemeChange
+	return onLeftClick, onPowerChange, onDisplayChange, onThemeChange
+}
+
+// PowerSetting identifies the registered power setting carried by a Windows
+// PBT_POWERSETTINGCHANGE broadcast.
+type PowerSetting uint8
+
+const (
+	PowerSettingNone PowerSetting = iota
+	PowerSettingACSource
+	PowerSettingBatteryPercentage
+)
+
+// PowerEvent preserves the broadcast code and, when available, the DWORD
+// payload for one of IdleTrigger's explicitly registered power settings.
+type PowerEvent struct {
+	Code     uint32
+	Setting  PowerSetting
+	Value    uint32
+	HasValue bool
 }

@@ -21,7 +21,6 @@ func (s *runtimeState) showSettingsPanel() {
 		err := settingspanel.Show(state, func(request settingspanel.SaveRequest) settingspanel.SaveResult {
 			return s.requestSettingsSave(request)
 		}, func() { s.refreshControlPanel() },
-			func() { s.post(func() { s.repairTheme() }) },
 			func() { s.post(func() { s.openProjectHome() }) },
 			func(key string) string { return i18n.T(lang, key) })
 		if err != nil {

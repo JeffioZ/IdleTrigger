@@ -289,6 +289,19 @@ func TestBatteryPolicyReasons(t *testing.T) {
 	}
 }
 
+func TestPowerStatusSourceChangedIgnoresPercentageOnlyUpdates(t *testing.T) {
+	ac := powerstate.Status{Valid: true, Battery: true, ACLine: true, Percent: 80}
+	if powerStatusSourceChanged(ac, powerstate.Status{Valid: true, Battery: true, ACLine: true, Percent: 79}) {
+		t.Fatal("battery percentage change was treated as an AC/DC source change")
+	}
+	if !powerStatusSourceChanged(ac, powerstate.Status{Valid: true, Battery: true, ACLine: false, Percent: 79}) {
+		t.Fatal("AC to battery transition was not detected")
+	}
+	if powerStatusSourceChanged(ac, powerstate.Status{}) {
+		t.Fatal("unknown current status should not create a false source transition")
+	}
+}
+
 func TestPowerEventClassification(t *testing.T) {
 	for _, tt := range []struct {
 		event  uint32
@@ -298,6 +311,7 @@ func TestPowerEventClassification(t *testing.T) {
 		{pbtAPMSuspend, "suspend", false},
 		{pbtAPMResumeSuspend, "resume-user", true},
 		{pbtAPMResumeAutomatic, "resume-automatic", true},
+		{pbtAPMPowerStatusChange, "power-status-change", false},
 		{pbtPowerSettingChange, "power-setting-change", false},
 		{0xffff, "unknown", false},
 	} {

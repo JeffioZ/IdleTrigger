@@ -62,7 +62,7 @@ func (s *runtimeState) handleIdleControlAction(action controlpanel.Action, value
 func (s *runtimeState) handleThemeControlAction(action controlpanel.Action) bool {
 	if !s.themeAvailable() {
 		switch action {
-		case controlpanel.ActThemeToggle, controlpanel.ActSwitchTheme:
+		case controlpanel.ActThemeToggle, controlpanel.ActSwitchTheme, controlpanel.ActRepairTheme:
 			return true
 		}
 	}
@@ -87,9 +87,9 @@ func (s *runtimeState) handleThemeControlAction(action controlpanel.Action) bool
 			s.themeSched.HoldManualOverride(time.Now())
 			mylog.Info("Manual theme override enabled until the next scheduled transition")
 		}
-		s.runThemeOperation("menu_theme_switch_now", func() error {
-			return theme.Switch(mode)
-		}, nil)
+		s.requestManualThemeSwitch(mode)
+	case controlpanel.ActRepairTheme:
+		s.repairTheme()
 	default:
 		return false
 	}
@@ -120,10 +120,7 @@ func (s *runtimeState) repairTheme() {
 	if !s.themeAvailable() {
 		return
 	}
-	s.runThemeOperation("menu_theme_repair", func() error {
-		defer trayicon.Post(controlpanel.RefreshThemeAfterSystemRepair)
-		return theme.Refresh()
-	}, nil)
+	s.requestManualThemeRepair()
 }
 
 func (s *runtimeState) openProjectHome() {

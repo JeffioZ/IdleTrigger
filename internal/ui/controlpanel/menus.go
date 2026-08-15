@@ -51,7 +51,8 @@ func (p *panel) setDisabled(id uint16, value bool) {
 
 func (p *panel) applyDependentStates() {
 	p.setDisabled(idTheme, p.themeUnavailable)
-	p.setDisabled(idThemeSwitch, p.themeUnavailable)
+	p.setDisabled(idThemeSwitch, p.themeUnavailable || p.themeOperationBusy)
+	p.setDisabled(idThemeRepair, p.themeUnavailable || p.themeOperationBusy)
 }
 
 func (p *panel) setKeyboardNavigation(active bool) {

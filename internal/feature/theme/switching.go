@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/darkmode"
 )
 
@@ -182,11 +184,26 @@ func Refresh() error {
 	defer themeOperationMu.Unlock()
 
 	var repairErr error
-	if windows.RtlGetVersion().BuildNumber >= windows11FullDWMRefreshBuild {
+	if FullDWMRefreshAvailable() {
 		repairErr = refreshDWMColorization()
 	}
 	notifyThemeChanged()
 	return repairErr
+}
+
+// Rebroadcast asks Windows and all top-level windows to re-read the current
+// theme without changing registry preferences or applying the heavier Windows
+// 11 DWM colorization repair.
+func Rebroadcast() {
+	themeOperationMu.Lock()
+	defer themeOperationMu.Unlock()
+	notifyThemeChanged()
+}
+
+// FullDWMRefreshAvailable reports whether Refresh uses the Windows 11
+// colorization repair instead of a lightweight notification-only refresh.
+func FullDWMRefreshAvailable() bool {
+	return windows.RtlGetVersion().BuildNumber >= windows11FullDWMRefreshBuild
 }
 
 type themeChangeNotification struct {
@@ -222,7 +239,10 @@ func notifyThemeChanged() {
 	// the complete set but deliver each event exactly once. The previous
 	// asynchronous-plus-synchronous pair left duplicate messages queued after
 	// the app had already committed its new frame, producing late hover redraws.
-	for _, notification := range themeChangeNotifications() {
+	notifications := themeChangeNotifications()
+	started := time.Now()
+	failures := 0
+	for _, notification := range notifications {
 		var lParam uintptr
 		if notification.token != "" {
 			ptr, err := windows.UTF16PtrFromString(notification.token)
@@ -231,7 +251,16 @@ func notifyThemeChanged() {
 			}
 			lParam = uintptr(unsafe.Pointer(ptr))
 		}
-		pSendMessageTimeout.Call(hwndBroadcast, uintptr(notification.message), 0, lParam, smtoAbortIfHung, 250, 0)
+		result, _, callErr := pSendMessageTimeout.Call(hwndBroadcast, uintptr(notification.message), 0, lParam, smtoAbortIfHung, 250, 0)
+		if result == 0 {
+			failures++
+			mylog.Info("Theme notification incomplete: message=0x%04x token=%s timeout_ms=250 error=%v",
+				notification.message, notification.token, callErr)
+		}
+	}
+	if elapsed := time.Since(started); failures > 0 || elapsed >= time.Second {
+		mylog.Info("Theme notification pass completed: messages=%d failures=%d elapsed=%s",
+			len(notifications), failures, elapsed.Round(time.Millisecond))
 	}
 }
 

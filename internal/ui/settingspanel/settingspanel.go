@@ -83,7 +83,6 @@ type panel struct {
 	text                                     TextFunc
 	onSave                                   OnSave
 	onSaved                                  OnSaved
-	onRepairTheme                            OnCommand
 	onProjectHome                            OnCommand
 	controls                                 map[uint16]windows.Handle
 	labels                                   map[uint16]string
@@ -147,7 +146,6 @@ const (
 	idThemeHint             uint16 = 143
 	idThemeBattery          uint16 = 144
 	idThemeFullscreen       uint16 = 145
-	idThemeRepair           uint16 = 146
 	idThemeScheduleTitle    uint16 = 148
 	idThemeBehaviorTitle    uint16 = 149
 	idLanguageLabel         uint16 = 151
@@ -289,7 +287,7 @@ var (
 	wndCallback      = windows.NewCallback(wndProc)
 )
 
-func Show(state State, onSave OnSave, onSaved OnSaved, onRepairTheme, onProjectHome OnCommand, text TextFunc) error {
+func Show(state State, onSave OnSave, onSaved OnSaved, onProjectHome OnCommand, text TextFunc) error {
 	activeMu.Lock()
 	if active != nil && active.hwnd != 0 {
 		hwnd := active.hwnd
@@ -297,7 +295,7 @@ func Show(state State, onSave OnSave, onSaved OnSaved, onRepairTheme, onProjectH
 		pSetForeground.Call(uintptr(hwnd))
 		return nil
 	}
-	p := &panel{state: state, onSave: onSave, onSaved: onSaved, onRepairTheme: onRepairTheme, onProjectHome: onProjectHome, text: text,
+	p := &panel{state: state, onSave: onSave, onSaved: onSaved, onProjectHome: onProjectHome, text: text,
 		controls: make(map[uint16]windows.Handle), labels: make(map[uint16]string), bounds: make(map[uint16]bounds),
 		checks: make(map[uint16]bool), choices: make(map[uint16]*choice)}
 	active = p

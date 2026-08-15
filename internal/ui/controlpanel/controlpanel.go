@@ -89,6 +89,7 @@ func createPanelForHost(state State, onAction OnAction, langFn LangFunc, capture
 		themeSchedule:           state.ThemeSchedule,
 		themeUnavailable:        state.ThemeUnavailable,
 		themeUnavailableDetail:  state.ThemeUnavailableDetail,
+		themeOperationBusy:      state.ThemeOperationBusy,
 		appVersion:              state.AppVersion,
 		noSleepStatus:           state.NoSleepStatus,
 		idleStatus:              state.IdleStatus,
@@ -98,6 +99,7 @@ func createPanelForHost(state State, onAction OnAction, langFn LangFunc, capture
 		automationSummary:       state.AutomationSummary,
 		developerCapturePanel:   state.DeveloperCapturePanel,
 		developerWarningPreview: state.DeveloperWarningPreview,
+		idleTimeoutMinutes:      state.IdleTimeoutMinutes,
 		idleWarningSeconds:      state.IdleWarningSeconds,
 		idleAction:              state.IdleAction,
 		controls:                make(map[uint16]windows.Handle),
@@ -223,6 +225,30 @@ func UpdateThemeSchedule(text string) {
 	if hwnd != 0 {
 		pInvalidateRect.Call(uintptr(hwnd), 0, 1)
 	}
+}
+
+// UpdateThemeOperationBusy gives long-running manual theme work immediate,
+// layout-preserving feedback and prevents duplicate operations. The native
+// captions are updated with the owner-drawn labels so accessibility clients
+// receive the same state as sighted users.
+func UpdateThemeOperationBusy(busy bool) {
+	panelMu.Lock()
+	p := active
+	panelMu.Unlock()
+	if p == nil || p.themeOperationBusy == busy {
+		return
+	}
+	p.themeOperationBusy = busy
+	for _, id := range []uint16{idThemeSwitch, idThemeRepair} {
+		label := p.themeActionLabel(id)
+		p.labels[id] = label
+		if hwnd := p.controls[id]; hwnd != 0 {
+			if text, err := windows.UTF16PtrFromString(label); err == nil {
+				pSetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(text)))
+			}
+		}
+	}
+	p.applyDependentStates()
 }
 
 // RefreshTheme refreshes the visible panel after the system theme changes.

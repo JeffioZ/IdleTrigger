@@ -324,6 +324,26 @@ func TestSchedulerRetriesAfterThemeSwitchFailure(t *testing.T) {
 	}
 }
 
+func TestSchedulerRoutesApprovedSwitchThroughCoordinatorHandler(t *testing.T) {
+	s := NewScheduler("fixed", "07:00", "19:00", 0, 0, false, false)
+	directCalls := 0
+	s.switchTheme = func(Mode) error {
+		directCalls++
+		return nil
+	}
+	var gotSource string
+	var gotTarget Mode
+	s.SetSwitchHandler(func(source string, target Mode) error {
+		gotSource, gotTarget = source, target
+		return nil
+	})
+
+	s.switchIfAllowed("battery", ModeDark, nil)
+	if directCalls != 0 || gotSource != "battery" || gotTarget != ModeDark {
+		t.Fatalf("handler source=%q target=%v direct_calls=%d", gotSource, gotTarget, directCalls)
+	}
+}
+
 type errTestSwitchFailure struct{}
 
 func (errTestSwitchFailure) Error() string { return "test switch failure" }

@@ -91,10 +91,6 @@ func (p *panel) handleCommand(id, notification uint16) {
 		p.page = map[uint16]int{idTabPower: 0, idTabTheme: 1, idTabApp: 2}[id]
 		p.closeChoice(false)
 		p.applyDependentStates()
-	case idThemeRepair:
-		if p.onRepairTheme != nil {
-			p.onRepairTheme()
-		}
 	case idProjectHome:
 		if p.onProjectHome != nil {
 			p.onProjectHome()

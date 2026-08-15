@@ -95,11 +95,13 @@ func (p *panel) tooltipText(id uint16) string {
 	case idAutomationEnabled:
 		key = "tip_automation_master"
 	case idIdle:
-		return p.withPowerStatusTooltip(id, p.idleStatus, p.text("tip_idle"))
+		return p.withPowerStatusTooltip(id, p.idleStatus, p.idleTooltipBody())
 	case idTheme:
 		key = "tip_theme"
 	case idThemeSwitch:
 		key = "tip_theme_switch"
+	case idThemeRepair:
+		key = "tip_theme_repair"
 	case idSettings:
 		key = "tip_settings"
 	case idTestWarning:
@@ -113,8 +115,23 @@ func (p *panel) tooltipText(id uint16) string {
 	return p.withStateTooltip(id, p.text(key))
 }
 
+func (p *panel) idleTooltipBody() string {
+	body := p.text("tip_idle")
+	if p.idleTimeoutMinutes <= 0 || p.idleAction == "" {
+		return body
+	}
+	action := p.text(idlePreviewActionTranslationKey(p.idleAction))
+	plan := ""
+	if p.idleWarningSeconds > 0 {
+		plan = fmt.Sprintf(p.text("tip_idle_manual_plan_warning"), p.idleTimeoutMinutes, action, p.idleWarningSeconds)
+	} else {
+		plan = fmt.Sprintf(p.text("tip_idle_manual_plan_silent"), p.idleTimeoutMinutes, action)
+	}
+	return plan + "\n" + body
+}
+
 func isThemeControl(id uint16) bool {
-	return id == idTheme || id == idThemeSwitch
+	return id == idTheme || id == idThemeSwitch || id == idThemeRepair
 }
 
 func (p *panel) withPowerStatusTooltip(id uint16, runtimeStatus, body string) string {

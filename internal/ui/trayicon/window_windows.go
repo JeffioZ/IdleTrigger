@@ -28,6 +28,12 @@ func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam ui
 		}
 	case wmDisplayChange, wmDPIChanged:
 		t.startTrayIconConvergence()
+		if message == wmDisplayChange {
+			_, _, callback, _ := callbacks()
+			if callback != nil {
+				go callback()
+			}
+		}
 	case wmStartTrayIconConvergence:
 		t.startTrayIconConvergence()
 	case WM_TIMER:
@@ -43,10 +49,12 @@ func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam ui
 			systrayMenuItemSelected(uint32(wParam))
 		}
 	case WM_POWERBROADCAST:
-		_, callback, _ := callbacks()
+		_, callback, _, _ := callbacks()
 		if callback != nil {
-			go callback(uint32(wParam))
+			event := decodePowerEvent(uint32(wParam), lParam)
+			go callback(event)
 		}
+		lResult = 1
 	case WM_CLOSE:
 		pDestroyWindow.Call(uintptr(t.window))
 		t.wcex.unregister()
@@ -62,7 +70,7 @@ func (t *winTray) wndProc(hWnd windows.Handle, message uint32, wParam, lParam ui
 	case t.wmSystrayMessage:
 		switch lParam {
 		case WM_LBUTTONUP:
-			callback, _, _ := callbacks()
+			callback, _, _, _ := callbacks()
 			if callback != nil {
 				callback()
 			} else {
@@ -195,6 +203,7 @@ func (t *winTray) initInstance() error {
 	}
 	t.window = windows.Handle(windowHandle)
 	darkmode.AllowWindow(uintptr(t.window))
+	t.registerPowerNotifications()
 
 	t.muNID.Lock()
 	defer t.muNID.Unlock()

@@ -49,7 +49,6 @@ func settingsTooltipBindings() []tooltipBinding {
 		{"tip_theme_location_status", []uint16{idThemeLocationStatus}},
 		{"tip_battery_theme", []uint16{idThemeBattery}},
 		{"tip_fullscreen", []uint16{idThemeFullscreen}},
-		{"tip_theme_repair", []uint16{idThemeRepair}},
 		{"tip_language", []uint16{idLanguageLabel, idLanguage}},
 		{"tip_hotkeys", []uint16{idHotkeys}},
 		{"tip_autostart", []uint16{idAutostart}},

@@ -73,6 +73,7 @@ const (
 	ActIdleToggle
 	ActThemeToggle
 	ActSwitchTheme
+	ActRepairTheme
 	ActSettingsOpen
 	ActExit
 )
@@ -86,8 +87,10 @@ type State struct {
 	ThemeSwitchEnabled          bool
 	ThemeUnavailable            bool
 	ThemeUnavailableDetail      string
+	ThemeOperationBusy          bool
 	IsChinese                   bool
 	ThemeSchedule               string
+	IdleTimeoutMinutes          int
 	IdleWarningSeconds          int
 	IdleAction                  string
 	AppVersion                  string
@@ -218,6 +221,7 @@ const (
 	idIdle              = 20
 	idTheme             = 30
 	idThemeSwitch       = 34
+	idThemeRepair       = 35
 	idSettings          = 499
 	idExit              = 502
 	idTestWarning       = 600
@@ -252,6 +256,7 @@ var (
 	pGetDpiForWindow       = user32.NewProc("GetDpiForWindow")
 	pGetDpiForSystem       = user32.NewProc("GetDpiForSystem")
 	pSetForeground         = user32.NewProc("SetForegroundWindow")
+	pSetWindowText         = user32.NewProc("SetWindowTextW")
 	pLoadCursor            = user32.NewProc("LoadCursorW")
 	pSetFocus              = user32.NewProc("SetFocus")
 	pEnableWindow          = user32.NewProc("EnableWindow")
@@ -347,11 +352,13 @@ type panel struct {
 	automationSummary       string
 	developerCapturePanel   bool
 	developerWarningPreview bool
+	idleTimeoutMinutes      int
 	idleWarningSeconds      int
 	idleAction              string
 	themeSchedule           string
 	themeUnavailable        bool
 	themeUnavailableDetail  string
+	themeOperationBusy      bool
 	choice                  choiceSurface
 	themeRefreshing         bool
 	style, exStyle          uint32

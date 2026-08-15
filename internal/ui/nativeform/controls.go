@@ -1,6 +1,7 @@
 package nativeform
 
 import (
+	"unicode"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -24,6 +25,7 @@ const (
 	drawTransparent = 1
 	drawCenter      = 0x00000001
 	drawVCenter     = 0x00000004
+	drawWordBreak   = 0x00000010
 	drawSingleLine  = 0x00000020
 	drawCalcRect    = 0x00000400
 	drawLeft        = 0x00000000
@@ -182,7 +184,7 @@ func DrawField(dc windows.Handle, bounds Rect, palette colors.Palette, backgroun
 func DrawButton(dc windows.Handle, bounds Rect, font windows.Handle, label string, palette colors.Palette, background uint32, state ControlState, radius int32, leftAligned bool) {
 	fill, border, textColor := buttonVisual(palette, state)
 	DrawSurface(dc, bounds, palette, background, fill, border, radius)
-	drawLabel(dc, bounds, font, label, textColor, leftAligned, 10, 10)
+	drawButtonLabel(dc, bounds, font, label, textColor, leftAligned, 10, 10)
 }
 
 func buttonVisual(palette colors.Palette, state ControlState) (fill, border, textColor uint32) {
@@ -394,6 +396,61 @@ func drawLabel(dc windows.Handle, bounds Rect, font windows.Handle, label string
 	}
 	controlDrawText.Call(uintptr(dc), uintptr(unsafe.Pointer(text)), ^uintptr(0), uintptr(unsafe.Pointer(&bounds)), flags)
 	controlSelectObject.Call(uintptr(dc), old)
+}
+
+// drawButtonLabel measures the rendered text block before placing it.
+// DrawText's DT_VCENTER/DT_SINGLELINE path rounds an odd remainder down into
+// the text offset, which puts common CJK UI fonts one physical pixel below the
+// optical center at fractional DPI scales. Keeping the remainder below the
+// label matches the panel's row-height calculation, supports long translated
+// labels, and makes every owner-drawn action use one stable baseline rule.
+func drawButtonLabel(dc windows.Handle, bounds Rect, font windows.Handle, label string, color uint32, left bool, leftInset, rightInset int32) {
+	text, err := windows.UTF16PtrFromString(label)
+	if err != nil {
+		return
+	}
+	bounds.Left += leftInset
+	bounds.Right -= rightInset
+	controlSetTextColor.Call(uintptr(dc), uintptr(color))
+	controlSetBkMode.Call(uintptr(dc), drawTransparent)
+	old, _, _ := controlSelectObject.Call(uintptr(dc), uintptr(font))
+	defer controlSelectObject.Call(uintptr(dc), old)
+
+	flags := uintptr(drawCenter | drawWordBreak)
+	if left {
+		flags = drawLeft | drawWordBreak
+	}
+	originalTop := bounds.Top
+	measured := bounds
+	if height, _, _ := controlDrawText.Call(uintptr(dc), uintptr(unsafe.Pointer(text)), ^uintptr(0), uintptr(unsafe.Pointer(&measured)), flags|drawCalcRect); height != 0 {
+		textHeight := measured.Bottom - measured.Top
+		bounds.Top = centeredTextTop(bounds.Top, bounds.Bottom, textHeight)
+		if bounds.Top > originalTop && needsHanOpticalLift(label) {
+			// Microsoft YaHei UI's Han glyph mass sits one physical pixel below
+			// the measured line-box center at 100%, 150%, and 200% DPI. Keep
+			// this an unscaled optical correction; geometry remains unchanged.
+			bounds.Top--
+			bounds.Bottom--
+		}
+	}
+	controlDrawText.Call(uintptr(dc), uintptr(unsafe.Pointer(text)), ^uintptr(0), uintptr(unsafe.Pointer(&bounds)), flags)
+}
+
+func centeredTextTop(top, bottom, textHeight int32) int32 {
+	available := bottom - top
+	if textHeight <= 0 || textHeight >= available {
+		return top
+	}
+	return top + (available-textHeight)/2
+}
+
+func needsHanOpticalLift(label string) bool {
+	for _, char := range label {
+		if unicode.Is(unicode.Han, char) {
+			return true
+		}
+	}
+	return false
 }
 
 func drawArrow(dc windows.Handle, x, y int32, up bool, color uint32, scale float64) {

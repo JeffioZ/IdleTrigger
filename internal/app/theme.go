@@ -39,6 +39,7 @@ func (s *runtimeState) startThemeScheduler() {
 		loc = s.themeLocationInfo(false)
 	}
 	scheduler := theme.NewScheduler(s.cfg.ThemeMode, s.cfg.ThemeLightTime, s.cfg.ThemeDarkTime, loc.Latitude, loc.Longitude, s.cfg.ThemeSkipFullscreen, s.cfg.ThemeDarkOnBattery)
+	scheduler.SetSwitchHandler(s.requestAutomaticThemeSwitch)
 	s.themeSched = scheduler
 	scheduler.Start()
 	mylog.Info("Theme scheduler started: mode=%s light=%s dark=%s lat=%.4f lon=%.4f source=%s", s.cfg.ThemeMode, s.cfg.ThemeLightTime, s.cfg.ThemeDarkTime, loc.Latitude, loc.Longitude, loc.Source)
@@ -48,5 +49,8 @@ func (s *runtimeState) stopThemeScheduler() {
 	if s.themeSched != nil {
 		s.themeSched.Stop()
 		s.themeSched = nil
+	}
+	if s.themeCoordinator != nil {
+		s.themeCoordinator.cancelAutomatic()
 	}
 }

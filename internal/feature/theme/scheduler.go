@@ -74,6 +74,7 @@ type Scheduler struct {
 	lastPauseErr   string
 	pauseCheck     func(<-chan struct{}) (ThemeSwitchPauseReason, error)
 	switchTheme    func(Mode) error
+	switchRequest  func(string, Mode) error
 }
 
 // NewScheduler creates a Scheduler.
@@ -89,6 +90,18 @@ func NewScheduler(mode, lightTime, darkTime string, lat, lon float64, skipFullsc
 		pauseCheck:     DetectThemeSwitchPause,
 		switchTheme:    Switch,
 	}
+}
+
+// SetSwitchHandler routes approved schedule and battery transitions through
+// an application-level coordinator. It must be called before Start. A nil
+// handler restores the direct Switch behavior used by standalone callers.
+func (s *Scheduler) SetSwitchHandler(handler func(source string, target Mode) error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.switchRequest = handler
+	s.mu.Unlock()
 }
 
 // Start begins the background check loop.
@@ -240,7 +253,11 @@ func (s *Scheduler) switchIfAllowed(source string, target Mode, cancel <-chan st
 		s.clearThemeSwitchPause()
 	}
 
-	if err := s.switchTheme(target); err != nil {
+	switchTheme := s.switchTheme
+	if s.switchRequest != nil {
+		switchTheme = func(mode Mode) error { return s.switchRequest(source, mode) }
+	}
+	if err := switchTheme(target); err != nil {
 		s.logSwitchFailure(source, target, err)
 	} else {
 		s.clearSwitchFailure()

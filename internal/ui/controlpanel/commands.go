@@ -44,6 +44,8 @@ func (p *panel) commandAction(id uint16) (Action, int, bool) {
 		return ActAutomationOpen, 0, true
 	case idThemeSwitch:
 		return ActSwitchTheme, 0, true
+	case idThemeRepair:
+		return ActRepairTheme, 0, true
 	case idSettings:
 		return ActSettingsOpen, 0, true
 	case idExit:

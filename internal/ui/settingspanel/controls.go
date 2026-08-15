@@ -69,7 +69,6 @@ func (p *panel) build() error {
 	p.label(idThemeBehaviorTitle, p.t("settings_theme_behavior_group"), p.sectionFont, contentX, behaviorTop, 468, sectionTitleH)
 	p.check(idThemeBattery, p.t("menu_theme_battery_dark"), contentX, behaviorTop+sectionTitleH+sectionItemGap, 468, checkHeight)
 	p.check(idThemeFullscreen, p.t("menu_theme_skip_fullscreen"), contentX, behaviorTop+sectionTitleH+sectionItemGap+checkHeight+functionGap, 468, checkHeight)
-	p.button(idThemeRepair, p.t("menu_theme_repair"), contentX, behaviorTop+96, 160, buttonHeight)
 
 	// Application page.
 	p.label(idAppGeneralTitle, p.t("settings_app_general_group"), p.sectionFont, contentX, sectionTop, 468, sectionTitleH)
@@ -349,7 +348,7 @@ func pageControlIDs() map[int][]uint16 {
 		0: {idPowerTitle, idKeepScreen, idBatteryAllowed, idBatteryThresholdLabel, idBatteryThreshold, idPowerHint, idIdleTitle,
 			idIdleTimeoutLabel, idIdleTimeout, idIdleActionLabel, idIdleAction, idWarningLabel, idWarningSeconds, idIdleEnhanced},
 		1: {idThemeScheduleTitle, idThemeBehaviorTitle, idThemeModeLabel, idThemeMode, idLightTimeLabel, idLightTime, idDarkTimeLabel, idDarkTime,
-			idLocationLabel, idLocationSource, idThemeLocationStatus, idThemeBattery, idThemeFullscreen, idThemeRepair, idThemeHint},
+			idLocationLabel, idLocationSource, idThemeLocationStatus, idThemeBattery, idThemeFullscreen, idThemeHint},
 		2: {idAppGeneralTitle, idAppAboutTitle, idLanguageLabel, idLanguage, idHotkeys, idAutostart, idLogging, idProjectHomeLabel, idProjectHome},
 	}
 }
