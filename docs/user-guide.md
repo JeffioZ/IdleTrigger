@@ -19,7 +19,7 @@ The control panel keeps frequent actions and live status in one compact view:
 | --- | --- |
 | **Power Management** | Manual Stay Awake and Idle Monitoring switches, plus their effective runtime status |
 | **Automatic Tasks** | Master switch, enabled count, next run, and entry to the task manager |
-| **Day / Night** | Automatic switching, an immediate theme switch, and the next scheduled transition |
+| **Day / Night** | Automatic switching, switch or repair actions for the current theme, and the next scheduled transition |
 | **Bottom actions** | Built-in system actions, Settings, and Exit |
 
 Open **Settings** for persistent feature behavior:
@@ -27,7 +27,7 @@ Open **Settings** for persistent feature behavior:
 | Settings page | Available preferences |
 | --- | --- |
 | **Power** | Keep the display on, battery policy and threshold, idle timeout, reminder countdown, timeout action, and Enhanced Monitoring |
-| **Day / Night** | Fixed-time or sunrise/sunset schedule, time-zone or approximate IP location, battery/fullscreen behavior, and theme repair |
+| **Day / Night** | Fixed-time or sunrise/sunset schedule, time-zone or approximate IP location, and battery/fullscreen behavior |
 | **Application** | Display language, global hotkeys, auto-start, debug logging, and the project link |
 
 The Settings header always shows the current version. Every saved preference has a home in the control panel, Settings, or the automatic-task manager, so editing TOML is not required for normal use.
@@ -65,6 +65,8 @@ Tasks run only while IdleTrigger is running. Processes are checked about every f
 ## 🌗 Day / Night Themes
 
 Switch Windows light and dark themes at fixed times or at sunrise and sunset. You can use dark mode on battery or postpone a scheduled change during fullscreen apps and games.
+
+Automatic changes coalesce nearby power and display events, wait briefly for the display topology to settle, and use stronger recovery only for higher-risk multi-display or resume scenarios. No extra setting is required. If part of the Windows shell still shows stale colors, choose **Repair Theme** on the main panel.
 
 Sunrise and sunset use the Windows time zone by default, with optional approximate IP-based location. IP results are kept in memory only; if lookup is disabled or unavailable, IdleTrigger falls back to the Windows time zone, UTC offset, and finally a built-in default location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
 

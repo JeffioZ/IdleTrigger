@@ -110,6 +110,12 @@ Use the relevant row before considering a change complete:
   process's rendering engines, require consecutive samples, run only while a
   switch is pending, remain cancelable, and fail open. Do not request elevation,
   open the foreground process, or add a global GPU monitor.
+- **Theme transition recovery:** route schedule, battery, resume, and display
+  changes through the `internal/app` coordinator. Coalesce stale targets and
+  judge topology stability from sorted active paths, desktop geometry, and
+  rotation, never refresh rate. Rate-limit full DWM repair, never interrupt its
+  original-theme restoration, and retain low-frequency polling behind Windows
+  power notifications.
 - **Developer-only capability:** keep it behind `devtools`, update dependency
   boundary expectations, and verify the normal build excludes it.
 - **Automatic task:** update `internal/automation`, scheduler behavior and tests,
