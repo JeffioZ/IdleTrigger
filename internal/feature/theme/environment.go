@@ -107,14 +107,6 @@ func DetectThemeSwitchPause(cancel <-chan struct{}) (ThemeSwitchPauseReason, err
 	return ThemeSwitchPauseNone, firstErr
 }
 
-// IsFullscreen returns true when a visible, non-shell foreground window covers
-// its monitor. It remains available for callers that only need geometry; theme
-// scheduling uses DetectThemeSwitchPause for the complete policy.
-func IsFullscreen() bool {
-	_, _, fullscreen := foregroundWindowContext()
-	return fullscreen
-}
-
 func shellThemeSwitchPause() (ThemeSwitchPauseReason, error) {
 	var state uint32
 	result, _, _ := pSHQueryNotificationState.Call(uintptr(unsafe.Pointer(&state)))

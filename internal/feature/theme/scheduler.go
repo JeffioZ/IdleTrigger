@@ -22,12 +22,6 @@ type ScheduleInfo struct {
 	FixedFallback bool
 }
 
-// ScheduleTimes returns today's light and dark switch times as HH:MM.
-func ScheduleTimes(mode, lightTime, darkTime string, lat, lon float64, now time.Time) (string, string, bool) {
-	info := ScheduleInfoFor(mode, lightTime, darkTime, lat, lon, now)
-	return info.LightTime, info.DarkTime, info.OK
-}
-
 // ScheduleInfoFor returns the theme schedule and reports when sunrise/sunset
 // mode had to fall back to fixed times, such as during polar day/night.
 func ScheduleInfoFor(mode, lightTime, darkTime string, lat, lon float64, now time.Time) ScheduleInfo {

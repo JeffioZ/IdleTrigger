@@ -359,7 +359,6 @@ const (
 	opaque                = 2
 	sbVert                = 1
 	odsSelected           = 0x0001
-	odsFocus              = 0x0010
 	odsDisabled           = 0x0004
 	lvsilState            = 2
 	ilcColor32            = 0x00000020

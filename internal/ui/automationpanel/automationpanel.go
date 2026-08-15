@@ -42,7 +42,6 @@ type OnSave func(SaveRequest) SaveResult
 type TextFunc func(string) string
 
 type rect struct{ Left, Top, Right, Bottom int32 }
-type point struct{ X, Y int32 }
 type wndClassEx struct {
 	Size, Style              uint32
 	WndProc                  uintptr
@@ -152,7 +151,6 @@ const (
 	managerWidth        = 600
 	managerHeight       = 380
 	editorWidth         = 680
-	editorHeight        = 520
 	idTitle             = 100
 	idList              = 102
 	idNext              = 103
@@ -196,7 +194,6 @@ const (
 	idMaxWaitLabel      = 231
 	idNoOptions         = 232
 	idNameHint          = 233
-	idRuntimeNote       = 234
 	idValidation        = 235
 	idProcessInfo       = 236
 	idDaysWorkdays      = 237
@@ -229,7 +226,6 @@ const (
 	wmLButtonDown       = 0x0201
 	wmMouseWheel        = 0x020A
 	wmKeyDown           = 0x0100
-	wmNCDestroy         = 0x0082
 	wmOpenChoice        = 0x8001
 	wmPrewarmEditor     = 0x8002
 	wsOverlapped        = 0
@@ -287,7 +283,6 @@ const (
 	swpNoActivate       = 0x0010
 	odsSelected         = 0x0001
 	odsDisabled         = 0x0004
-	odsFocus            = 0x0010
 	vkLeft              = 0x25
 	vkRight             = 0x27
 	vkHome              = 0x24

@@ -201,7 +201,6 @@ func actionTranslationKey(a config.Action) string {
 
 func (s *runtimeState) applyLanguage() {
 	T := func(key string) string { return i18n.T(s.lang, key) }
-	trayicon.SetTitle(T("app_title"))
 	if s.menuOpen != nil {
 		s.menuOpen.SetTitle(T("menu_open_panel"))
 	}

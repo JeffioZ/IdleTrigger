@@ -111,8 +111,4 @@ func (p *panel) applyFrameTheme(dark bool) {
 	}
 }
 
-func (p *panel) triggerOpen(id uint16) bool {
-	return p.choice.openID == id
-}
-
 func isDangerQuickAction(id uint16) bool { return id == idShutdown || id == idRestart }

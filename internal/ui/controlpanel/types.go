@@ -111,8 +111,6 @@ const (
 	wmActivate         = 0x0006
 	wmMouseMove        = 0x0200
 	wmLButtonDown      = 0x0201
-	wmLButtonUp        = 0x0202
-	wmMouseWheel       = 0x020A
 	wmMouseLeave       = 0x02A3
 	wmNcLButtonDown    = 0x00A1
 	wmParentNotify     = 0x0210
@@ -152,19 +150,13 @@ const (
 	wsChild            = 0x40000000
 	wsVisible          = 0x10000000
 	wsTabStop          = 0x00010000
-	wsVScroll          = 0x00200000
 	wsOverlappedWindow = wsOverlapped | wsCaption | wsSysMenu | wsThickFrame | wsMinimizeBox | wsMaximizeBox
 	bsOwnerDraw        = 0x0000000B
 	ssOwnerDraw        = 0x0000000D
-	ssLeft             = 0x00000000
-	ssRight            = 0x00000002
 
-	wsExToolWindow = 0x00000080
-	wsExTopmost    = 0x00000008
-	wsExAppWindow  = 0x00040000
+	wsExTopmost   = 0x00000008
+	wsExAppWindow = 0x00040000
 
-	swpNoSize                     = 0x0001
-	swpNoMove                     = 0x0002
 	swpNoZOrder                   = 0x0004
 	swpNoActivate                 = 0x0010
 	monitorNearest                = 2
@@ -200,9 +192,6 @@ const (
 	ttmSetTipBkColor   = 0x0413
 	ttmSetTipTextColor = 0x0414
 	ttmSetMaxTipWidth  = 0x0418
-	cbAddString        = 0x0143
-	cbSetCurSel        = 0x014E
-	cbSetItemHeight    = 0x0153
 )
 
 const (

@@ -42,30 +42,6 @@ func TestOpenWithShellBuildsNativeArguments(t *testing.T) {
 	}
 }
 
-func TestSystemExecutableUsesTrustedWindowsDirectory(t *testing.T) {
-	previous := getSystemDirectory
-	t.Cleanup(func() { getSystemDirectory = previous })
-
-	getSystemDirectory = func() (string, error) {
-		return `C:\Windows\System32`, nil
-	}
-	if got, want := systemExecutable("notepad.exe"), filepath.Join(`C:\Windows\System32`, "notepad.exe"); got != want {
-		t.Fatalf("systemExecutable() = %q, want %q", got, want)
-	}
-}
-
-func TestSystemExecutableFallsBackWhenWindowsDirectoryIsUnavailable(t *testing.T) {
-	previous := getSystemDirectory
-	t.Cleanup(func() { getSystemDirectory = previous })
-
-	getSystemDirectory = func() (string, error) {
-		return "", errors.New("unavailable")
-	}
-	if got := systemExecutable("notepad.exe"); got != "notepad.exe" {
-		t.Fatalf("systemExecutable() = %q, want fallback executable name", got)
-	}
-}
-
 func TestIPCCommandLogEscapesControlCharacters(t *testing.T) {
 	dir := t.TempDir()
 	mylog.Init(true, dir)

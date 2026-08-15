@@ -13,6 +13,8 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/ui/wintest"
 )
 
+type point struct{ X, Y int32 }
+
 func TestOwnerDrawButtonsIgnoreDoubleClickNotification(t *testing.T) {
 	const bnDoubleClicked = 5
 	if !ownerDrawButtonClicked(bnClicked) {

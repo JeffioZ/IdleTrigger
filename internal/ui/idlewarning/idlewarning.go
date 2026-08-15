@@ -63,8 +63,6 @@ const (
 	swpShowWindow    = 0x0040
 	monitorNearest   = 2
 	dtLeft           = 0x00000000
-	dtCenter         = 0x00000001
-	dtVCenter        = 0x00000004
 	dtWordBreak      = 0x00000010
 	dtCalcRect       = 0x00000400
 	transparent      = 1

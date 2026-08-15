@@ -28,18 +28,3 @@ func MenuHeight(rowCount, rowHeight, rowGap, surfaceInset int) int {
 	}
 	return 2*surfaceInset + rowCount*rowHeight + (rowCount-1)*rowGap
 }
-
-func MenuRowOffset(index, rowHeight, rowGap, surfaceInset int) int {
-	if index < 0 {
-		index = 0
-	}
-	return surfaceInset + index*(rowHeight+rowGap)
-}
-
-func MenuRowsFit(availableHeight, rowHeight, rowGap, surfaceInset int) int {
-	contentHeight := availableHeight - 2*surfaceInset
-	if contentHeight < rowHeight || rowHeight <= 0 {
-		return 0
-	}
-	return (contentHeight + rowGap) / (rowHeight + rowGap)
-}

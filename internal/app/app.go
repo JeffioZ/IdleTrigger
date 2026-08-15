@@ -3,7 +3,6 @@ package app
 
 import (
 	"fmt"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,18 +26,7 @@ import (
 
 const projectHomeURL = "https://github.com/JeffioZ/IdleTrigger"
 
-var (
-	executeShell       = windows.ShellExecute
-	getSystemDirectory = windows.GetSystemDirectory
-)
-
-func systemExecutable(name string) string {
-	directory, err := getSystemDirectory()
-	if err != nil || directory == "" {
-		return name
-	}
-	return filepath.Join(directory, name)
-}
+var executeShell = windows.ShellExecute
 
 func openWithShell(target, arguments string) error {
 	verb, err := windows.UTF16PtrFromString("open")
@@ -143,8 +131,8 @@ func Run(cfg config.Config, cbs Callbacks) {
 			return
 		}
 		defer stateReadyOnce.Do(func() { close(stateReady) })
-		s.menuOpen = trayicon.AddMenuItem(i18n.T(s.lang, "menu_open_panel"), "")
-		s.menuExit = trayicon.AddMenuItem(i18n.T(s.lang, "menu_exit"), "")
+		s.menuOpen = trayicon.AddMenuItem(i18n.T(s.lang, "menu_open_panel"))
+		s.menuExit = trayicon.AddMenuItem(i18n.T(s.lang, "menu_exit"))
 		go func() {
 			for range s.menuOpen.ClickedCh {
 				trayicon.Post(s.showControlPanel)

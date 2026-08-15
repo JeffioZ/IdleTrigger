@@ -134,17 +134,6 @@ func TestPopupTriggerIsLimitedToSystemControls(t *testing.T) {
 	}
 }
 
-func TestTriggerOpenUsesOnlyItsRealMenuState(t *testing.T) {
-	p := &panel{}
-	if p.triggerOpen(idQuickActions) {
-		t.Fatal("fresh panel must not report any trigger as open")
-	}
-	p.choice.openID = idQuickActions
-	if !p.triggerOpen(idQuickActions) || p.triggerOpen(idSettings) {
-		t.Fatal("quick menu open state was not isolated")
-	}
-}
-
 func TestDangerQuickActionsAreLimitedToShutdownAndRestart(t *testing.T) {
 	for _, id := range []uint16{idLock, idSleep, idHibernate} {
 		if isDangerQuickAction(id) {

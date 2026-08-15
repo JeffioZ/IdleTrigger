@@ -85,16 +85,6 @@ func New(size, weight int32, chinese bool) (windows.Handle, Choice) {
 	return font, choice
 }
 
-// FirstAvailable keeps the candidate downgrade order independently testable.
-func FirstAvailable(chinese bool, exists func(string) bool) string {
-	for _, face := range candidates(chinese) {
-		if exists(face) {
-			return face
-		}
-	}
-	return ""
-}
-
 // SystemLanguageIsChinese reports the current Windows UI language, independent
 // of an application override. It is useful for UI that has no language state.
 func SystemLanguageIsChinese() bool {

@@ -121,10 +121,8 @@ func (t *winTray) initInstance() error {
 	t.uiClosing = false
 	t.muUITasks.Unlock()
 	t.shutdownOnce = sync.Once{}
-	t.visibleItems = make(map[uint32][]uint32)
-	t.menus = make(map[uint32]windows.Handle)
-	t.menuOf = make(map[uint32]windows.Handle)
-	t.menuItemIcons = make(map[uint32]windows.Handle)
+	t.menu = 0
+	t.visibleItems = nil
 
 	taskbarEventNamePtr, _ := windows.UTF16PtrFromString("TaskbarCreated")
 	// https://msdn.microsoft.com/en-us/library/windows/desktop/ms644947

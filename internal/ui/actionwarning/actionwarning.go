@@ -103,7 +103,6 @@ const (
 	wsClipChildren    = 0x02000000
 	bsPushButton      = 0x00000000
 	ssLeft            = 0x00000000
-	ssCenter          = 0x00000001
 	ssNotify          = 0x00000100
 	wsExTopmost       = 0x00000008
 	wsExComposited    = 0x02000000

@@ -15,15 +15,6 @@ var (
 	ErrConfigRecoveryRequired = errors.New("configuration must be repaired and reloaded before it can be saved")
 )
 
-// Save atomically writes the configuration to disk.
-func Save(cfg Config) error {
-	p, err := Path()
-	if err != nil {
-		return err
-	}
-	return saveTo(p, cfg)
-}
-
 // SaveAtRevision atomically writes cfg only when the current file still
 // matches the revision that was loaded by the caller. It closes the stale UI
 // snapshot window without relying on the polling config watcher.
@@ -33,11 +24,6 @@ func SaveAtRevision(cfg Config, expectedRevision string) (string, error) {
 		return "", err
 	}
 	return saveToAtRevision(p, cfg, expectedRevision)
-}
-
-func saveTo(p string, cfg Config) error {
-	_, err := saveToAtRevision(p, cfg, "")
-	return err
 }
 
 func saveToAtRevision(p string, cfg Config, expectedRevision string) (string, error) {

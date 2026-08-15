@@ -114,7 +114,7 @@ func TestSaveToAtomicallyReplacesExistingFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old content"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveTo(path, DefaultConfig()); err != nil {
+	if _, err := saveToAtRevision(path, DefaultConfig(), ""); err != nil {
 		t.Fatalf("saveTo: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -142,7 +142,7 @@ func TestSaveToLocalizesHeader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
 	cfg := DefaultConfig()
 	cfg.Language = "zh-CN"
-	if err := saveTo(path, cfg); err != nil {
+	if _, err := saveToAtRevision(path, cfg, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -167,7 +167,7 @@ func TestSaveToWritesAnnotatedConfigThatParses(t *testing.T) {
 		Processes:    []automation.ProcessTarget{{Match: automation.MatchName, Executable: "powerpnt.exe"}},
 		IdleMinutes:  automation.DefaultIdleMinutes,
 	}}
-	if err := saveTo(path, cfg); err != nil {
+	if _, err := saveToAtRevision(path, cfg, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -493,7 +493,7 @@ warning_seconds = 5
 
 func TestSaveToAtRevisionRejectsExternalChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
-	if err := saveTo(path, DefaultConfig()); err != nil {
+	if _, err := saveToAtRevision(path, DefaultConfig(), ""); err != nil {
 		t.Fatal(err)
 	}
 	original, err := os.ReadFile(path)
@@ -519,7 +519,7 @@ func TestSaveToAtRevisionRejectsExternalChange(t *testing.T) {
 func TestSaveToAtRevisionSkipsIdenticalContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
 	cfg := DefaultConfig()
-	if err := saveTo(path, cfg); err != nil {
+	if _, err := saveToAtRevision(path, cfg, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)

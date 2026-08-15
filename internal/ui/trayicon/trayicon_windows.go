@@ -8,12 +8,6 @@ import (
 )
 
 var (
-	g32                     = windows.NewLazySystemDLL("Gdi32.dll")
-	pCreateCompatibleBitmap = g32.NewProc("CreateCompatibleBitmap")
-	pCreateCompatibleDC     = g32.NewProc("CreateCompatibleDC")
-	pDeleteDC               = g32.NewProc("DeleteDC")
-	pSelectObject           = g32.NewProc("SelectObject")
-
 	k32              = windows.NewLazySystemDLL("Kernel32.dll")
 	pGetModuleHandle = k32.NewProc("GetModuleHandleW")
 
@@ -26,20 +20,15 @@ var (
 	pGetScaleFactorForMonitor = shcore.NewProc("GetScaleFactorForMonitor")
 
 	u32                                 = windows.NewLazySystemDLL("User32.dll")
-	pCreateMenu                         = u32.NewProc("CreateMenu")
 	pCreatePopupMenu                    = u32.NewProc("CreatePopupMenu")
 	pCreateWindowEx                     = u32.NewProc("CreateWindowExW")
 	pDefWindowProc                      = u32.NewProc("DefWindowProcW")
-	pRemoveMenu                         = u32.NewProc("RemoveMenu")
 	pDestroyWindow                      = u32.NewProc("DestroyWindow")
 	pDispatchMessage                    = u32.NewProc("DispatchMessageW")
-	pDrawIconEx                         = u32.NewProc("DrawIconEx")
 	pGetCursorPos                       = u32.NewProc("GetCursorPos")
-	pGetDC                              = u32.NewProc("GetDC")
 	pGetMessage                         = u32.NewProc("GetMessageW")
 	pIsChild                            = u32.NewProc("IsChild")
 	pIsDialogMessage                    = u32.NewProc("IsDialogMessageW")
-	pGetSystemMetrics                   = u32.NewProc("GetSystemMetrics")
 	pInsertMenuItem                     = u32.NewProc("InsertMenuItemW")
 	pKillTimer                          = u32.NewProc("KillTimer")
 	pLoadCursor                         = u32.NewProc("LoadCursorW")
@@ -53,7 +42,6 @@ var (
 	pRegisterWindowMessage              = u32.NewProc("RegisterWindowMessageW")
 	pRegisterPowerSettingNotification   = u32.NewProc("RegisterPowerSettingNotification")
 	pUnregisterPowerSettingNotification = u32.NewProc("UnregisterPowerSettingNotification")
-	pReleaseDC                          = u32.NewProc("ReleaseDC")
 	pSetForegroundWindow                = u32.NewProc("SetForegroundWindow")
 	pSetMenuInfo                        = u32.NewProc("SetMenuInfo")
 	pSetMenuItemInfo                    = u32.NewProc("SetMenuItemInfoW")
@@ -110,10 +98,6 @@ const (
 	wmDPIChanged     = 0x02E0
 	wmThemeChanged   = 0x031A
 )
-
-func isThemeChangeMessage(message uint32) bool {
-	return message == wmSettingChange || message == wmSysColorChange || message == wmThemeChanged
-}
 
 func isTrayIconRefreshMessage(message uint32) bool {
 	return message == wmSettingChange || message == wmDisplayChange || message == wmDPIChanged
@@ -368,20 +352,9 @@ type winTray struct {
 	muIconLifecycle      sync.Mutex
 	trayIconKey          loadedImageKey
 	trayIconProbeAttempt int
-	// menus keeps track of the submenus keyed by the menu item ID, plus 0
-	// which corresponds to the main popup menu.
-	menus   map[uint32]windows.Handle
-	muMenus sync.RWMutex
-	// menuOf keeps track of the menu each menu item belongs to.
-	menuOf   map[uint32]windows.Handle
-	muMenuOf sync.RWMutex
-	// menuItemIcons maintains the bitmap of each menu item (if applies). It's
-	// needed to show the icon correctly when showing a previously hidden menu
-	// item again.
-	menuItemIcons   map[uint32]windows.Handle
-	muMenuItemIcons sync.RWMutex
-	visibleItems    map[uint32][]uint32
-	muVisibleItems  sync.RWMutex
+	menu                 windows.Handle
+	visibleItems         []uint32
+	muVisibleItems       sync.RWMutex
 
 	nid   *notifyIconData
 	muNID sync.RWMutex

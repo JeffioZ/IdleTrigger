@@ -141,9 +141,3 @@ func logAutoLocationInfo(info LocationInfo) LocationInfo {
 	}
 	return info
 }
-
-// AutoLocation returns coordinates for sunrise/sunset mode.
-func AutoLocation() (float64, float64) {
-	info := AutoLocationInfo(false, false)
-	return info.Latitude, info.Longitude
-}

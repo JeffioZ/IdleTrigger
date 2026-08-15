@@ -2,12 +2,28 @@ package trayicon
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestVisibleMenuItemsStaySortedAndUnique(t *testing.T) {
+	tray := &winTray{}
+	for _, itemID := range []uint32{4, 2, 3, 2} {
+		tray.addToVisibleItems(itemID)
+	}
+	if want := []uint32{2, 3, 4}; !slices.Equal(tray.visibleItems, want) {
+		t.Fatalf("visible items = %v, want %v", tray.visibleItems, want)
+	}
+
+	tray.delFromVisibleItems(3)
+	if want := []uint32{2, 4}; !slices.Equal(tray.visibleItems, want) {
+		t.Fatalf("visible items after delete = %v, want %v", tray.visibleItems, want)
+	}
+}
 
 func TestMissingMenuItemUsesErrorHandler(t *testing.T) {
 	var message string
@@ -88,17 +104,6 @@ func TestNestedTabNavigationRestoresOwner(t *testing.T) {
 		t.Fatal("nested dialog cleanup did not restore the owner's Tab-navigation callback")
 	}
 	ClearTabNavigationWindow(owner)
-}
-
-func TestThemeChangeMessageScope(t *testing.T) {
-	for _, message := range []uint32{wmSettingChange, wmSysColorChange, wmThemeChanged} {
-		if !isThemeChangeMessage(message) {
-			t.Fatalf("theme message %#x was not recognized", message)
-		}
-	}
-	if isThemeChangeMessage(wmKeyDown) {
-		t.Fatal("keyboard messages must not trigger a theme refresh")
-	}
 }
 
 func TestTrayIconRefreshMessageScope(t *testing.T) {

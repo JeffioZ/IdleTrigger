@@ -224,9 +224,6 @@ func (m *Monitor) Stop() {
 	<-doneCh
 }
 
-// SetThreshold updates the idle threshold at runtime.
-func (m *Monitor) SetThreshold(d time.Duration) { m.thresholdNs.Store(int64(d)) }
-
 // Threshold returns the current idle threshold.
 func (m *Monitor) Threshold() time.Duration { return time.Duration(m.thresholdNs.Load()) }
 

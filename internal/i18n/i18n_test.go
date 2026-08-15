@@ -110,6 +110,66 @@ func TestLiteralLocaleKeysUsedBySourceExist(t *testing.T) {
 	}
 }
 
+func TestLocaleKeysAreReferencedBySource(t *testing.T) {
+	used := map[string]bool{}
+	for _, key := range sourceStringLiterals(t) {
+		used[key] = true
+	}
+	for _, action := range []string{"sleep", "hibernate", "shutdown", "lock", "restart"} {
+		used["menu_action_"+action] = true
+	}
+	for _, day := range []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"} {
+		used["automation_day_"+day] = true
+	}
+
+	unused := make([]string, 0)
+	for key := range store["en"] {
+		if !used[key] {
+			unused = append(unused, key)
+		}
+	}
+	sort.Strings(unused)
+	if len(unused) != 0 {
+		t.Fatalf("locale keys have no production reference: %s", strings.Join(unused, ", "))
+	}
+}
+
+func sourceStringLiterals(t *testing.T) []string {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	var literals []string
+	for _, sourceRoot := range []string{"cmd", "internal"} {
+		err := filepath.WalkDir(filepath.Join(root, sourceRoot), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				literal, ok := node.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					return true
+				}
+				value, err := strconv.Unquote(literal.Value)
+				if err == nil {
+					literals = append(literals, value)
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scan %s: %v", sourceRoot, err)
+		}
+	}
+	return literals
+}
+
 func literalLocaleKey(call *ast.CallExpr) (string, bool) {
 	argument := -1
 	switch function := call.Fun.(type) {

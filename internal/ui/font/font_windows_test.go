@@ -18,10 +18,3 @@ func TestSameFaceIsCaseInsensitive(t *testing.T) {
 		t.Fatal("unexpected font face comparison")
 	}
 }
-
-func TestFirstAvailableExercisesMissingPreferredFontFallback(t *testing.T) {
-	got := FirstAvailable(false, func(face string) bool { return face == "Segoe UI" })
-	if got != "Segoe UI" {
-		t.Fatalf("fallback = %q", got)
-	}
-}

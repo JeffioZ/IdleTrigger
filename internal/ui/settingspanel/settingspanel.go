@@ -183,7 +183,6 @@ const (
 	wmSetFont         = 0x0030
 	wmGetText         = 0x000d
 	wmGetTextLength   = 0x000e
-	wmOpenChoice      = 0x8001
 	wmSize            = 0x0005
 	emSetMargins      = 0x00d3
 	emSetSel          = 0x00b1

@@ -82,48 +82,6 @@ func SetIconResource(resourceID uint16) {
 	}
 }
 
-// SetTitle sets the systray title, only available on Mac and Linux.
-func SetTitle(title string) {
-	// do nothing
-}
-
-func (item *MenuItem) parentId() uint32 {
-	if item.parent != nil {
-		return uint32(item.parent.id)
-	}
-	return 0
-}
-
-// SetIconResource sets a menu item's icon from an RT_GROUP_ICON resource
-// embedded in the current executable.
-func (item *MenuItem) SetIconResource(resourceID uint16) {
-	if !wt.uiAvailable() {
-		return
-	}
-	key, err := systemSmallIconKey(resourceID)
-	if err != nil {
-		reportError("Unable to resolve menu icon size: %v", err)
-		return
-	}
-	h, err := wt.loadMenuIconBitmap(key)
-	if err != nil {
-		if err == errTrayUnavailable {
-			return
-		}
-		reportError("Unable to prepare menu icon resource: %v", err)
-		return
-	}
-	wt.muMenuItemIcons.Lock()
-	wt.menuItemIcons[uint32(item.id)] = h
-	wt.muMenuItemIcons.Unlock()
-
-	err = wt.addOrUpdateMenuItem(uint32(item.id), item.parentId(), item.title, item.disabled, item.checked)
-	if err != nil {
-		reportError("Unable to addOrUpdateMenuItem: %v", err)
-		return
-	}
-}
-
 // SetTooltip sets the systray tooltip to display on mouse hover of the tray icon,
 // only available on Mac and Windows.
 func SetTooltip(tooltip string) {
@@ -140,35 +98,9 @@ func addOrUpdateMenuItem(item *MenuItem) {
 	if !wt.uiAvailable() {
 		return
 	}
-	err := wt.addOrUpdateMenuItem(uint32(item.id), item.parentId(), item.title, item.disabled, item.checked)
+	err := wt.addOrUpdateMenuItem(uint32(item.id), item.title)
 	if err != nil {
 		reportError("Unable to addOrUpdateMenuItem: %v", err)
 		return
 	}
-}
-
-func addSeparator(id uint32) {
-	if !wt.uiAvailable() {
-		return
-	}
-	err := wt.addSeparatorMenuItem(id, 0)
-	if err != nil {
-		reportError("Unable to addSeparator: %v", err)
-		return
-	}
-}
-
-func hideMenuItem(item *MenuItem) {
-	if !wt.uiAvailable() {
-		return
-	}
-	err := wt.hideMenuItem(uint32(item.id), item.parentId())
-	if err != nil {
-		reportError("Unable to hideMenuItem: %v", err)
-		return
-	}
-}
-
-func showMenuItem(item *MenuItem) {
-	addOrUpdateMenuItem(item)
 }
