@@ -133,7 +133,7 @@
   "tip_power_setting_status": "Manual setting: %s.\nRuntime status: %s.\n%s",
   "tip_state_enabled": "on",
   "tip_state_disabled": "off",
-  "menu_theme_enable": "Auto Switch",
+  "menu_theme_enable": "Enable Auto Switch",
   "menu_theme_ip_location": "Sunrise/Sunset by IP",
   "menu_nosleep_enable": "Enable Stay Awake",
   "msg_idle_warning_test": "Preview Reminder",

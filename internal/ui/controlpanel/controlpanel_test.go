@@ -294,8 +294,8 @@ func TestOwnedBrushesIncludesEveryPanelBrush(t *testing.T) {
 
 func TestPopupMetricsUseOneDPITransform(t *testing.T) {
 	metrics := newPanelMetrics(defaultPanelStyle, 1.5)
-	if got := metrics.px(metrics.style.Layout.PanelWidth); got != 708 {
-		t.Fatalf("scaled panel width = %d, want 708", got)
+	if got := metrics.px(metrics.style.Layout.PanelWidth); got != 729 {
+		t.Fatalf("scaled panel width = %d, want 729", got)
 	}
 }
 
@@ -478,7 +478,7 @@ func TestThemeActionsShareOneEqualGridRow(t *testing.T) {
 		t.Skip("skipping native Win32 integration test in short mode")
 	}
 	labels := map[string]string{
-		"menu_theme_enable":     "Auto Switch",
+		"menu_theme_enable":     "Enable Auto Switch",
 		"menu_theme_switch_now": "Switch Theme",
 		"menu_theme_repair":     "Repair Theme",
 	}
@@ -500,6 +500,9 @@ func TestThemeActionsShareOneEqualGridRow(t *testing.T) {
 		}
 		if switchTheme.y != repairTheme.y || switchTheme.width != repairTheme.width || switchTheme.height != repairTheme.height {
 			t.Fatalf("theme action grid is uneven: switch=%+v repair=%+v", switchTheme, repairTheme)
+		}
+		if toggle.width <= switchTheme.width {
+			t.Fatalf("theme toggle width = %d, want more than action width %d", toggle.width, switchTheme.width)
 		}
 		if gap := repairTheme.x - switchTheme.x - switchTheme.width; gap != p.metrics.style.Layout.Gap {
 			t.Fatalf("theme action gap = %d, want %d", gap, p.metrics.style.Layout.Gap)

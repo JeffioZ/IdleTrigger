@@ -42,7 +42,7 @@ type panelStyle struct {
 
 var defaultPanelStyle = panelStyle{
 	Layout: layoutTokens{
-		PanelWidth: 472, Padding: nativeform.FormPadding, Gap: nativeform.ControlGap, SectionGap: nativeform.SectionGap, LabelGap: nativeform.LabelGap,
+		PanelWidth: 486, Padding: nativeform.FormPadding, Gap: nativeform.ControlGap, SectionGap: nativeform.SectionGap, LabelGap: nativeform.LabelGap,
 		ButtonHeight: nativeform.ButtonHeight, SectionHeight: 22, SubtitleHeight: 18,
 	},
 	Fonts: fontTokens{

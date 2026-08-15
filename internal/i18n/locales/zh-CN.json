@@ -133,7 +133,7 @@
   "tip_power_setting_status": "手动设置：%s。\n运行状态：%s。\n%s",
   "tip_state_enabled": "已启用",
   "tip_state_disabled": "已关闭",
-  "menu_theme_enable": "自动切换",
+  "menu_theme_enable": "启用自动切换",
   "menu_theme_ip_location": "使用 IP 定位日出日落",
   "menu_nosleep_enable": "启用保持唤醒",
   "msg_idle_warning_test": "预览提醒",

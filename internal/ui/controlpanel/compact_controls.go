@@ -39,6 +39,29 @@ func (p *panel) build() error {
 		}
 		return height, nil
 	}
+	themeRow := func(y int) (int, error) {
+		labels := []string{p.text("menu_theme_enable"), p.themeActionLabel(idThemeSwitch), p.themeActionLabel(idThemeRepair)}
+		const minimumToggleWidth = 154
+		totalWidth := baseW - 2*pad
+		toggleWidth := minimumToggleWidth
+		if measured := nativeform.CheckboxHitWidth(p.hwnd, p.font, labels[0], p.metrics.scale); measured > toggleWidth {
+			toggleWidth = measured
+		}
+		// Keep the two direct theme actions equal while reserving enough width
+		// for the full checkbox label in the compact control panel.
+		actionWidth := (totalWidth - toggleWidth - 2*gap) / 2
+		height := p.rowHeight(labels[1:], actionWidth)
+		if err := button(labels[0], pad, y, toggleWidth, height, idTheme); err != nil {
+			return 0, err
+		}
+		if err := button(labels[1], pad+toggleWidth+gap, y, actionWidth, height, idThemeSwitch); err != nil {
+			return 0, err
+		}
+		if err := button(labels[2], pad+toggleWidth+gap+actionWidth+gap, y, actionWidth, height, idThemeRepair); err != nil {
+			return 0, err
+		}
+		return height, nil
+	}
 
 	y := pad
 	if err := section(p.text("menu_power_management"), y); err != nil {
@@ -85,9 +108,7 @@ func (p *panel) build() error {
 		return err
 	}
 	y += sectionH + labelGap
-	height, err = row(y,
-		[]string{p.text("menu_theme_enable"), p.themeActionLabel(idThemeSwitch), p.themeActionLabel(idThemeRepair)},
-		[]uint16{idTheme, idThemeSwitch, idThemeRepair})
+	height, err = themeRow(y)
 	if err != nil {
 		return err
 	}
