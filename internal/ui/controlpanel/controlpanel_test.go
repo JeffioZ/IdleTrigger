@@ -478,7 +478,7 @@ func TestThemeActionsShareOneEqualGridRow(t *testing.T) {
 		t.Skip("skipping native Win32 integration test in short mode")
 	}
 	labels := map[string]string{
-		"menu_theme_enable":     "Enable Auto Switch",
+		"menu_theme_enable":     "Auto Switch",
 		"menu_theme_switch_now": "Switch Theme",
 		"menu_theme_repair":     "Repair Theme",
 	}
