@@ -78,6 +78,7 @@ jobs:
         run: ./tools/check-build-boundaries.ps1
 
       - name: govulncheck
+        # Version is kept in sync with the -Vulncheck path in tools/check.ps1.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       - name: golangci-lint

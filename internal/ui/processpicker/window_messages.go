@@ -190,9 +190,7 @@ func (p *picker) controlText(id uint16) string {
 	hwnd := p.controls[id]
 	length, _, _ := pSendMessage.Call(uintptr(hwnd), wmGetTextLength, 0, 0)
 	buffer := make([]uint16, int(length)+1)
-	if len(buffer) > 0 {
-		pSendMessage.Call(uintptr(hwnd), wmGetText, uintptr(len(buffer)), uintptr(unsafe.Pointer(&buffer[0])))
-	}
+	pSendMessage.Call(uintptr(hwnd), wmGetText, uintptr(len(buffer)), uintptr(unsafe.Pointer(&buffer[0])))
 	return p.surfaces.LogicalText(hwnd, windows.UTF16ToString(buffer))
 }
 
@@ -488,7 +486,7 @@ func (p *picker) rebuildForDPI() bool {
 }
 
 func (p *picker) commitDPIFrame(transition *nativeform.FrameTransition) bool {
-	for range 3 {
+	for range processColumnCount {
 		if err := transition.Commit(p.frameControls()...); err == nil {
 			return true
 		}

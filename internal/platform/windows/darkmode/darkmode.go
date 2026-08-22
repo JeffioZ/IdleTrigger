@@ -4,6 +4,7 @@
 package darkmode
 
 import (
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -159,12 +160,30 @@ func AppsUseDark() (dark, supported bool) {
 }
 
 func withUxtheme(fn func(uxtheme windows.Handle)) {
-	uxtheme, err := windows.LoadLibraryEx("uxtheme.dll", 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
-	if err != nil {
+	uxtheme := loadUxtheme()
+	if uxtheme == 0 {
 		return
 	}
-	defer func() { _ = windows.FreeLibrary(uxtheme) }()
 	fn(uxtheme)
+}
+
+var (
+	uxthemeOnce   sync.Once
+	uxthemeHandle windows.Handle
+)
+
+// loadUxtheme loads uxtheme.dll exactly once for the process lifetime. The
+// module is loaded with LOAD_LIBRARY_SEARCH_SYSTEM32 so version spoofing cannot
+// redirect the ordinal-only entry points, and it is intentionally never freed:
+// popup menus recur frequently and the OS reclaims the handle on process exit.
+func loadUxtheme() windows.Handle {
+	uxthemeOnce.Do(func() {
+		handle, err := windows.LoadLibraryEx("uxtheme.dll", 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
+		if err == nil {
+			uxthemeHandle = handle
+		}
+	})
+	return uxthemeHandle
 }
 
 func flushMenuThemes(uxtheme windows.Handle) {

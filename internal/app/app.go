@@ -3,6 +3,8 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +27,15 @@ import (
 )
 
 const projectHomeURL = "https://github.com/JeffioZ/IdleTrigger"
+
+// ExeDir returns the directory containing the running executable, falling back
+// to the system temp directory when the executable path cannot be resolved.
+func ExeDir() string {
+	if exePath, err := os.Executable(); err == nil {
+		return filepath.Dir(exePath)
+	}
+	return os.TempDir()
+}
 
 var executeShell = windows.ShellExecute
 
@@ -80,6 +91,7 @@ type runtimeState struct {
 	themeSupportErr       error
 	batteryStop           chan struct{}
 	batteryDone           chan struct{}
+	delayedBatteryRead    *time.Timer // coalesced post-power-event re-read; owned by the request loop
 	ipLocationRetry       *time.Timer
 	ipLocationGeneration  uint64
 	ipLocationRetried     bool
@@ -225,6 +237,7 @@ func Run(cfg config.Config, cbs Callbacks) {
 			s.stopThemeScheduler()
 			s.stopThemeCoordinator()
 			s.stopBatteryLoop()
+			s.cancelDelayedBatteryRead()
 			keepawake.Disable()
 			return ""
 		})

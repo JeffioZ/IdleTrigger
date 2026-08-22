@@ -323,6 +323,7 @@ type panel struct {
 	palette                 colors.Palette
 	fontChoice              font.Choice
 	controls                map[uint16]windows.Handle
+	hwndToControlID         map[windows.Handle]uint16 // reverse index for controlID lookups
 	labels                  map[uint16]string
 	staticKinds             map[uint16]staticKind
 	tooltips                map[uint16][]uint16

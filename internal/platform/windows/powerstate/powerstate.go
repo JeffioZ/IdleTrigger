@@ -34,6 +34,10 @@ var (
 func GetCapabilities() Capabilities {
 	capsOnce.Do(func() {
 		var caps Capabilities
+		// Byte offsets into SYSTEM_POWER_CAPABILITIES returned by
+		// CallNtPowerInformation(SystemPowerCapabilities). They follow the SDK
+		// layout (SystemS3/S4 at 5/6, HiberFilePresent at 8, AoAc at 20):
+		// https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-system_power_capabilities
 		const (
 			bufSize                 = 128
 			systemS3SupportedOffset = 5

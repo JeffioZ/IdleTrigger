@@ -20,9 +20,9 @@ func (p *panel) createTooltip() {
 		return
 	}
 	p.tooltip = windows.Handle(hwnd)
+	// Wrap long tooltip text instead of letting the native control choose an
+	// overflowing single-line width.
 	pSendMessage.Call(hwnd, ttmSetMaxTipWidth, 0, uintptr(p.sc(360)))
-	// Keep the native tooltip from flashing back immediately when the pointer
-	// moves a few pixels across an owner-drawn control.
 }
 
 func (p *panel) addTooltip(id uint16, hwnd windows.Handle) {

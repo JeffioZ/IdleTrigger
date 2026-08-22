@@ -28,6 +28,12 @@ var (
 	procVerQuery      = versionDLL.NewProc("VerQueryValueW")
 	descriptionMu     sync.RWMutex
 	descriptionByPath = make(map[string]string)
+
+	// maxDescriptionCache bounds the cross-process description cache. A miss
+	// only re-reads one file, and descriptions rarely change while an app runs;
+	// on overflow an arbitrary entry is evicted. Empty results are cached too so
+	// lookups that never found a description do not re-read the same file.
+	maxDescriptionCache = 512
 )
 
 // SnapshotNames uses the Toolhelp process list. This operation does not open
@@ -175,7 +181,19 @@ func FileDescription(path string) string {
 	}
 	value = readFileDescription(path)
 	descriptionMu.Lock()
-	descriptionByPath[key] = value
+	// A racing goroutine may have cached the same path; keep the first winner
+	// so concurrent callers observe a consistent value.
+	if existing, ok := descriptionByPath[key]; ok {
+		value = existing
+	} else {
+		if len(descriptionByPath) >= maxDescriptionCache {
+			for victim := range descriptionByPath {
+				delete(descriptionByPath, victim)
+				break
+			}
+		}
+		descriptionByPath[key] = value
+	}
 	descriptionMu.Unlock()
 	return value
 }

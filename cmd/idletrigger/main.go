@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -91,11 +90,7 @@ func main() {
 	defer gdiplus.Shutdown()
 
 	// GUI mode
-	exeDir := os.TempDir()
-	if exePath, err := os.Executable(); err == nil {
-		exeDir = filepath.Dir(exePath)
-	}
-	mylog.Init(cfg.LoggingEnabled || developerTools.ForceLog, exeDir)
+	mylog.Init(cfg.LoggingEnabled || developerTools.ForceLog, app.ExeDir())
 	defer mylog.Close()
 	mylog.Info("IdleTrigger starting: version=%s mode=GUI", version.Value)
 	if developerTools.Enabled {

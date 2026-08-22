@@ -2,7 +2,6 @@ package app
 
 import (
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/JeffioZ/idletrigger/internal/config"
@@ -18,11 +17,7 @@ func (s *runtimeState) applyLogging() {
 	}
 	s.loggingActive = enabled
 	if enabled {
-		exeDir := os.TempDir()
-		if exePath, err := os.Executable(); err == nil {
-			exeDir = filepath.Dir(exePath)
-		}
-		mylog.Init(true, exeDir)
+		mylog.Init(true, ExeDir())
 		mylog.Info("Debug logging enabled")
 		ps := powerstate.GetStatus()
 		s.logPowerState("logging-enabled", ps)

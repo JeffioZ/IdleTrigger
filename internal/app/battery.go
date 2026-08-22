@@ -37,6 +37,17 @@ func (s *runtimeState) stopBatteryLoop() {
 	s.batteryDone = nil
 }
 
+// cancelDelayedBatteryRead stops and clears the coalesced post-power-event
+// timer. The callback never fires twice and the timer field is owned by the
+// serialized request loop, matching cancelIPLocationRetry's lifecycle.
+func (s *runtimeState) cancelDelayedBatteryRead() {
+	if s.delayedBatteryRead == nil {
+		return
+	}
+	s.delayedBatteryRead.Stop()
+	s.delayedBatteryRead = nil
+}
+
 // batteryLoop is a low-frequency fallback for firmware or drivers that miss
 // registered AC/DC and battery-percentage notifications.
 func (s *runtimeState) batteryLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) {
@@ -97,7 +108,11 @@ func (s *runtimeState) handlePowerEvent(event trayicon.PowerEvent) {
 		}
 		// Some drivers broadcast the setting just before GetSystemPowerStatus
 		// converges. One delayed read avoids waiting for the polling fallback.
-		time.AfterFunc(time.Second, func() {
+		// A single timer is reset on burst events so they cannot pile up.
+		if s.delayedBatteryRead != nil {
+			s.delayedBatteryRead.Stop()
+		}
+		s.delayedBatteryRead = time.AfterFunc(time.Second, func() {
 			if s.exiting.Load() {
 				return
 			}

@@ -16,6 +16,8 @@ var (
 	enabled  atomic.Bool
 	keepScr  atomic.Bool
 
+	pSetThreadExecutionState = kernel32.NewProc("SetThreadExecutionState")
+
 	mu     sync.Mutex
 	worker *executionWorker
 )
@@ -109,8 +111,7 @@ func (w *executionWorker) loop(initialKeepScreen bool, ready chan error) {
 		case req := <-w.updates:
 			req.done <- setExecutionState(req.keepScreen)
 		case done := <-w.stop:
-			proc := kernel32.NewProc("SetThreadExecutionState")
-			proc.Call(uintptr(esContinuous))
+			pSetThreadExecutionState.Call(uintptr(esContinuous))
 			close(done)
 			return
 		}
@@ -122,8 +123,7 @@ func setExecutionState(keepScreen bool) error {
 	if keepScreen {
 		flags |= esDisplayRequired
 	}
-	proc := kernel32.NewProc("SetThreadExecutionState")
-	r, _, err := proc.Call(flags)
+	r, _, err := pSetThreadExecutionState.Call(flags)
 	if r == 0 {
 		return fmt.Errorf("SetThreadExecutionState flags=0x%x: %w", flags, err)
 	}

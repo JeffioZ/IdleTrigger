@@ -85,6 +85,7 @@ try {
     }
 
     if ($Vulncheck) {
+        # Version is kept in sync with the govulncheck step in .github/workflows/ci.yml.
         Invoke-NativeCheck "govulncheck v1.1.4" { go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... }
     } else {
         Write-Host "NOT RUN: govulncheck (pass -Vulncheck to run it)."

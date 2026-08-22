@@ -149,6 +149,10 @@ func (s *runtimeState) themeLocationInfo(blockIPLookup bool) theme.LocationInfo 
 	return theme.AutoLocationInfo(s.cfg.ThemeIPLocationEnabled, blockIPLookup)
 }
 
+// trayTooltipMaxUTF16 keeps the hover text within the Shell notification-area
+// limit (NOTIFYICONDATA.szTip is 128 WCHARs including the terminator).
+const trayTooltipMaxUTF16 = 120
+
 func tooltipText(lines []string) string {
 	clean := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -158,8 +162,8 @@ func tooltipText(lines []string) string {
 		}
 	}
 	encoded := utf16.Encode([]rune(strings.Join(clean, "\n")))
-	if len(encoded) > 120 {
-		encoded = encoded[:120]
+	if len(encoded) > trayTooltipMaxUTF16 {
+		encoded = encoded[:trayTooltipMaxUTF16]
 		if len(encoded) > 0 && encoded[len(encoded)-1] >= 0xD800 && encoded[len(encoded)-1] <= 0xDBFF {
 			encoded = encoded[:len(encoded)-1]
 		}

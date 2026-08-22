@@ -662,25 +662,31 @@ func filterItems(values []item, filter string) []item {
 
 func sortItems(values []item, column int, ascending bool) []item {
 	out := append([]item(nil), values...)
-	valueAt := func(value item) string {
+	type sortKey struct {
+		value item
+		key   string
+	}
+	keys := make([]sortKey, len(out))
+	for i, value := range out {
 		switch column {
 		case 1:
-			return value.description
+			keys[i] = sortKey{value, strings.ToLower(value.description)}
 		case 2:
 			count, _ := strconv.Atoi(value.count)
-			return fmt.Sprintf("%08d", count)
+			keys[i] = sortKey{value, fmt.Sprintf("%08d", count)}
 		default:
-			return value.name
+			keys[i] = sortKey{value, strings.ToLower(value.name)}
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		left := strings.ToLower(valueAt(out[i]))
-		right := strings.ToLower(valueAt(out[j]))
+	sort.SliceStable(keys, func(i, j int) bool {
 		if ascending {
-			return left < right
+			return keys[i].key < keys[j].key
 		}
-		return left > right
+		return keys[i].key > keys[j].key
 	})
+	for i := range keys {
+		out[i] = keys[i].value
+	}
 	return out
 }
 

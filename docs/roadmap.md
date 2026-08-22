@@ -7,6 +7,8 @@
 
 ## ✅ 发布检查清单
 
+> 前四项在**本地、推送 tag 之前**完成；推送 tag 后 CI 自动校验并生成 draft release，最后一项在 review draft 时按照更新说明填写。
+
 - [ ] `.\tools\check.ps1 -Full -Vulncheck` 完整检查通过，并确认 `SKIPPED` 项符合本次发布预期
 - [ ] 386 / amd64 Windows GUI 构建通过
 - [ ] 两种架构 EXE 均包含应用图标和 manifest

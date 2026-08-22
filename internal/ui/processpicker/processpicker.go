@@ -1025,7 +1025,7 @@ func (p *picker) scrollListWheel(wParam uintptr) bool {
 }
 
 func (p *picker) updateHeaderLabels() {
-	for index := range 3 {
+	for index := range processColumnCount {
 		caption := p.headerCaption(index)
 		text, _ := windows.UTF16PtrFromString(caption)
 		column := lvColumn{Mask: 0x0004, Text: text}

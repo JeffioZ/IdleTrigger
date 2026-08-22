@@ -30,6 +30,12 @@ const (
 	headerTrackLeave     = 0x00000002
 	hdmFirst             = 0x1200
 	hdmGetItemRect       = hdmFirst + 7
+
+	// processColumnCount is the number of list-view columns rendered by the
+	// picker: process (0), description (1), instances (2). Every column loop and
+	// boundary check must use this instead of a raw literal so the layout and
+	// the header captions cannot drift apart.
+	processColumnCount = 3
 )
 
 type headerTrackMouseEvent struct {
@@ -105,7 +111,7 @@ func (p *picker) headerColumnAt(lParam uintptr) int {
 	}
 	x := int32(int16(uint16(lParam)))
 	y := int32(int16(uint16(lParam >> 16)))
-	for column := range 3 {
+	for column := range processColumnCount {
 		var bounds rect
 		if ok, _, _ := pSendMessage.Call(uintptr(p.header), hdmGetItemRect, uintptr(column), uintptr(unsafe.Pointer(&bounds))); ok == 0 {
 			continue
@@ -174,7 +180,7 @@ func (p *picker) drawHeaderCustom(value *headerCustomDraw) (uintptr, bool) {
 		return headerNotifyItemDraw, true
 	case headerDrawItemPaint:
 		column := int(value.ItemSpec)
-		if column < 0 || column >= 3 {
+		if column < 0 || column >= processColumnCount {
 			return headerSkipDefault, true
 		}
 		state := nativeform.ControlState{

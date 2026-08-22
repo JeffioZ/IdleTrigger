@@ -121,5 +121,10 @@ func (p *panel) toggleCommand(id uint16) (Action, bool) {
 }
 
 func actionClosesPanel(action Action) bool {
-	return action <= ActRestart || action == ActExit
+	switch action {
+	case ActSleep, ActHibernate, ActShutdown, ActLock, ActRestart, ActExit:
+		return true
+	default:
+		return false
+	}
 }

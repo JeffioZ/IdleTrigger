@@ -235,6 +235,9 @@ func (p *panel) child(className, value string, style uintptr, id uint16, useFont
 	}
 	handle := windows.Handle(hwnd)
 	p.controls[id] = handle
+	if id != 0 {
+		p.hwndToControlID[handle] = id
+	}
 	p.labels[id] = value
 	p.bounds[id] = bounds{x: x, y: y, width: width, height: height}
 	if useFont != 0 {
@@ -407,7 +410,6 @@ func (p *panel) positionControl(id uint16) {
 	if !ok || control == 0 {
 		return
 	}
-	scale := p.scale()
 	if field, ok := p.surfaces.ForControl(id); ok {
 		surfaceBounds := p.bounds[field.SurfaceID]
 		p.positionHandle(field.Surface, surfaceBounds)
@@ -420,7 +422,6 @@ func (p *panel) positionControl(id uint16) {
 		return
 	}
 	p.positionHandle(control, b)
-	_ = scale
 }
 
 func (p *panel) positionHandle(control windows.Handle, b bounds) {

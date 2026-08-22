@@ -103,6 +103,7 @@ func createPanelForHost(state State, onAction OnAction, langFn LangFunc, capture
 		idleWarningSeconds:      state.IdleWarningSeconds,
 		idleAction:              state.IdleAction,
 		controls:                make(map[uint16]windows.Handle),
+		hwndToControlID:         make(map[windows.Handle]uint16),
 		labels:                  make(map[uint16]string),
 		staticKinds:             make(map[uint16]staticKind),
 		nextStaticID:            700,
@@ -430,6 +431,7 @@ func (p *panel) child(className, text string, style uint32, x, y, width, height 
 	}
 	if id != 0 {
 		p.controls[id] = windows.Handle(hwnd)
+		p.hwndToControlID[windows.Handle(hwnd)] = id
 		p.controlBounds[id] = logicalBounds{x, y, width, height}
 		p.labels[id] = text
 		p.addTooltip(id, windows.Handle(hwnd))

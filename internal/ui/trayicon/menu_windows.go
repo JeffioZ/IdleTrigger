@@ -52,17 +52,27 @@ func (t *winTray) addOrUpdateMenuItem(menuItemID uint32, title string) error {
 		MIIM_ID     = 0x00000002
 	)
 	const MFT_STRING = 0x00000000
-	titlePtr, err := windows.UTF16PtrFromString(title)
+	titleUTF16, err := windows.UTF16FromString(title)
 	if err != nil {
 		return err
 	}
+	// MIIM_STRING's cch counts UTF-16 code units excluding the terminator.
+	// len(title) counts UTF-8 bytes, which disagrees with UTF-16 units for any
+	// non-ASCII rune (CJK uses 3 bytes per rune but 1 UTF-16 unit) and can
+	// truncate localized menu labels even though the allocation's spare
+	// capacity happens to include the NUL terminator.
+	cch := len(titleUTF16) - 1 // drop the trailing NUL
+	if cch < 0 {
+		cch = 0
+	}
+	titlePtr := &titleUTF16[0]
 
 	mi := menuItemInfo{
 		Mask:     MIIM_FTYPE | MIIM_STRING | MIIM_ID,
 		Type:     MFT_STRING,
 		ID:       menuItemID,
 		TypeData: titlePtr,
-		Cch:      uint32(len(title)),
+		Cch:      uint32(cch),
 	}
 	mi.Size = uint32(unsafe.Sizeof(mi))
 	var res uintptr

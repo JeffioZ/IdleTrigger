@@ -145,12 +145,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 }
 
 func (p *panel) controlID(hwnd windows.Handle) uint16 {
-	for id, control := range p.controls {
-		if control == hwnd {
-			return id
-		}
-	}
-	return 0
+	return p.hwndToControlID[hwnd]
 }
 
 func isSectionLabel(id uint16) bool {

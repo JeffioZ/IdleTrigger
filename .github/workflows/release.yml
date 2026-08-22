@@ -93,6 +93,9 @@ jobs:
             dist/IdleTrigger-x86.exe
             dist/IdleTrigger-x64.exe
             SHA256SUMS.txt
-          generate_release_notes: true
+          # Release notes are hand-written bilingual (see docs/release-notes.md);
+          # disable auto-generation so the draft never mixes in English-only
+          # notes that must be cleared before filling the template.
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

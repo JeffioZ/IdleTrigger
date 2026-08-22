@@ -85,6 +85,7 @@ type panel struct {
 	onSaved                                  OnSaved
 	onProjectHome                            OnCommand
 	controls                                 map[uint16]windows.Handle
+	hwndToControlID                          map[windows.Handle]uint16 // reverse index for controlID lookups
 	labels                                   map[uint16]string
 	bounds                                   map[uint16]bounds
 	checks                                   map[uint16]bool
@@ -295,7 +296,8 @@ func Show(state State, onSave OnSave, onSaved OnSaved, onProjectHome OnCommand, 
 		return nil
 	}
 	p := &panel{state: state, onSave: onSave, onSaved: onSaved, onProjectHome: onProjectHome, text: text,
-		controls: make(map[uint16]windows.Handle), labels: make(map[uint16]string), bounds: make(map[uint16]bounds),
+		controls: make(map[uint16]windows.Handle), hwndToControlID: make(map[windows.Handle]uint16),
+		labels: make(map[uint16]string), bounds: make(map[uint16]bounds),
 		checks: make(map[uint16]bool), choices: make(map[uint16]*choice)}
 	active = p
 	activeMu.Unlock()
@@ -361,7 +363,8 @@ func CapturePage(state State, text TextFunc, scale float64, dark bool, page int,
 	}
 	state.Owner = 0
 	p := &panel{state: state, text: text, captureHost: true, captureScale: scale, themeOverride: &dark,
-		controls: make(map[uint16]windows.Handle), labels: make(map[uint16]string), bounds: make(map[uint16]bounds),
+		controls: make(map[uint16]windows.Handle), hwndToControlID: make(map[windows.Handle]uint16),
+		labels: make(map[uint16]string), bounds: make(map[uint16]bounds),
 		checks: make(map[uint16]bool), choices: make(map[uint16]*choice)}
 	activeMu.Lock()
 	if active != nil {
