@@ -130,7 +130,7 @@ func Run(args []string) error {
 		}
 		capturedSizes := make(map[string]image.Point)
 		for _, job := range jobs {
-			darkmode.SetPreferredAppMode(job.theme == controlpanel.ThemeDark)
+			darkmode.SetAppTheme(job.theme == controlpanel.ThemeDark)
 			captureWindow := func(hwnd windows.Handle) error {
 				popup := strings.HasPrefix(job.surface, "popup-")
 				client, err := captureBestClientFrame(hwnd, popup)

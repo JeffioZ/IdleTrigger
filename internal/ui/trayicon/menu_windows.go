@@ -108,8 +108,7 @@ func (t *winTray) showMenu() error {
 	}
 	window := t.window
 	pSetForegroundWindow.Call(uintptr(window))
-	darkmode.SetPreferredAppMode(theme.Current() == theme.ModeDark)
-	darkmode.RefreshMenuThemes()
+	darkmode.PreparePopupMenu(uintptr(window), theme.Current() == theme.ModeDark)
 
 	defer pPostMessage.Call(uintptr(window), WM_NULL, 0, 0)
 	res, _, err = pTrackPopupMenu.Call(

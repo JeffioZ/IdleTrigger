@@ -9,58 +9,143 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Enable forces the process to use the dark (immersive) theme.
+const (
+	windows10Build1809 = 17763
+	windows10Build1903 = 18362
+
+	preferredAppModeAllowDark  = 1
+	preferredAppModeForceDark  = 2
+	preferredAppModeForceLight = 3
+)
+
+type processThemePreference uint8
+
+const (
+	processThemeFollowSystem processThemePreference = iota
+	processThemeForceLight
+	processThemeForceDark
+)
+
+// Enable lets immersive Win32 surfaces follow the active Windows app theme.
 // Harmless no-op on Windows versions that lack these APIs.
 func Enable() {
-	SetPreferredAppMode(false)
+	applyProcessTheme(processThemeFollowSystem, 0)
 }
 
-// SetPreferredAppMode updates the process-level Win32 theme preference.
-// forceDark is used for native popup menus, which do not always follow
-// AllowDark after the system theme changes while the process stays running.
-func SetPreferredAppMode(forceDark bool) {
-	withUxtheme(func(uxtheme windows.Handle) {
-		// SetPreferredAppMode — ordinal 135. 1 = AllowDark, 2 = ForceDark.
-		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 135)
-		if proc != 0 {
-			mode := uintptr(1)
-			if forceDark {
-				mode = 2
-			}
-			syscall.SyscallN(proc, mode)
-		}
-		flushMenuThemes(uxtheme)
-	})
+// SetAppTheme gives deterministic captures and other explicit-theme surfaces
+// a process preference which does not depend on a stale immersive-policy cache.
+func SetAppTheme(dark bool) {
+	applyProcessTheme(forcedThemePreference(dark), 0)
+}
+
+// PreparePopupMenu synchronizes every process- and owner-level setting used by
+// Windows to render a native popup menu. It must run immediately before
+// TrackPopupMenu so a long-lived tray process cannot retain the previous theme.
+func PreparePopupMenu(hwnd uintptr, dark bool) {
+	applyProcessTheme(forcedThemePreference(dark), hwnd)
 }
 
 // AllowWindow opts a Win32 owner window into immersive dark mode where the
 // current Windows version supports it. It is harmless when the API is absent.
 func AllowWindow(hwnd uintptr) {
-	if hwnd == 0 {
+	if hwnd == 0 || windows.RtlGetVersion().BuildNumber < windows10Build1809 {
 		return
 	}
 	withUxtheme(func(uxtheme windows.Handle) {
-		// AllowDarkModeForWindow — ordinal 133.
-		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 133)
-		if proc != 0 {
-			syscall.SyscallN(proc, hwnd, 1)
-		}
+		setWindowDarkAllowed(uxtheme, hwnd, true)
 	})
 }
 
-// RefreshMenuThemes asks Windows to rebuild cached popup-menu theme resources.
-// This is useful after the OS theme changes while the tray app stays running.
-func RefreshMenuThemes() {
+func forcedThemePreference(dark bool) processThemePreference {
+	if dark {
+		return processThemeForceDark
+	}
+	return processThemeForceLight
+}
+
+func applyProcessTheme(preference processThemePreference, hwnd uintptr) {
+	build := windows.RtlGetVersion().BuildNumber
+	argument, supported := preferredAppModeArgument(build, preference)
+	if !supported {
+		return
+	}
 	withUxtheme(func(uxtheme windows.Handle) {
+		refreshImmersiveColorPolicyState(uxtheme)
+		setPreferredAppMode(uxtheme, argument)
+		if hwnd != 0 {
+			setWindowDarkAllowed(uxtheme, hwnd, preference == processThemeForceDark)
+		}
 		flushMenuThemes(uxtheme)
 	})
+}
+
+// preferredAppModeArgument accounts for ordinal 135 changing signature in
+// Windows 10 1903. Build 1809 exposes AllowDarkModeForApp(BOOL), whereas 1903+
+// exposes SetPreferredAppMode(PreferredAppMode).
+func preferredAppModeArgument(build uint32, preference processThemePreference) (uintptr, bool) {
+	switch preference {
+	case processThemeFollowSystem, processThemeForceLight, processThemeForceDark:
+	default:
+		return 0, false
+	}
+	if build < windows10Build1809 {
+		return 0, false
+	}
+	if build < windows10Build1903 {
+		if preference == processThemeForceLight {
+			return 0, true
+		}
+		return 1, true
+	}
+	switch preference {
+	case processThemeFollowSystem:
+		return preferredAppModeAllowDark, true
+	case processThemeForceLight:
+		return preferredAppModeForceLight, true
+	case processThemeForceDark:
+		return preferredAppModeForceDark, true
+	}
+	return 0, false
+}
+
+func setPreferredAppMode(uxtheme windows.Handle, argument uintptr) {
+	// SetPreferredAppMode on Windows 10 1903+, AllowDarkModeForApp on 1809.
+	proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 135)
+	if proc != 0 {
+		syscall.SyscallN(proc, argument)
+	}
+}
+
+func setWindowDarkAllowed(uxtheme windows.Handle, hwnd uintptr, allowed bool) {
+	// AllowDarkModeForWindow — ordinal 133.
+	proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 133)
+	if proc == 0 {
+		return
+	}
+	value := uintptr(0)
+	if allowed {
+		value = 1
+	}
+	syscall.SyscallN(proc, hwnd, value)
+}
+
+func refreshImmersiveColorPolicyState(uxtheme windows.Handle) {
+	// RefreshImmersiveColorPolicyState — ordinal 104.
+	proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 104)
+	if proc != 0 {
+		syscall.SyscallN(proc)
+	}
 }
 
 // AppsUseDark reports the effective Windows app theme through the same
 // immersive-theme API used by native controls. The second result is false on
 // Windows versions that do not expose ShouldAppsUseDarkMode.
 func AppsUseDark() (dark, supported bool) {
+	if windows.RtlGetVersion().BuildNumber < windows10Build1809 {
+		return false, false
+	}
 	withUxtheme(func(uxtheme windows.Handle) {
+		refreshImmersiveColorPolicyState(uxtheme)
 		// ShouldAppsUseDarkMode — ordinal 132.
 		proc, _ := windows.GetProcAddressByOrdinal(uxtheme, 132)
 		if proc == 0 {
