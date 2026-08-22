@@ -87,7 +87,7 @@ The release workflow runs formatting, module, test, and vet checks. It then buil
 
 ## 🚢 Release Process
 
-Pushing a strict SemVer tag in the form `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` creates a draft named after that tag; other `v*` tags are rejected. The draft includes both executables, `SHA256SUMS.txt`, and an initial changelog. `.github/release.yml` groups pull requests; direct commits still need manual review.
+Pushing a strict SemVer tag in the form `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` creates a draft named after that tag; other `v*` tags are rejected. The draft includes both executables and `SHA256SUMS.txt`. Automatic release-note generation is disabled: fill the draft by hand using the [release-notes style and template](release-notes.md). `.github/release.yml` groups pull requests; direct commits still need manual review.
 
 Before publishing, apply the [release-notes style and template](release-notes.md). Lead with user-visible results. Keep both languages aligned, check the assets and comparison range, and leave commit details at the end.
 

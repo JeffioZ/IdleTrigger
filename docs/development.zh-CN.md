@@ -84,7 +84,7 @@ go build -trimpath "-ldflags=$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletri
 
 ## 🚢 发布流程
 
-推送格式为 `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` 的严格 SemVer tag 后，工作流会创建以该 tag 命名的草稿 Release；其他 `v*` tag 会被拒绝。草稿包含两个 EXE、`SHA256SUMS.txt` 和初始变更记录。`.github/release.yml` 会对 PR 分组；直接提交仍需人工整理。
+推送格式为 `vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]` 的严格 SemVer tag 后，工作流会创建以该 tag 命名的草稿 Release；其他 `v*` tag 会被拒绝。草稿包含两个 EXE 和 `SHA256SUMS.txt`。自动生成变更说明已关闭：请按[更新说明格式与模板](release-notes.md)手工填写草稿内容。`.github/release.yml` 会对 PR 分组；直接提交仍需人工整理。
 
 正式发布前，请应用[更新说明格式与模板](release-notes.md)。先写用户可感知的结果，保持中英文一致，核对附件和版本对比范围，并把提交明细留在末尾。
 

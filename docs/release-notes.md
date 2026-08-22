@@ -51,6 +51,7 @@ Copy the following structure into the draft release. Omit the bold labels when t
 ## Final Check / 发布前检查
 
 - The title is `IdleTrigger vX.Y.Z`, and the release is still a draft while editing. / 标题为 `IdleTrigger vX.Y.Z`，编辑期间保持草稿状态。
+- The draft has no auto-generated release notes; every section is written by hand from the template above. / 草稿不包含自动生成的变更说明，所有内容均由维护者按上方模板手写。
 - Language headings and optional product labels use plain text, with no decorative emoji. / 语言标题和可选产品标签只用文字，不添加装饰性图标。
 - Chinese and English highlights describe the same behavior. / 中英文亮点表达同一组行为。
 - Asset names, architectures, and the comparison range are correct. / 产物名称、架构和版本对比范围正确。
