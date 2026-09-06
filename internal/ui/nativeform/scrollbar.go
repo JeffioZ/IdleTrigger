@@ -168,7 +168,7 @@ func (s *Scrollbar) SetBounds(x, y, width, height int) {
 }
 
 func (s *Scrollbar) SetTheme(palette colors.Palette, background uint32) {
-	if s == nil {
+	if s == nil || (s.palette == palette && s.background == background) {
 		return
 	}
 	s.palette, s.background = palette, background
@@ -183,6 +183,9 @@ func (s *Scrollbar) SetScale(scale float64) {
 	}
 	if scale <= 0 {
 		scale = 1
+	}
+	if s.scale == scale {
+		return
 	}
 	s.scale = scale
 	if s.hwnd != 0 {

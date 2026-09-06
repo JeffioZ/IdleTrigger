@@ -6,6 +6,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestChoicePopupFitsLargeTextToSmallWorkArea(t *testing.T) {
+	// Six 150% DPI / 225% text rows need 733 px, beyond this work area.
+	const height, row, gap, inset = int32(700), int32(115), int32(3), int32(14)
+	visible := choicePopupVisibleRows(6, height, row, gap, inset)
+	if visible != 5 {
+		t.Fatalf("visible rows = %d, want 5", visible)
+	}
+	p := &ChoicePopup{options: ChoicePopupOptions{MaxVisible: visible, Items: make([]ChoicePopupItem, 6)}}
+	p.ensureVisible(5, p.visibleRows())
+	if p.first != 1 {
+		t.Fatal("last option did not scroll into the reduced viewport")
+	}
+	popupHeight := 2*inset + int32(visible)*row + int32(visible-1)*gap
+	work := popupRect{Left: -1280, Top: -700, Right: 0, Bottom: 0}
+	y := choicePopupVerticalPosition(popupRect{Top: -300, Bottom: -250}, work, popupHeight, 8, false)
+	if y < work.Top || y+popupHeight > work.Bottom {
+		t.Fatalf("popup outside work area: y=%d height=%d", y, popupHeight)
+	}
+}
+
 func TestChoicePopupRowHitTestingSkipsHeadersAndGaps(t *testing.T) {
 	p := &ChoicePopup{
 		options: ChoicePopupOptions{

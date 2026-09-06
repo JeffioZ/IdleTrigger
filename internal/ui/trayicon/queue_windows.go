@@ -7,24 +7,40 @@ import (
 
 // Post runs fn on the tray window's UI thread. It is intended for transient
 // UI such as notifications that must be painted by a Win32 message loop.
+// False means fn was not accepted and will not run. Accepted tasks can still
+// be discarded when the UI shuts down.
 func Post(fn func()) bool {
+	return wt.post(fn, func(window windows.Handle) bool {
+		result, _, _ := pPostMessage.Call(uintptr(window), wmRunUITask, 0, 0)
+		return result != 0
+	})
+}
+
+// Posting the wake-up and rolling back a rejected task share the queue lock.
+// The asynchronous wake-up never executes callbacks while this lock is held.
+func (t *winTray) post(fn func(), wake func(windows.Handle) bool) bool {
 	if fn == nil {
 		return false
 	}
-	wt.muUITasks.Lock()
-	if wt.window == 0 || wt.uiClosing {
-		wt.muUITasks.Unlock()
+	t.muUITasks.Lock()
+	defer t.muUITasks.Unlock()
+	if t.window == 0 || t.uiClosing {
 		return false
 	}
-	wt.uiTasks = append(wt.uiTasks, fn)
-	window := wt.window
-	wt.muUITasks.Unlock()
-	result, _, _ := pPostMessage.Call(uintptr(window), wmRunUITask, 0, 0)
-	return result != 0
+	t.uiTasks = append(t.uiTasks, fn)
+	if !wake(t.window) {
+		last := len(t.uiTasks) - 1
+		t.uiTasks[last] = nil
+		t.uiTasks = t.uiTasks[:last]
+		return false
+	}
+	return true
 }
 
 // PostAndWait runs fn on the tray UI thread and waits for it to finish.
 // It must not be called from the tray UI thread itself.
+// False can also mean shutdown interrupted the wait; it does not prove that
+// an accepted callback never started.
 func PostAndWait(fn func()) bool {
 	if fn == nil {
 		return false

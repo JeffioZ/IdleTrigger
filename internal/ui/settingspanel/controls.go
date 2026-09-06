@@ -13,6 +13,7 @@ import (
 )
 
 func (p *panel) build() error {
+	p.buildErr = nil
 	const (
 		contentX       = 208
 		contentRight   = 676
@@ -110,6 +111,9 @@ func (p *panel) build() error {
 	p.button(idSave, p.t("common_save"), contentRight-dialogButtonWidth, footerY, dialogButtonWidth, buttonHeight)
 	p.button(idCancel, p.t("common_cancel"), contentRight-2*dialogButtonWidth-nativeform.ControlGap, footerY, dialogButtonWidth, buttonHeight)
 
+	if p.buildErr != nil {
+		return p.buildErr
+	}
 	p.checks[idKeepScreen] = p.state.KeepScreenOn
 	p.checks[idBatteryAllowed] = p.state.NoSleepOnBattery
 	p.checks[idIdleEnhanced] = p.state.IdleEnhancedMonitor
@@ -204,7 +208,9 @@ func (p *panel) logicalTextWidth(value string, fallback int) int {
 }
 
 func (p *panel) button(id uint16, value string, x, y, width, height int) {
-	p.child("BUTTON", value, wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height)
+	if p.child("BUTTON", value, wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height) == 0 {
+		return
+	}
 	p.interaction.Track(p.controls[id], p.controls[id])
 }
 
@@ -212,13 +218,17 @@ func (p *panel) check(id uint16, value string, x, y, width, height int) {
 	if compactWidth := nativeform.CheckboxHitWidth(p.hwnd, p.font, value, p.scale()); compactWidth > 0 {
 		width = min(width, compactWidth)
 	}
-	p.child("BUTTON", value, wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height)
+	if p.child("BUTTON", value, wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height) == 0 {
+		return
+	}
 	nativeform.AnnotateCheckButton(p.controls[id], value, false)
 	p.interaction.TrackCheck(p.controls[id], p.controls[id], func() bool { return p.checks[id] })
 }
 
 func (p *panel) combo(id uint16, labels []string, x, y, width, height int) {
-	p.child("BUTTON", "", wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height)
+	if p.child("BUTTON", "", wsChild|wsVisible|wsTabStop|bsOwnerDraw, id, p.font, x, y, width, height) == 0 {
+		return
+	}
 	p.choices[id] = &choice{labels: append([]string(nil), labels...)}
 	p.interaction.Track(p.controls[id], p.controls[id])
 }
@@ -235,20 +245,29 @@ func (p *panel) editWithStyle(id uint16, value string, x, y, width, height int, 
 	surfaceID := idFieldSurfaceBase + id
 	p.child("STATIC", "", formSurfaceStyle|wsVisible, surfaceID, p.font, x, y, width, height)
 	inner := p.child("EDIT", value, wsChild|wsVisible|wsTabStop|wsClipSiblings|esAutoHScroll|extraStyle, id, p.font, x+2, y+7, width-4, 20)
-	_, _ = p.surfaces.Add(nativeform.ControlSurfaceOptions{ControlID: id, SurfaceID: surfaceID,
+	if inner == 0 {
+		return
+	}
+	_, err := p.surfaces.Add(nativeform.ControlSurfaceOptions{ControlID: id, SurfaceID: surfaceID,
 		Control: inner, Surface: p.controls[surfaceID], CueColor: p.palette.MutedText, Scale: p.scale(), Tracker: &p.interaction})
+	if err != nil {
+		p.buildErr = fmt.Errorf("bind settings EDIT %d: %w", id, err)
+		return
+	}
 	margin := int(6*p.scale() + 0.5)
 	pSendMessage.Call(uintptr(inner), emSetMargins, 3, uintptr(margin|(margin<<16)))
 }
 
 func (p *panel) child(className, value string, style uintptr, id uint16, useFont windows.Handle, x, y, width, height int) windows.Handle {
-	class, _ := windows.UTF16PtrFromString(className)
-	text, _ := windows.UTF16PtrFromString(value)
+	if p.buildErr != nil {
+		return 0
+	}
 	scale := p.scale()
-	hwnd, _, _ := pCreateWindowEx.Call(0, uintptr(unsafe.Pointer(class)), uintptr(unsafe.Pointer(text)), style,
+	hwnd, _, err := createSettingsControl(className, value, style,
 		uintptr(int(float64(x)*scale)), uintptr(int(float64(y)*scale)), uintptr(max(1, int(float64(width)*scale))), uintptr(max(1, int(float64(height)*scale))),
-		uintptr(p.hwnd), uintptr(id), 0, 0)
+		uintptr(p.hwnd), uintptr(id))
 	if hwnd == 0 {
+		p.buildErr = fmt.Errorf("create settings %s %d: %w", className, id, err)
 		return 0
 	}
 	handle := windows.Handle(hwnd)
@@ -263,6 +282,20 @@ func (p *panel) child(className, value string, style uintptr, id uint16, useFont
 	}
 	nativeform.ApplyControl(handle, p.themeDark)
 	return handle
+}
+
+// Keep strings typed across the injectable boundary. Convert their pointers
+// only at the direct syscall call, where Go preserves their lifetime.
+var createSettingsControl = func(className, value string, style, x, y, width, height, parent, id uintptr) (uintptr, uintptr, error) {
+	class, err := windows.UTF16PtrFromString(className)
+	if err != nil {
+		return 0, 0, err
+	}
+	text, err := windows.UTF16PtrFromString(value)
+	if err != nil {
+		return 0, 0, err
+	}
+	return pCreateWindowEx.Call(0, uintptr(unsafe.Pointer(class)), uintptr(unsafe.Pointer(text)), style, x, y, width, height, parent, id, 0, 0)
 }
 
 func (p *panel) setText(id uint16, value string) {
@@ -411,6 +444,11 @@ func (p *panel) syncViewport() {
 		if _, field := p.surfaces.ForControl(id); field {
 			p.positionControl(id)
 		}
+	}
+	// EDIT controls are raised above their surfaces during placement; keep
+	// the viewport overlays above them after all content has been positioned.
+	for _, bar := range p.viewport.Windows() {
+		pSetWindowPos.Call(uintptr(bar), 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
 	}
 	pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
 }

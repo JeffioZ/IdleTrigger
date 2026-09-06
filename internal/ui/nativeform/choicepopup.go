@@ -179,7 +179,6 @@ func ShowChoicePopup(options ChoicePopupOptions) (*ChoicePopup, error) {
 	if popup.focus < 0 {
 		popup.focus = popup.nextSelectable(-1, 1)
 	}
-	popup.ensureVisible(popup.focus, visible)
 	class, _ := windows.UTF16PtrFromString(choicePopupClass)
 	style := uintptr(cpWSPopup | cpWSClipChildren)
 	hwnd, _, err := cpCreateWindow.Call(cpWSExToolWindow, uintptr(unsafe.Pointer(class)), 0, style, 0, 0, 1, 1, uintptr(options.Owner), 0, 0, 0)
@@ -193,7 +192,17 @@ func ShowChoicePopup(options ChoicePopupOptions) (*ChoicePopup, error) {
 	ApplyFrame(popup.hwnd, options.Dark)
 	var anchor popupRect
 	cpGetWindowRect.Call(uintptr(options.Anchor), uintptr(unsafe.Pointer(&anchor)))
+	monitor, _, _ := cpMonitorFromWnd.Call(uintptr(options.Owner), cpMonitorNearest)
+	info := popupMonitorInfo{Size: uint32(unsafe.Sizeof(popupMonitorInfo{}))}
+	if ok, _, _ := cpGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok == 0 {
+		cpDestroyWindow.Call(hwnd)
+		return nil, fmt.Errorf("read choice popup work area")
+	}
+	visible = choicePopupVisibleRows(visible, info.Work.Bottom-info.Work.Top, popup.rowHeight, popup.rowGap, popup.inset)
+	popup.options.MaxVisible = visible
+	popup.ensureVisible(popup.focus, visible)
 	width := anchor.Right - anchor.Left
+	width = min(width, info.Work.Right-info.Work.Left)
 	height := 2*popup.inset + int32(visible)*popup.rowHeight + int32(max(0, visible-1))*popup.rowGap
 	if len(options.Items) > visible {
 		scrollbar, scrollErr := NewScrollbar(ScrollbarOptions{
@@ -212,9 +221,6 @@ func ShowChoicePopup(options ChoicePopupOptions) (*ChoicePopup, error) {
 		scrollWidth := int(float64(ScrollbarWidth)*options.Scale + 0.5)
 		scrollbar.SetBounds(int(width)-scrollWidth-popup.logicalInset(), popup.logicalInset(), scrollWidth, int(height)-2*popup.logicalInset())
 	}
-	monitor, _, _ := cpMonitorFromWnd.Call(uintptr(options.Owner), cpMonitorNearest)
-	info := popupMonitorInfo{Size: uint32(unsafe.Sizeof(popupMonitorInfo{}))}
-	cpGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
 	anchorGap := int32(MenuAnchorGap*options.Scale + 0.5)
 	x := anchor.Left
 	y := choicePopupVerticalPosition(anchor, info.Work, height, anchorGap, options.PreferAbove)
@@ -236,6 +242,10 @@ func ShowChoicePopup(options ChoicePopupOptions) (*ChoicePopup, error) {
 		return nil, fmt.Errorf("choice popup closed during activation")
 	}
 	return popup, nil
+}
+
+func choicePopupVisibleRows(requested int, height, row, gap, inset int32) int {
+	return max(1, min(requested, int((height-2*inset+gap)/max(1, row+gap))))
 }
 
 func choicePopupVerticalPosition(anchor, work popupRect, height, gap int32, preferAbove bool) int32 {

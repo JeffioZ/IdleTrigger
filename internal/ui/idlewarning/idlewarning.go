@@ -262,20 +262,6 @@ func ensureClass() error {
 
 func position(hwnd windows.Handle, suggested *rect) {
 	sc := func(v int32) int32 { return scaleForWindow(hwnd, v) }
-	width, margin := sc(348), sc(16)
-	bodyWidth := width - 2*margin - sc(10)
-	bodyHeight := measureText(hwnd, body, sc(13), 400, bodyWidth)
-	// The body starts below the header with its own top and bottom inset. Keep
-	// those in the calculated client height so wrapped text is never clipped.
-	height := sc(52) + sc(12) + bodyHeight + sc(14)
-	if minimum := sc(warningMinHeight); height < minimum {
-		height = minimum
-	}
-	if outerWidth, outerHeight, err := nativeform.WindowSizeForClient(
-		int(width), int(height), warningWindowStyle(), wsExTool|wsExTopmost|wsExNoActivate, uint32(dpiForWindow(hwnd)),
-	); err == nil {
-		width, height = outerWidth, outerHeight
-	}
 	monitor := uintptr(0)
 	if suggested != nil {
 		monitor, _, _ = pMonitorFromRect.Call(uintptr(unsafe.Pointer(suggested)), monitorNearest)
@@ -284,11 +270,30 @@ func position(hwnd windows.Handle, suggested *rect) {
 		monitor, _, _ = pMonitorFromWindow.Call(uintptr(hwnd), monitorNearest)
 	}
 	info := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
-	if monitor != 0 {
-		pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
+	if ok, _, _ := pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok == 0 {
+		return
 	}
-	x := info.Work.Right - width - margin
-	y := info.Work.Bottom - height - margin
+	frameWidth, frameHeight, err := nativeform.WindowSizeForClient(
+		1, 1, warningWindowStyle(), wsExTool|wsExTopmost|wsExNoActivate, uint32(dpiForWindow(hwnd)),
+	)
+	if err != nil {
+		return
+	}
+	margin := sc(16)
+	width := min(sc(348), max(1, info.Work.Right-info.Work.Left-(frameWidth-1)))
+	// Re-measure after constraining the client width, using the same insets
+	// as paint. Enlarged text can wrap without pushing the window off-screen.
+	bodyWidth := max(1, width-2*margin-sc(10))
+	bodyHeight := measureText(hwnd, body, sc(13), 400, bodyWidth)
+	height := max(sc(warningMinHeight), sc(52)+sc(12)+bodyHeight+sc(14))
+	width += frameWidth - 1
+	height += frameHeight - 1
+	target := nativeform.ConstrainRect(nativeform.Rect{
+		Left: info.Work.Right - width - margin, Top: info.Work.Bottom - height - margin,
+		Right: info.Work.Right - margin, Bottom: info.Work.Bottom - margin,
+	}, nativeform.Rect(info.Work))
+	x, y := target.Left, target.Top
+	width, height = target.Right-target.Left, target.Bottom-target.Top
 	pSetWindowPos.Call(uintptr(hwnd), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), swpNoActivate|swpShowWindow)
 	pUpdateWindow.Call(uintptr(hwnd))
 }

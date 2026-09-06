@@ -5,11 +5,24 @@ import (
 	"testing"
 )
 
-func TestWarningPhysicalBoundsUseOneDPITransform(t *testing.T) {
-	got := warningPhysicalBounds(warningControlLayout{x: warningBodyX, y: warningBodyY, width: warningBodyWidth, height: warningBodyHeight}, 1.5)
-	want := rect{Left: 24, Top: 24, Right: 561, Bottom: 138}
-	if got != want {
-		t.Fatalf("scaled warning bounds = %+v, want %+v", got, want)
+func TestWarningLayoutKeepsActionsVisibleInSmallWorkAreas(t *testing.T) {
+	for _, scale := range []float64{1, 1.5, 3.375, 4.5} {
+		for _, available := range [][2]int32{{1366, 680}, {800, 560}, {480, 600}} {
+			width := min(int32(warningWidth*scale+0.5), available[0])
+			height, controls := warningLayout(width, available[1], scale, int32(140*scale))
+			if height > available[1] || controls[0].Bottom > controls[1].Top {
+				t.Fatalf("body overlaps actions: scale=%g controls=%+v", scale, controls)
+			}
+			for _, b := range controls {
+				if b.Left < 0 || b.Top < 0 || b.Right > width || b.Bottom > height || b.Right <= b.Left || b.Bottom <= b.Top {
+					t.Fatalf("unreachable control at scale %g: %+v in %dx%d", scale, b, width, height)
+				}
+			}
+			x, y := warningOrigin(rect{Left: -available[0], Top: -available[1]}, width, height, int32(16*scale))
+			if x < -available[0] || y < -available[1] || x+width > 0 || y+height > 0 {
+				t.Fatal("warning outside negative-coordinate work area")
+			}
+		}
 	}
 }
 

@@ -56,11 +56,6 @@ type toolInfo struct {
 	Reserved uintptr
 }
 
-type warningControlLayout struct {
-	hwnd                windows.Handle
-	x, y, width, height int
-}
-
 const (
 	warningWidth        = 390
 	warningPadding      = 16
@@ -78,45 +73,49 @@ const (
 )
 
 const (
-	windowClass       = "IdleTriggerActionWarning"
-	idBody            = 101
-	idCancel          = 102
-	idExecute         = 103
-	wmDestroy         = 0x0002
-	wmClose           = 0x0010
-	wmPaint           = 0x000F
-	wmEraseBkgnd      = 0x0014
-	wmCommand         = 0x0111
-	wmCtlColorStatic  = 0x0138
-	wmCtlColorButton  = 0x0135
-	wmSysColorChange  = 0x0015
-	wmSettingChange   = 0x001A
-	wmThemeChanged    = 0x031A
-	wmDpiChanged      = 0x02E0
-	wmSetFont         = 0x0030
-	wsPopup           = 0x80000000
-	wsCaption         = 0x00C00000
-	wsSysMenu         = 0x00080000
-	wsChild           = 0x40000000
-	wsVisible         = 0x10000000
-	wsTabStop         = 0x00010000
-	wsClipChildren    = 0x02000000
-	bsPushButton      = 0x00000000
-	ssLeft            = 0x00000000
-	ssNotify          = 0x00000100
-	wsExTopmost       = 0x00000008
-	wsExComposited    = 0x02000000
-	swpNoActivate     = 0x0010
-	swpNoZOrder       = 0x0004
-	swpShowWindow     = 0x0040
-	monitorNearest    = 2
-	ttfIDIsHwnd       = 0x0001
-	ttfSubclass       = 0x0010
-	ttmAddTool        = 0x0432
-	ttmSetMaxTipWidth = 0x0418
-	ttsAlwaysTip      = 0x01
-	ttsNoPrefix       = 0x02
-	transparent       = 1
+	windowClass           = "IdleTriggerActionWarning"
+	idBody                = 101
+	idCancel              = 102
+	idExecute             = 103
+	wmDestroy             = 0x0002
+	wmClose               = 0x0010
+	wmPaint               = 0x000F
+	wmEraseBkgnd          = 0x0014
+	wmCommand             = 0x0111
+	wmCtlColorStatic      = 0x0138
+	wmCtlColorButton      = 0x0135
+	wmSysColorChange      = 0x0015
+	wmSettingChange       = 0x001A
+	wmThemeChanged        = 0x031A
+	wmDpiChanged          = 0x02E0
+	wmSetFont             = 0x0030
+	wsPopup               = 0x80000000
+	wsCaption             = 0x00C00000
+	wsSysMenu             = 0x00080000
+	wsChild               = 0x40000000
+	wsVisible             = 0x10000000
+	wsTabStop             = 0x00010000
+	wsClipChildren        = 0x02000000
+	wsVScroll             = 0x00200000
+	esMultiline           = 0x0004
+	esAutoVScroll         = 0x0040
+	esReadOnly            = 0x0800
+	emGetFirstVisibleLine = 0x00CE
+	emLineScroll          = 0x00B6
+	bsPushButton          = 0x00000000
+	wsExTopmost           = 0x00000008
+	wsExComposited        = 0x02000000
+	swpNoActivate         = 0x0010
+	swpNoZOrder           = 0x0004
+	swpShowWindow         = 0x0040
+	monitorNearest        = 2
+	ttfIDIsHwnd           = 0x0001
+	ttfSubclass           = 0x0010
+	ttmAddTool            = 0x0432
+	ttmSetMaxTipWidth     = 0x0418
+	ttsAlwaysTip          = 0x01
+	ttsNoPrefix           = 0x02
+	transparent           = 1
 )
 
 var (
@@ -128,9 +127,6 @@ var (
 	pRegisterClassEx     = user32.NewProc("RegisterClassExW")
 	pSetWindowText       = user32.NewProc("SetWindowTextW")
 	pSetWindowPos        = user32.NewProc("SetWindowPos")
-	pBeginDeferWindowPos = user32.NewProc("BeginDeferWindowPos")
-	pDeferWindowPos      = user32.NewProc("DeferWindowPos")
-	pEndDeferWindowPos   = user32.NewProc("EndDeferWindowPos")
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	pSetFocus            = user32.NewProc("SetFocus")
 	pShowWindow          = user32.NewProc("ShowWindow")
@@ -152,6 +148,7 @@ var (
 	pDeleteObject        = gdi32.NewProc("DeleteObject")
 	pSelectObject        = gdi32.NewProc("SelectObject")
 	pGetTextExtent       = gdi32.NewProc("GetTextExtentPoint32W")
+	pDrawText            = user32.NewProc("DrawTextW")
 
 	classOnce      sync.Once
 	classErr       error
@@ -175,6 +172,8 @@ var (
 	uiChinese      *bool
 	dpiScale       float64
 	textScale      float64
+	bodyWidth      int32
+	bodyText       string
 	wndCallback    = windows.NewCallback(wndProc)
 )
 
@@ -284,6 +283,8 @@ func ensureClass() error {
 }
 
 func buildControls(options Options) {
+	bodyWidth = 0
+	bodyText = options.Body(options.Seconds)
 	scale := windowScale()
 	chinese := font.SystemLanguageIsChinese()
 	languageMu.RLock()
@@ -292,7 +293,9 @@ func buildControls(options Options) {
 	}
 	languageMu.RUnlock()
 	uiFont, _ = font.NewForLayout(int32(14*scale+0.5), 400, chinese)
-	bodyControl = child("STATIC", fitWarningBody(options.Body(options.Seconds)), wsChild|wsVisible|ssLeft|ssNotify, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight, idBody)
+	bodyControl = child("EDIT", "", wsChild|wsVisible|wsTabStop|wsVScroll|esMultiline|esAutoVScroll|esReadOnly, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight, idBody)
+	pSendMessage.Call(uintptr(bodyControl), 0x00D3, 3, 0) // EM_SETMARGINS: no horizontal inset
+	setBodyText()
 	cancelControl = child("BUTTON", options.CancelText, wsChild|wsVisible|wsTabStop|bsPushButton, warningCancelX, warningButtonsY, warningButtonWidth, warningButtonHeight, idCancel)
 	executeControl = child("BUTTON", options.ExecuteText, wsChild|wsVisible|wsTabStop|bsPushButton, warningExecuteX, warningButtonsY, warningButtonWidth, warningButtonHeight, idExecute)
 	createTooltips()
@@ -336,12 +339,25 @@ func updateBody(seq uint64, remaining int) {
 	if active == 0 || currentSeq != seq || finished.Load() {
 		return
 	}
-	text, _ := windows.UTF16PtrFromString(fitWarningBody(current.Body(remaining)))
+	bodyText = current.Body(remaining)
+	setBodyText()
+}
+
+func setBodyText() {
+	// EDIT needs CRLF. Preserve reading position across countdown updates.
+	value := strings.ReplaceAll(strings.ReplaceAll(fitWarningBody(bodyText), "\r\n", "\n"), "\n", "\r\n")
+	text, _ := windows.UTF16PtrFromString(value)
+	first, _, _ := pSendMessage.Call(uintptr(bodyControl), emGetFirstVisibleLine, 0, 0)
 	pSetWindowText.Call(uintptr(bodyControl), uintptr(unsafe.Pointer(text)))
+	current, _, _ := pSendMessage.Call(uintptr(bodyControl), emGetFirstVisibleLine, 0, 0)
+	pSendMessage.Call(uintptr(bodyControl), emLineScroll, 0, first-current)
 }
 
 func fitWarningBody(value string) string {
 	maxWidth := int32(float64(warningBodyWidth)*windowScale() + 0.5)
+	if bodyWidth > 0 {
+		maxWidth = bodyWidth
+	}
 	return ellipsizeLeadingLine(value, maxWidth, measureWarningTextWidth)
 }
 
@@ -441,8 +457,8 @@ func hideNow() {
 func position(suggested *rect) {
 	scale := windowScale()
 	dpi := uint32(scale/max(1, textScale)*96 + 0.5)
-	width, height, err := nativeform.WindowSizeForClient(
-		int(float64(warningWidth)*scale+0.5), int(float64(warningHeight)*scale+0.5),
+	frameWidth, frameHeight, err := nativeform.WindowSizeForClient(
+		1, 1,
 		wsPopup|wsCaption|wsSysMenu|wsClipChildren, wsExTopmost|wsExComposited, dpi,
 	)
 	if err != nil {
@@ -456,16 +472,65 @@ func position(suggested *rect) {
 		monitor, _, _ = pMonitorFromWindow.Call(uintptr(active), monitorNearest)
 	}
 	info := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
-	if monitor != 0 {
-		pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
+	if ok, _, _ := pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok == 0 {
+		return
 	}
-	margin := int32(warningPadding * scale)
+	sc := func(v int) int32 { return int32(float64(v)*scale + 0.5) }
+	margin := sc(warningPadding)
+	availableWidth := max(1, info.Work.Right-info.Work.Left-(frameWidth-1))
+	availableHeight := max(1, info.Work.Bottom-info.Work.Top-(frameHeight-1))
+	clientWidth := min(sc(warningWidth), availableWidth)
+	pad := min(margin, clientWidth/8)
+	// Reserve scrollbar space when measuring, including at enlarged text sizes.
+	bodyWidth = max(1, clientWidth-2*pad-sc(nativeform.ScrollbarWidth+4))
+	text, _ := windows.UTF16PtrFromString(fitWarningBody(bodyText))
+	measured := rect{Right: bodyWidth}
+	if dc, _, _ := pGetDC.Call(uintptr(active)); dc != 0 {
+		old, _, _ := pSelectObject.Call(dc, uintptr(uiFont))
+		pDrawText.Call(dc, uintptr(unsafe.Pointer(text)), ^uintptr(0), uintptr(unsafe.Pointer(&measured)), 0x10|0x400|0x800) // word break, calculate, no prefix
+		pSelectObject.Call(dc, old)
+		pReleaseDC.Call(uintptr(active), dc)
+	}
+	clientHeight, controls := warningLayout(clientWidth, availableHeight, scale, max(sc(warningBodyHeight), measured.Bottom))
+	width, height := clientWidth+frameWidth-1, clientHeight+frameHeight-1
 	x, y := warningOrigin(info.Work, width, height, margin)
 	pSetWindowPos.Call(uintptr(active), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), swpNoActivate|swpShowWindow)
+	for index, control := range []windows.Handle{bodyControl, cancelControl, executeControl} {
+		b := controls[index]
+		pSetWindowPos.Call(uintptr(control), 0, uintptr(b.Left), uintptr(b.Top), uintptr(b.Right-b.Left), uintptr(b.Bottom-b.Top), swpNoZOrder|swpNoActivate)
+	}
+	setBodyText()
+}
+
+// Keep actions at the bottom of the bounded client, reserving body space
+// before allowing wrapping to grow the window. Narrow clients stack actions.
+func warningLayout(width, maxHeight int32, scale float64, bodyHeight int32) (int32, [3]rect) {
+	sc := func(v int) int32 { return int32(float64(v)*scale + 0.5) }
+	pad := min(sc(warningPadding), min(width/8, maxHeight/10))
+	gap := min(sc(warningButtonGap), pad)
+	buttonWidth := min(sc(warningButtonWidth), max(1, width-2*pad))
+	buttonHeight := min(sc(warningButtonHeight), max(1, (maxHeight-4*pad-gap)/3))
+	stack := 2*buttonWidth+gap > width-2*pad
+	actionsHeight := buttonHeight
+	if stack {
+		actionsHeight = 2*buttonHeight + gap
+	}
+	height := min(maxHeight, bodyHeight+3*pad+actionsHeight)
+	y := height - pad - actionsHeight
+	executeX := width - pad - buttonWidth
+	cancelX, executeY := executeX-buttonWidth-gap, y
+	if stack {
+		cancelX, executeY = executeX, y+buttonHeight+gap
+	}
+	return height, [3]rect{
+		{Left: pad, Top: pad, Right: width - pad, Bottom: max(pad+1, y-pad)},
+		{Left: cancelX, Top: y, Right: cancelX + buttonWidth, Bottom: y + buttonHeight},
+		{Left: executeX, Top: executeY, Right: executeX + buttonWidth, Bottom: executeY + buttonHeight},
+	}
 }
 
 func warningOrigin(work rect, width, height, margin int32) (int32, int32) {
-	return work.Right - width - margin, work.Bottom - height - margin
+	return max(work.Left, work.Right-width-margin), max(work.Top, work.Bottom-height-margin)
 }
 
 func windowScale() float64 {
@@ -522,49 +587,9 @@ func rebuildForDPI(scale float64, suggested *rect) bool {
 	}
 	oldFont := uiFont
 	uiFont = newFont
-	controls := []warningControlLayout{
-		{bodyControl, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight},
-		{cancelControl, warningCancelX, warningButtonsY, warningButtonWidth, warningButtonHeight},
-		{executeControl, warningExecuteX, warningButtonsY, warningButtonWidth, warningButtonHeight},
-	}
-	for _, control := range controls {
-		if control.hwnd != 0 {
-			pSendMessage.Call(uintptr(control.hwnd), wmSetFont, uintptr(uiFont), 0)
-		}
-	}
-	flags := uintptr(swpNoZOrder | swpNoActivate)
-	batch, _, _ := pBeginDeferWindowPos.Call(uintptr(len(controls)))
-	committed := batch != 0
-	if committed {
-		for _, control := range controls {
-			if control.hwnd == 0 {
-				continue
-			}
-			bounds := warningPhysicalBounds(control, scale)
-			next, _, _ := pDeferWindowPos.Call(
-				batch, uintptr(control.hwnd), 0,
-				uintptr(bounds.Left), uintptr(bounds.Top), uintptr(bounds.Right-bounds.Left), uintptr(bounds.Bottom-bounds.Top), flags,
-			)
-			if next == 0 {
-				committed = false
-				break
-			}
-			batch = next
-		}
-		if committed {
-			ended, _, _ := pEndDeferWindowPos.Call(batch)
-			committed = ended != 0
-		}
-	}
-	if !committed {
-		for _, control := range controls {
-			if control.hwnd != 0 {
-				bounds := warningPhysicalBounds(control, scale)
-				pSetWindowPos.Call(
-					uintptr(control.hwnd), 0,
-					uintptr(bounds.Left), uintptr(bounds.Top), uintptr(bounds.Right-bounds.Left), uintptr(bounds.Bottom-bounds.Top), flags,
-				)
-			}
+	for _, control := range []windows.Handle{bodyControl, cancelControl, executeControl} {
+		if control != 0 {
+			pSendMessage.Call(uintptr(control), wmSetFont, uintptr(uiFont), 0)
 		}
 	}
 	if tooltip != 0 {
@@ -576,14 +601,6 @@ func rebuildForDPI(scale float64, suggested *rect) bool {
 	}
 	position(suggested)
 	return true
-}
-
-func warningPhysicalBounds(control warningControlLayout, scale float64) rect {
-	left := int32(float64(control.x)*scale + 0.5)
-	top := int32(float64(control.y)*scale + 0.5)
-	width := int32(max(1, int(float64(control.width)*scale+0.5)))
-	height := int32(max(1, int(float64(control.height)*scale+0.5)))
-	return rect{Left: left, Top: top, Right: left + width, Bottom: top + height}
 }
 
 func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintptr {

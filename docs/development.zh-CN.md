@@ -178,8 +178,8 @@ devtools EXE、重新生成四张受版本管理的图片、校验 PNG 尺寸，
 .\tools\capture-screenshots.ps1 -OutputDirectory (Join-Path $env:TEMP "IdleTrigger-screenshots")
 ```
 
-如需视觉审查，可一次生成主界面、自动任务管理器、任务编辑器、进程选择器和设置三个
-页面的中英文、深浅色组合，共 28 张图片。默认输出到已忽略的 `dist/ui-review/`，不会
+如需视觉审查，可一次生成主界面、自动任务管理器、任务编辑器、进程选择器和设置四个
+页面的中英文、深浅色组合，共 32 张图片。默认输出到已忽略的 `dist/ui-review/`，不会
 覆盖 README 现有四张公开截图：
 
 ```powershell

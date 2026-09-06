@@ -211,8 +211,8 @@ temporary output directory:
 ```
 
 For visual review, generate the control panel, automatic-task manager, task
-editor, process picker, and all three Settings pages in both languages and
-themes. This writes 28 ignored images to `dist/ui-review/` by default and does
+editor, process picker, and all four Settings pages in both languages and
+themes. This writes 32 ignored images to `dist/ui-review/` by default and does
 not replace the four README images:
 
 ```powershell

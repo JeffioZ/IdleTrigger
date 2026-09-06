@@ -82,6 +82,7 @@ type choice struct {
 }
 
 type panel struct {
+	buildErr                                 error
 	textScale                                float64
 	hwnd                                     windows.Handle
 	state                                    State
