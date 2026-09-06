@@ -72,6 +72,23 @@ func Tray(size int, onDarkBackground bool) image.Image {
 // recover a one-pixel-class rim, and high-DPI frames progressively restore the
 // full Quiet Trigger proportions.
 func markSpec(size int) iconSpec {
+	spec := opticalSpec(size)
+	// Keep one clear pixel around small frames and a restrained 1/32 margin
+	// on larger frames. All resources use the same coverage, including the
+	// theme-aware window icons, so changing surfaces does not shrink the mark.
+	margin := math.Max(1/float64(size), 1.0/32)
+	scale := (1 - 2*margin) / (1 - 2*spec.margin)
+	spec.margin = margin
+	spec.radius *= scale
+	for i := range spec.bolt {
+		spec.bolt[i].x = 0.5 + (spec.bolt[i].x-0.5)*scale
+		spec.bolt[i].y = 0.5 + (spec.bolt[i].y-0.5)*scale
+	}
+	// Preserve the hand-tuned pixel stroke instead of thickening the rim.
+	return spec
+}
+
+func opticalSpec(size int) iconSpec {
 	switch size {
 	case 16:
 		return iconSpec{0.100, 0.190, 0, points(0.605, 0.175, 0.300, 0.545, 0.470, 0.545, 0.410, 0.815, 0.715, 0.420, 0.545, 0.420)}
