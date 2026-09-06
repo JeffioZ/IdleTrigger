@@ -11,6 +11,7 @@ import (
 )
 
 type ScrollbarOptions struct {
+	Horizontal bool
 	Parent     windows.Handle
 	Palette    colors.Palette
 	Background uint32
@@ -23,6 +24,7 @@ type ScrollbarOptions struct {
 // The owning list or popup retains keyboard/wheel behavior and supplies the
 // logical total/page/position values.
 type Scrollbar struct {
+	horizontal            bool
 	hwnd                  windows.Handle
 	palette               colors.Palette
 	background            uint32
@@ -135,7 +137,7 @@ func NewScrollbar(options ScrollbarOptions) (*Scrollbar, error) {
 	}
 	bar := &Scrollbar{
 		hwnd: windows.Handle(hwnd), palette: options.Palette, background: options.Background,
-		scale: options.Scale, onChange: options.OnChange,
+		scale: options.Scale, onChange: options.OnChange, horizontal: options.Horizontal,
 	}
 	scrollbarMu.Lock()
 	scrollbars[bar.hwnd] = bar
@@ -273,7 +275,16 @@ func (s *Scrollbar) positionFromThumb(y int32, height int32) int {
 func (s *Scrollbar) draw(target windows.Handle, bounds Rect) {
 	paint := func(dc windows.Handle, local Rect) {
 		fillRect(dc, local, s.background)
-		track, thumb := s.geometry(local.Bottom)
+		length := local.Bottom
+		if s.horizontal {
+			length = local.Right
+		}
+		track, thumb := s.geometry(length)
+		radius := (track.Right - track.Left) / 2
+		if s.horizontal {
+			track = transposeScrollRect(track)
+			thumb = transposeScrollRect(thumb)
+		}
 		trackColor := s.palette.DisabledSurface
 		thumbColor := s.palette.Border
 		if s.hovered {
@@ -285,8 +296,8 @@ func (s *Scrollbar) draw(target windows.Handle, bounds Rect) {
 		if s.pressed || s.dragging {
 			thumbColor = s.palette.AccentPressed
 		}
-		DrawSurface(dc, track, s.palette, s.background, trackColor, trackColor, (track.Right-track.Left)/2)
-		DrawSurface(dc, thumb, s.palette, s.background, thumbColor, thumbColor, (thumb.Right-thumb.Left)/2)
+		DrawSurface(dc, track, s.palette, s.background, trackColor, trackColor, radius)
+		DrawSurface(dc, thumb, s.palette, s.background, thumbColor, thumbColor, radius)
 	}
 	if !DrawBuffered(target, bounds, paint) {
 		paint(target, bounds)
@@ -302,6 +313,9 @@ func scrollbarWndProc(hwnd windows.Handle, message uint32, wParam, lParam uintpt
 		return result
 	}
 	point := scrollbarPoint{X: int32(int16(lParam)), Y: int32(int16(lParam >> 16))}
+	if s.horizontal {
+		point.X, point.Y = point.Y, point.X
+	}
 	switch message {
 	case sbWMPaint:
 		var paint scrollbarPaint
@@ -323,9 +337,9 @@ func scrollbarWndProc(hwnd windows.Handle, message uint32, wParam, lParam uintpt
 		var client scrollbarRect
 		sbGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&client)))
 		if s.dragging {
-			s.setPosition(s.positionFromThumb(point.Y, client.Bottom))
+			s.setPosition(s.positionFromThumb(point.Y, s.trackLength(client)))
 		} else {
-			_, thumb := s.geometry(client.Bottom)
+			_, thumb := s.geometry(s.trackLength(client))
 			hovered := true
 			thumbHovered := point.Y >= thumb.Top && point.Y < thumb.Bottom
 			if hovered != s.hovered || thumbHovered != s.thumbHovered {
@@ -353,7 +367,7 @@ func scrollbarWndProc(hwnd windows.Handle, message uint32, wParam, lParam uintpt
 	case sbWMLButtonDown:
 		var client scrollbarRect
 		sbGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&client)))
-		_, thumb := s.geometry(client.Bottom)
+		_, thumb := s.geometry(s.trackLength(client))
 		s.pressed = true
 		if point.Y >= thumb.Top && point.Y < thumb.Bottom {
 			s.dragging = true
@@ -383,4 +397,14 @@ func scrollbarWndProc(hwnd windows.Handle, message uint32, wParam, lParam uintpt
 	}
 	result, _, _ := sbDefWindowProc.Call(uintptr(hwnd), uintptr(message), wParam, lParam)
 	return result
+}
+
+func transposeScrollRect(r Rect) Rect {
+	return Rect{Left: r.Top, Top: r.Left, Right: r.Bottom, Bottom: r.Right}
+}
+func (s *Scrollbar) trackLength(r scrollbarRect) int32 {
+	if s.horizontal {
+		return r.Right
+	}
+	return r.Bottom
 }

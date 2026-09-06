@@ -93,6 +93,18 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		pSetBkColor.Call(wParam, uintptr(background))
 		return uintptr(brush)
 	case wmSettingChange, wmSysColorChange, wmThemeChanged:
+		if message == wmSettingChange && p.font != 0 {
+			next := font.TextScaleFactor()
+			if next != p.textScale {
+				previous := p.textScale
+				p.textScale = next
+				if !p.rebuildForDPI() {
+					p.textScale = previous
+				} else {
+					p.position(nil)
+				}
+			}
+		}
 		p.applyTheme()
 		return 0
 	case wmSize:
@@ -103,6 +115,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		if dpi == 0 {
 			dpi = 96
 		}
+		previousScale := p.dpiScale
 		p.dpiScale = float64(dpi) / 96
 		var suggested *nativeform.Rect
 		if lParam != 0 {
@@ -111,13 +124,15 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		}
 		if p.rebuildForDPI() {
 			p.position(suggested)
+		} else {
+			p.dpiScale = previousScale
 		}
 		return 0
 	case wmDestroy:
 		p.closeChoice(false)
-		if p.contentScroll != nil {
-			p.contentScroll.Close()
-			p.contentScroll = nil
+		if p.viewport != nil {
+			p.viewport.Close()
+			p.viewport = nil
 		}
 		p.surfaces.Close()
 		p.tooltip = 0
@@ -151,7 +166,7 @@ func (p *panel) controlID(hwnd windows.Handle) uint16 {
 func isSectionLabel(id uint16) bool {
 	switch id {
 	case idTitle, idPowerTitle, idIdleTitle, idThemeScheduleTitle,
-		idThemeBehaviorTitle, idAppGeneralTitle, idAppAboutTitle:
+		idThemeBehaviorTitle, idAppGeneralTitle, idAppAboutTitle, idNotificationsTitle, idNotificationsBehavior:
 		return true
 	default:
 		return false
@@ -159,7 +174,7 @@ func isSectionLabel(id uint16) bool {
 }
 
 func isMutedLabel(id uint16) bool {
-	return id == idDescription || id == idVersion || id == idPowerHint || id == idThemeHint || id == idThemeLocationStatus || id == idValidation
+	return id == idDescription || id == idVersion || id == idPowerHint || id == idThemeHint || id == idThemeLocationStatus || id == idValidation || id == idNotificationsHint
 }
 
 func (p *panel) drawOwnerItem(item *drawItem) bool {
@@ -201,8 +216,8 @@ func (p *panel) drawOwnerItemDirect(item *drawItem) bool {
 		nativeform.DrawCheckbox(item.HDC, bounds, p.font, p.labels[id], p.palette, p.palette.WindowBackground, state, p.scale())
 		return true
 	}
-	if id == idTabPower || id == idTabTheme || id == idTabApp {
-		state.Active = id == []uint16{idTabPower, idTabTheme, idTabApp}[p.page]
+	if id == idTabPower || id == idTabTheme || id == idTabApp || id == idTabNotifications {
+		state.Active = id == []uint16{idTabPower, idTabTheme, idTabApp, idTabNotifications}[p.page]
 	}
 	if id == idSave {
 		state.Active = true
@@ -254,10 +269,11 @@ func (p *panel) applyTheme() {
 	}
 	p.surfaces.SetCueTheme(p.palette.MutedText)
 	if p.tooltip != 0 {
-		nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+		pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
+		nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 	}
-	if p.contentScroll != nil {
-		p.contentScroll.SetTheme(p.palette, p.palette.WindowBackground)
+	if p.viewport != nil {
+		p.syncViewport()
 	}
 	pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
 }
@@ -277,9 +293,9 @@ func (p *panel) releaseBrushes() {
 }
 
 func (p *panel) rebuildForDPI() bool {
-	newFont, _ := font.New(int32(14*p.scale()+0.5), 400, p.state.Chinese)
-	newSection, _ := font.New(int32(14*p.scale()+0.5), 600, p.state.Chinese)
-	newTitle, _ := font.New(int32(17*p.scale()+0.5), 600, p.state.Chinese)
+	newFont, _ := font.NewForLayout(int32(14*p.scale()+0.5), 400, p.state.Chinese)
+	newSection, _ := font.NewForLayout(int32(14*p.scale()+0.5), 600, p.state.Chinese)
+	newTitle, _ := font.NewForLayout(int32(17*p.scale()+0.5), 600, p.state.Chinese)
 	if newFont == 0 || newSection == 0 || newTitle == 0 {
 		if newFont != 0 {
 			pDeleteObject.Call(uintptr(newFont))
@@ -307,6 +323,7 @@ func (p *panel) rebuildForDPI() bool {
 	}
 	p.surfaces.SetScale(p.scale())
 	if p.tooltip != 0 {
+		pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 		pSendMessage.Call(uintptr(p.tooltip), ttmSetMaxTipWidth, 0, uintptr(int(380*p.scale())))
 	}
 	margin := int(6*p.scale() + 0.5)

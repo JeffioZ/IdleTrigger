@@ -100,12 +100,15 @@ func darkControlTheme(className string) string {
 	return "DarkMode_Explorer"
 }
 
-// ApplyTooltip themes both the native tooltip frame and its explicit colors.
-func ApplyTooltip(hwnd windows.Handle, dark bool, palette colors.Palette) {
+// ApplyTooltip themes the tooltip and borrows its owner's font; it does not own the HFONT.
+func ApplyTooltip(hwnd windows.Handle, dark bool, palette colors.Palette, font windows.Handle) {
 	if hwnd == 0 {
 		return
 	}
 	ApplyControl(hwnd, dark)
+	if font != 0 {
+		pSendMessage.Call(uintptr(hwnd), 0x0030, uintptr(font), 0) // WM_SETFONT; borrowed from owner.
+	}
 	pSendMessage.Call(uintptr(hwnd), ttmSetTipBkColor, uintptr(palette.TooltipBackground), 0)
 	pSendMessage.Call(uintptr(hwnd), ttmSetTipTextColor, uintptr(palette.TooltipText), 0)
 }

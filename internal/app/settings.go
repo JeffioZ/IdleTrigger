@@ -38,7 +38,12 @@ func (s *runtimeState) settingsPanelState() settingspanel.State {
 		ThemeMode:           s.cfg.ThemeMode, ThemeLightTime: s.cfg.ThemeLightTime, ThemeDarkTime: s.cfg.ThemeDarkTime,
 		ThemeIPLocationEnabled: s.cfg.ThemeIPLocationEnabled, ThemeLocationStatus: s.themeLocationStatusText(), ThemeDarkOnBattery: s.cfg.ThemeDarkOnBattery,
 		ThemeSkipFullscreen: s.cfg.ThemeSkipFullscreen, Language: s.cfg.Language,
-		HotkeysEnabled: s.cfg.HotkeysEnabled, AutostartEnabled: s.cfg.AutostartEnabled, LoggingEnabled: s.cfg.LoggingEnabled,
+		LockKeysEnabled:        s.cfg.LockKeysEnabled,
+		LockKeysCapsEnabled:    s.cfg.LockKeysCapsEnabled,
+		LockKeysNumEnabled:     s.cfg.LockKeysNumEnabled,
+		LockKeysScrollEnabled:  s.cfg.LockKeysScrollEnabled,
+		LockKeysSkipFullscreen: s.cfg.LockKeysSkipFullscreen,
+		HotkeysEnabled:         s.cfg.HotkeysEnabled, AutostartEnabled: s.cfg.AutostartEnabled, LoggingEnabled: s.cfg.LoggingEnabled,
 		Version: version.Value, Revision: s.cfg.SourceRevision,
 		Chinese: i18n.ResolveLanguage(s.lang) == "zh-CN", Owner: controlpanel.WindowHandle(),
 	}
@@ -70,6 +75,11 @@ func (s *runtimeState) saveSettings(request settingspanel.SaveRequest) settingsp
 	candidate.ThemeDarkOnBattery = request.ThemeDarkOnBattery
 	candidate.ThemeSkipFullscreen = request.ThemeSkipFullscreen
 	candidate.Language = request.Language
+	candidate.LockKeysEnabled = request.LockKeysEnabled
+	candidate.LockKeysCapsEnabled = request.LockKeysCapsEnabled
+	candidate.LockKeysNumEnabled = request.LockKeysNumEnabled
+	candidate.LockKeysScrollEnabled = request.LockKeysScrollEnabled
+	candidate.LockKeysSkipFullscreen = request.LockKeysSkipFullscreen
 	candidate.HotkeysEnabled = request.HotkeysEnabled
 	candidate.AutostartEnabled = request.AutostartEnabled
 	candidate.LoggingEnabled = request.LoggingEnabled

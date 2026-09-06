@@ -60,11 +60,19 @@ var (
 	pUserLocaleName     = kernel32.NewProc("GetUserDefaultLocaleName")
 )
 
-// New creates a font at the requested logical point-like height. It chooses
-// an installed system UI family for the current UI language and always has a
+// New takes a DPI-scaled pixel height and applies the accessibility text scale.
+// It chooses an installed system UI family for the current UI language with a
 // system-message-font fallback. Callers own the returned HFONT.
 func New(size, weight int32, chinese bool) (windows.Handle, Choice) {
-	size = scaleRequestedSize(size)
+	return NewForLayout(scaleRequestedSize(size), weight, chinese)
+}
+
+// NewForLayout accepts a physical height whose layout already includes the
+// accessibility text scale. Do not apply that scale twice.
+func NewForLayout(size, weight int32, chinese bool) (windows.Handle, Choice) {
+	if chinese && weight == 600 {
+		weight = 700 // YaHei UI ships Regular/Light/Bold, not Semibold.
+	}
 	choice := resolve(chinese)
 	for _, face := range candidates(chinese) {
 		if font := createNamed(size, weight, face); font != 0 && sameFace(fontFace(font), face) {

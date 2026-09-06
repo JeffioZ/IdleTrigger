@@ -1,6 +1,7 @@
 package automationpanel
 
 import (
+	"github.com/JeffioZ/idletrigger/internal/ui/font"
 	"strings"
 	"time"
 	"unsafe"
@@ -110,6 +111,16 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		pSetBkColor.Call(wParam, uintptr(backgroundColor))
 		return uintptr(brush)
 	case wmSettingChange, wmSysColorChange, wmThemeChanged:
+		if message == wmSettingChange && p.font != 0 {
+			next := font.TextScaleFactor()
+			if next != p.textScale {
+				previous := p.textScale
+				p.textScale = next
+				if !p.rebuildForDPI() {
+					p.textScale = previous
+				}
+			}
+		}
 		p.applyTheme()
 		return 0
 	case wmDpiChanged:
@@ -119,6 +130,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 			if dpi == 0 {
 				dpi = 96
 			}
+			previousScale := p.dpiScale
 			p.dpiScale = float64(dpi) / 96
 			if lParam != 0 {
 				suggested := nativeform.Rect(*(*rect)(nativeform.MessagePointer(lParam)))
@@ -127,6 +139,9 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 			if p.rebuildForDPI() {
 				scale := p.scale()
 				p.icons.Apply(p.hwnd, p.themeDark, int(32*scale+0.5), int(16*scale+0.5), true)
+			} else {
+				p.dpiScale = previousScale
+				p.pendingSuggested = nil
 			}
 			committed := false
 			for range 3 {

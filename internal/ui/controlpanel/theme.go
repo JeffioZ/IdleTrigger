@@ -47,6 +47,7 @@ func (p *panel) refreshThemeWithForce(invalidate, force bool) {
 		applyPanelControlTheme(control, dark)
 	}
 	p.applyTooltipTheme(dark)
+	p.syncViewport()
 	if transition != nil {
 		// Mark the parent background for erase before PresentFrame synchronously
 		// paints every child. The compositor stays cloaked until the complete new
@@ -76,6 +77,7 @@ func (p *panel) applyTooltipTheme(dark bool) {
 	} else {
 		pSetWindowTheme.Call(uintptr(p.tooltip), 0, 0)
 	}
+	pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 	pSendMessage.Call(uintptr(p.tooltip), ttmSetTipBkColor, uintptr(p.palette.TooltipBackground), 0)
 	pSendMessage.Call(uintptr(p.tooltip), ttmSetTipTextColor, uintptr(p.palette.TooltipText), 0)
 }

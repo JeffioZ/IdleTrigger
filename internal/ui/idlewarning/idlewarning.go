@@ -334,12 +334,10 @@ func measureText(hwnd windows.Handle, text string, size, weight, maxWidth int32)
 	return bounds.Bottom - bounds.Top
 }
 
+var textScale float64
+
 func scaleForWindow(hwnd windows.Handle, v int32) int32 {
-	dpi, _, _ := pGetDpiForWindow.Call(uintptr(hwnd))
-	if dpi == 0 {
-		return v
-	}
-	return int32(float64(v)*float64(dpi)/96 + 0.5)
+	return int32(float64(v)*float64(dpiForWindow(hwnd))/96*max(1, textScale) + 0.5)
 }
 
 func dpiForWindow(hwnd windows.Handle) uintptr {
@@ -361,8 +359,9 @@ func rebuildFonts(hwnd windows.Handle) {
 		chinese = *uiChinese
 	}
 	languageMu.RUnlock()
-	newTitle, choice := font.New(scaledFontSize(hwnd, 15), 600, chinese)
-	newBody, _ := font.New(scaledFontSize(hwnd, 13), 400, chinese)
+	nextScale := font.TextScaleFactor()
+	newTitle, choice := font.NewForLayout(int32(float64(scaledFontSize(hwnd, 15))*nextScale+0.5), 600, chinese)
+	newBody, _ := font.NewForLayout(int32(float64(scaledFontSize(hwnd, 13))*nextScale+0.5), 400, chinese)
 	if newTitle == 0 || newBody == 0 {
 		if newTitle != 0 {
 			pDeleteObject.Call(uintptr(newTitle))
@@ -372,6 +371,7 @@ func rebuildFonts(hwnd windows.Handle) {
 		}
 		return
 	}
+	textScale = nextScale
 	oldTitle, oldBody := titleFont, bodyFont
 	titleFont, bodyFont, fontChoice = newTitle, newBody, choice
 	for _, font := range []windows.Handle{oldTitle, oldBody} {
@@ -384,6 +384,10 @@ func rebuildFonts(hwnd windows.Handle) {
 func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintptr {
 	switch message {
 	case wmSettingChange, wmSysColorChange, wmThemeChanged:
+		if message == wmSettingChange && bodyFont != 0 && font.TextScaleFactor() != textScale {
+			rebuildFonts(hwnd)
+			position(hwnd, nil)
+		}
 		applyFrameTheme(hwnd, theme.Current() == theme.ModeDark)
 		pInvalidateRect.Call(uintptr(hwnd), 0, 0)
 		return 0

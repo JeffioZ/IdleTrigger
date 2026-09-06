@@ -8,6 +8,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/i18n"
 	mylog "github.com/JeffioZ/idletrigger/internal/logging"
 	"github.com/JeffioZ/idletrigger/internal/ui/idlewarning"
+	"github.com/JeffioZ/idletrigger/internal/ui/locknotify"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 	"time"
 )
@@ -137,6 +138,11 @@ func (s *runtimeState) stopMonitor() {
 }
 
 func (s *runtimeState) reconcileRuntime() {
+	locknotify.Configure(locknotify.Options{
+		Enabled:        s.cfg.LockKeysEnabled,
+		Keys:           [3]bool{s.cfg.LockKeysCapsEnabled, s.cfg.LockKeysNumEnabled, s.cfg.LockKeysScrollEnabled},
+		SkipFullscreen: s.cfg.LockKeysSkipFullscreen,
+	}, s.lang)
 	defer s.refreshControlPanelPowerStatus()
 	s.syncBatteryLoop()
 	wantsNoSleep := s.noSleepRequested()

@@ -174,6 +174,7 @@ var (
 	languageMu     sync.RWMutex
 	uiChinese      *bool
 	dpiScale       float64
+	textScale      float64
 	wndCallback    = windows.NewCallback(wndProc)
 )
 
@@ -253,6 +254,7 @@ func showNow(options Options, seq uint64) {
 	}
 	active = windows.Handle(hwnd)
 	dpiScale = scaleFromWindow(active)
+	textScale = font.TextScaleFactor()
 	current, currentSeq = options, seq
 	finished.Store(false)
 	buildControls(options)
@@ -289,7 +291,7 @@ func buildControls(options Options) {
 		chinese = *uiChinese
 	}
 	languageMu.RUnlock()
-	uiFont, _ = font.New(int32(14*scale+0.5), 400, chinese)
+	uiFont, _ = font.NewForLayout(int32(14*scale+0.5), 400, chinese)
 	bodyControl = child("STATIC", fitWarningBody(options.Body(options.Seconds)), wsChild|wsVisible|ssLeft|ssNotify, warningBodyX, warningBodyY, warningBodyWidth, warningBodyHeight, idBody)
 	cancelControl = child("BUTTON", options.CancelText, wsChild|wsVisible|wsTabStop|bsPushButton, warningCancelX, warningButtonsY, warningButtonWidth, warningButtonHeight, idCancel)
 	executeControl = child("BUTTON", options.ExecuteText, wsChild|wsVisible|wsTabStop|bsPushButton, warningExecuteX, warningButtonsY, warningButtonWidth, warningButtonHeight, idExecute)
@@ -314,7 +316,7 @@ func createTooltips() {
 	class, _ := windows.UTF16PtrFromString("tooltips_class32")
 	hwnd, _, _ := pCreateWindowEx.Call(0, uintptr(unsafe.Pointer(class)), 0, wsPopup|ttsAlwaysTip|ttsNoPrefix, 0, 0, 0, 0, uintptr(active), 0, 0, 0)
 	tooltip = windows.Handle(hwnd)
-	nativeform.ApplyTooltip(tooltip, themeDark, uiPalette)
+	nativeform.ApplyTooltip(tooltip, themeDark, uiPalette, uiFont)
 	pSendMessage.Call(hwnd, ttmSetMaxTipWidth, 0, uintptr(int(320*windowScale())))
 	addTooltip(cancelControl, current.CancelText)
 	addTooltip(executeControl, current.ExecuteText)
@@ -438,7 +440,7 @@ func hideNow() {
 
 func position(suggested *rect) {
 	scale := windowScale()
-	dpi := uint32(scale*96 + 0.5)
+	dpi := uint32(scale/max(1, textScale)*96 + 0.5)
 	width, height, err := nativeform.WindowSizeForClient(
 		int(float64(warningWidth)*scale+0.5), int(float64(warningHeight)*scale+0.5),
 		wsPopup|wsCaption|wsSysMenu|wsClipChildren, wsExTopmost|wsExComposited, dpi,
@@ -468,9 +470,9 @@ func warningOrigin(work rect, width, height, margin int32) (int32, int32) {
 
 func windowScale() float64 {
 	if dpiScale > 0 {
-		return dpiScale
+		return dpiScale * max(1, textScale)
 	}
-	return scaleFromWindow(active)
+	return scaleFromWindow(active) * max(1, textScale)
 }
 
 func scaleFromWindow(hwnd windows.Handle) float64 {
@@ -501,7 +503,7 @@ func applyTheme() {
 			pInvalidateRect.Call(uintptr(control), 0, 1)
 		}
 	}
-	nativeform.ApplyTooltip(tooltip, themeDark, uiPalette)
+	nativeform.ApplyTooltip(tooltip, themeDark, uiPalette, uiFont)
 	if active != 0 {
 		pInvalidateRect.Call(uintptr(active), 0, 1)
 	}
@@ -514,7 +516,7 @@ func rebuildForDPI(scale float64, suggested *rect) bool {
 		chinese = *uiChinese
 	}
 	languageMu.RUnlock()
-	newFont, _ := font.New(int32(14*scale+0.5), 400, chinese)
+	newFont, _ := font.NewForLayout(int32(14*scale+0.5), 400, chinese)
 	if newFont == 0 {
 		return false
 	}
@@ -566,6 +568,7 @@ func rebuildForDPI(scale float64, suggested *rect) bool {
 		}
 	}
 	if tooltip != 0 {
+		pSendMessage.Call(uintptr(tooltip), wmSetFont, uintptr(uiFont), 0)
 		pSendMessage.Call(uintptr(tooltip), ttmSetMaxTipWidth, 0, uintptr(int(320*scale)))
 	}
 	if oldFont != 0 {
@@ -609,6 +612,16 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		pSetBkMode.Call(wParam, transparent)
 		return uintptr(background)
 	case wmSettingChange, wmSysColorChange, wmThemeChanged:
+		if message == wmSettingChange && uiFont != 0 {
+			next := font.TextScaleFactor()
+			if next != textScale {
+				previous := textScale
+				textScale = next
+				if !rebuildForDPI(windowScale(), nil) {
+					textScale = previous
+				}
+			}
+		}
 		applyTheme()
 		return 0
 	case wmDpiChanged:
@@ -624,7 +637,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 			value := *(*rect)(nativeform.MessagePointer(lParam))
 			suggested = &value
 		}
-		if rebuildForDPI(dpiScale, suggested) {
+		if rebuildForDPI(windowScale(), suggested) {
 			windowIcons.Apply(active, themeDark, int(32*dpiScale+0.5), int(16*dpiScale+0.5), true)
 		} else {
 			dpiScale = oldScale

@@ -158,7 +158,7 @@ func (p *panel) addTooltipValue(id uint16, value string) {
 		}
 		p.tooltip = windows.Handle(tip)
 		pSendMessage.Call(tip, ttmSetMaxTipWidth, 0, uintptr(int(360*p.scale())))
-		nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+		nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 	}
 	info := toolInfo{Size: uint32(unsafe.Sizeof(toolInfo{})), Flags: ttfIDIsHwnd | ttfSubclass, Hwnd: p.hwnd, ID: uintptr(control)}
 	pSendMessage.Call(uintptr(p.tooltip), ttmDelTool, 0, uintptr(unsafe.Pointer(&info)))
@@ -293,12 +293,12 @@ func (p *panel) enable(id uint16, value bool) {
 func (p *panel) t(key string) string { return p.text(key) }
 func (p *panel) scale() float64 {
 	if p.captureScale > 0 {
-		return p.captureScale
+		return p.captureScale * max(1, p.textScale)
 	}
 	if p.dpiScale > 0 {
-		return p.dpiScale
+		return p.dpiScale * max(1, p.textScale)
 	}
-	return p.windowScale()
+	return p.windowScale() * max(1, p.textScale)
 }
 func (p *panel) windowScale() float64 {
 	if p.hwnd == 0 {
@@ -331,7 +331,7 @@ func (p *panel) resizeInWorkArea(width, height int, workArea *nativeform.Rect) {
 		Window: p.hwnd, Anchor: anchor, Owner: p.state.Owner,
 		Style: p.style, ExStyle: p.exStyle,
 		ClientWidth: int(float64(width)*scale + 0.5), ClientHeight: int(float64(height)*scale + 0.5),
-		DPI: uint32(scale*96 + 0.5), Suggested: suggested, WorkArea: workArea,
+		DPI: uint32(scale/max(1, p.textScale)*96 + 0.5), Suggested: suggested, WorkArea: workArea,
 	})
 	if err != nil {
 		p.layoutErr = err
@@ -436,8 +436,8 @@ func (p *panel) scrollWheel(wParam uintptr) bool {
 
 func (p *panel) rebuildForDPI() bool {
 	scale := p.scale()
-	newFont, _ := font.New(int32(14*scale+0.5), 400, p.state.Chinese)
-	newSectionFont, _ := font.New(int32(14*scale+0.5), 600, p.state.Chinese)
+	newFont, _ := font.NewForLayout(int32(14*scale+0.5), 400, p.state.Chinese)
+	newSectionFont, _ := font.NewForLayout(int32(14*scale+0.5), 600, p.state.Chinese)
 	if newFont == 0 || newSectionFont == 0 {
 		if newFont != 0 {
 			pDeleteObject.Call(uintptr(newFont))
@@ -477,6 +477,7 @@ func (p *panel) rebuildForDPI() bool {
 		}
 	}
 	if p.tooltip != 0 {
+		pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 		pSendMessage.Call(uintptr(p.tooltip), ttmSetMaxTipWidth, 0, uintptr(int(360*scale)))
 	}
 
@@ -535,7 +536,7 @@ func (p *panel) applyTheme() {
 		nativeform.ApplyControl(control, p.themeDark)
 		pInvalidateRect.Call(uintptr(control), 0, 0)
 	}
-	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 	if p.managerScroll != nil {
 		p.managerScroll.SetTheme(p.palette, p.palette.Surface)
 		p.managerScroll.Sync()

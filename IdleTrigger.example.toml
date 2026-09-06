@@ -1,7 +1,7 @@
 # IdleTrigger 配置示例 / Configuration Example
 # 常用设置可直接在应用界面中完成；如需手工维护，复制为 IdleTrigger.toml 并放在 EXE 同目录
 # Common settings are available in the app UI; for manual maintenance, copy this file to IdleTrigger.toml beside the EXE
-# config_template_version = 14
+# config_template_version = 16
 
 # -- 保持唤醒 / Stay Awake --
 # 手动启用保持唤醒，阻止系统自动睡眠 / Manually keep the system awake and prevent automatic sleep
@@ -52,6 +52,14 @@ theme_skip_fullscreen = true
 # -- 设置 / Settings --
 # 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake
 hotkeys_enabled = false
+# 锁定键状态变化时显示短暂提示 / Briefly show Caps Lock, Num Lock and Scroll Lock state changes
+lock_keys_enabled = false
+# 分别选择需要提示的锁定键 / Select which lock keys show notifications
+lock_keys_caps_enabled = true
+lock_keys_num_enabled = true
+lock_keys_scroll_enabled = true
+# 全屏或演示期间隐藏提示，结束后不补弹 / Hide during fullscreen or presentations; do not replay skipped notices
+lock_keys_skip_fullscreen = true
 # 将调试日志写入 EXE 同目录的 IdleTrigger.log；每行带启动会话标识 / Write debug logs to IdleTrigger.log next to the EXE; each line includes a startup session ID
 logging_enabled = false
 # 界面语言："auto" 跟随系统，"en" 英文，"zh-CN" 简体中文 / UI language: "auto" follows OS, "en" English, "zh-CN" Simplified Chinese

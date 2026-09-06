@@ -22,6 +22,7 @@ func (p *panel) createTooltip() {
 	p.tooltip = windows.Handle(hwnd)
 	// Wrap long tooltip text instead of letting the native control choose an
 	// overflowing single-line width.
+	pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 	pSendMessage.Call(hwnd, ttmSetMaxTipWidth, 0, uintptr(p.sc(360)))
 }
 

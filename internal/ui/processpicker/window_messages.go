@@ -2,6 +2,7 @@ package processpicker
 
 import (
 	"fmt"
+	"github.com/JeffioZ/idletrigger/internal/ui/font"
 	"time"
 	"unicode/utf16"
 	"unsafe"
@@ -196,12 +197,12 @@ func (p *picker) controlText(id uint16) string {
 
 func (p *picker) scale() float64 {
 	if p.captureScale > 0 {
-		return p.captureScale
+		return p.captureScale * max(1, p.textScale)
 	}
 	if p.dpiScale > 0 {
-		return p.dpiScale
+		return p.dpiScale * max(1, p.textScale)
 	}
-	return p.windowScale()
+	return p.windowScale() * max(1, p.textScale)
 }
 
 func (p *picker) windowScale() float64 {
@@ -227,7 +228,7 @@ func (p *picker) positionInWorkArea(workArea *nativeform.Rect) {
 		Window: p.hwnd, Anchor: anchor, Owner: p.options.Owner,
 		Style: p.style, ExStyle: p.exStyle,
 		ClientWidth: int(windowWidth*scale + 0.5), ClientHeight: int(windowHeight*scale + 0.5),
-		DPI: uint32(scale*96 + 0.5), Suggested: suggested, WorkArea: workArea,
+		DPI: uint32(scale/max(1, p.textScale)*96 + 0.5), Suggested: suggested, WorkArea: workArea,
 	})
 	if err != nil {
 		p.layoutErr = err
@@ -414,7 +415,7 @@ func (p *picker) applyTheme() {
 		p.contentScroll.SetTheme(p.palette, p.palette.WindowBackground)
 	}
 	p.surfaces.SetCueTheme(p.palette.MutedText)
-	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 	if p.hwnd != 0 {
 		pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
 	}
@@ -477,6 +478,7 @@ func (p *picker) rebuildForDPI() bool {
 	}
 	p.surfaces.SetScale(scale)
 	if p.tooltip != 0 {
+		pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 		pSendMessage.Call(uintptr(p.tooltip), ttmSetMaxTipWidth, 0, uintptr(int(360*scale)))
 	}
 	if oldFont != 0 {
@@ -566,6 +568,16 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		pSetBkColor.Call(wParam, uintptr(p.palette.Surface))
 		return uintptr(p.surfaceBrush)
 	case wmSettingChange, wmSysColorChange, wmThemeChanged:
+		if message == wmSettingChange && p.font != 0 {
+			next := font.TextScaleFactor()
+			if next != p.textScale {
+				previous := p.textScale
+				p.textScale = next
+				if !p.rebuildForDPI() {
+					p.textScale = previous
+				}
+			}
+		}
 		p.applyTheme()
 		return 0
 	case wmDpiChanged:
@@ -574,6 +586,7 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		if dpi == 0 {
 			dpi = 96
 		}
+		previousScale := p.dpiScale
 		p.dpiScale = float64(dpi) / 96
 		if lParam != 0 {
 			suggested := nativeform.Rect(*(*rect)(nativeform.MessagePointer(lParam)))
@@ -582,6 +595,9 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 		if p.rebuildForDPI() {
 			scale := p.scale()
 			p.icons.Apply(p.hwnd, p.themeDark, int(32*scale+0.5), int(16*scale+0.5), true)
+		} else {
+			p.dpiScale = previousScale
+			p.pendingSuggested = nil
 		}
 		if !p.commitDPIFrame(&transition) {
 			p.destroy()

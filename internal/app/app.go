@@ -22,6 +22,7 @@ import (
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/ipc"
 	"github.com/JeffioZ/idletrigger/internal/platform/windows/powerstate"
 	"github.com/JeffioZ/idletrigger/internal/ui/controlpanel"
+	"github.com/JeffioZ/idletrigger/internal/ui/locknotify"
 	"github.com/JeffioZ/idletrigger/internal/ui/trayicon"
 	"golang.org/x/sys/windows"
 )
@@ -223,6 +224,7 @@ func Run(cfg config.Config, cbs Callbacks) {
 	}
 
 	onExit := func() {
+		locknotify.Close()
 		s.exiting.Store(true)
 		hideAutomationUI()
 		lifecycleMu.Lock()

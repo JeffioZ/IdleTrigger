@@ -303,7 +303,9 @@ type windowSize struct {
 }
 
 type panel struct {
-	hwnd windows.Handle
+	viewport  *nativeform.Viewport
+	textScale float64
+	hwnd      windows.Handle
 	// panelResources owns every GDI and icon handle created for this panel.
 	// It is embedded only to keep the drawing code compact; creation, refresh,
 	// and destruction are centralized in resources.go.

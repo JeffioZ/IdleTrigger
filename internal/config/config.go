@@ -43,7 +43,7 @@ func IdleActionIndex(action Action) int {
 	return -1
 }
 
-const configTemplateVersion = 14
+const configTemplateVersion = 16
 
 // Config holds all user-configurable settings.
 type Config struct {
@@ -81,6 +81,14 @@ type Config struct {
 	// NoSleepBatteryThreshold is the minimum battery percentage below which
 	// NoSleep is forced off (0–100, default 20).
 	NoSleepBatteryThreshold int `toml:"nosleep_battery_threshold"`
+
+	// LockKeysEnabled shows Caps Lock, Num Lock and Scroll Lock state changes.
+	LockKeysEnabled       bool `toml:"lock_keys_enabled"`
+	LockKeysCapsEnabled   bool `toml:"lock_keys_caps_enabled"`
+	LockKeysNumEnabled    bool `toml:"lock_keys_num_enabled"`
+	LockKeysScrollEnabled bool `toml:"lock_keys_scroll_enabled"`
+	// LockKeysSkipFullscreen suppresses passive notices during fullscreen/presentations.
+	LockKeysSkipFullscreen bool `toml:"lock_keys_skip_fullscreen"`
 
 	// HotkeysEnabled enables global keyboard shortcuts.
 	HotkeysEnabled bool `toml:"hotkeys_enabled"`
@@ -133,6 +141,10 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Language:                "auto",
+		LockKeysCapsEnabled:     true,
+		LockKeysNumEnabled:      true,
+		LockKeysScrollEnabled:   true,
+		LockKeysSkipFullscreen:  true,
 		IdleEnabled:             false,
 		IdleTimeoutMinutes:      DefaultIdleTimeoutMinutes,
 		IdleAction:              ActionSleep,

@@ -15,6 +15,11 @@ func buttonWndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 	}
 	if old != 0 {
 		result, _, _ := pCallWindowProc.Call(old, uintptr(hwnd), uintptr(msg), wp, lp)
+		if msg == wmSetFocus && p.viewport != nil {
+			if b, ok := p.controlBounds[p.controlID(hwnd)]; ok {
+				p.viewport.EnsureVisible(b.x, b.y, b.width, b.height)
+			}
+		}
 		if msg == wmSetFocus || msg == wmKillFocus || msg == wmEnable {
 			p.updateToggleAccessibility(id)
 		}

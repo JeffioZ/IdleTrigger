@@ -30,7 +30,8 @@ func (p *panel) build() error {
 	p.labelRight(idVersion, fmt.Sprintf(p.t("settings_version"), p.state.Version), p.font, 508, 18, 168, 22)
 	p.button(idTabPower, p.t("settings_tab_power"), 24, 90, 156, buttonHeight)
 	p.button(idTabTheme, p.t("settings_tab_theme"), 24, 134, 156, buttonHeight)
-	p.button(idTabApp, p.t("settings_tab_app"), 24, 178, 156, buttonHeight)
+	p.button(idTabNotifications, p.t("settings_tab_notifications"), 24, 178, 156, buttonHeight)
+	p.button(idTabApp, p.t("settings_tab_app"), 24, 222, 156, buttonHeight)
 
 	// Power and idle page. Conditional values keep their place and use a
 	// disabled treatment so toggling a policy never shifts the page.
@@ -92,6 +93,18 @@ func (p *panel) build() error {
 	p.label(idProjectHomeLabel, projectLabel, p.font, contentX, 310, labelWidth, 24)
 	p.button(idProjectHome, projectURL, linkX, 304, min(urlWidth, contentRight-linkX), 30)
 
+	// Screen notifications have their own page; keep the key choices together
+	// and preview available even when automatic notifications are disabled.
+	p.label(idNotificationsTitle, p.t("settings_lock_keys"), p.sectionFont, contentX, sectionTop, 468, sectionTitleH)
+	p.check(idLockKeys, p.t("settings_lock_keys_enable"), contentX, 120, 468, checkHeight)
+	p.check(idLockCaps, "Caps Lock", contentX+24, 156, 444, checkHeight)
+	p.check(idLockNum, "Num Lock", contentX+24, 192, 444, checkHeight)
+	p.check(idLockScroll, "Scroll Lock", contentX+24, 228, 444, checkHeight)
+	p.label(idNotificationsBehavior, p.t("settings_notification_behavior"), p.sectionFont, contentX, 278, 468, sectionTitleH)
+	p.check(idLockFullscreen, p.t("settings_notification_fullscreen"), contentX, 308, 468, checkHeight)
+	p.label(idNotificationsHint, p.t("settings_notification_hint"), p.font, contentX, 348, 468, 42)
+	p.button(idLockPreview, p.t("settings_notification_preview"), contentX, 406, 160, buttonHeight)
+
 	footerY := contentHeight - nativeform.FormPadding - buttonHeight
 	p.label(idValidation, "", p.font, contentX, footerY+8, 236, 24)
 	p.button(idSave, p.t("common_save"), contentRight-dialogButtonWidth, footerY, dialogButtonWidth, buttonHeight)
@@ -102,6 +115,11 @@ func (p *panel) build() error {
 	p.checks[idIdleEnhanced] = p.state.IdleEnhancedMonitor
 	p.checks[idThemeBattery] = p.state.ThemeDarkOnBattery
 	p.checks[idThemeFullscreen] = p.state.ThemeSkipFullscreen
+	p.checks[idLockKeys] = p.state.LockKeysEnabled
+	p.checks[idLockCaps] = p.state.LockKeysCapsEnabled
+	p.checks[idLockNum] = p.state.LockKeysNumEnabled
+	p.checks[idLockScroll] = p.state.LockKeysScrollEnabled
+	p.checks[idLockFullscreen] = p.state.LockKeysSkipFullscreen
 	p.checks[idHotkeys] = p.state.HotkeysEnabled
 	p.checks[idAutostart] = p.state.AutostartEnabled
 	p.checks[idLogging] = p.state.LoggingEnabled
@@ -166,7 +184,7 @@ func languageIndex(language string) int {
 }
 
 func checkIDs() []uint16 {
-	return []uint16{idKeepScreen, idBatteryAllowed, idIdleEnhanced, idThemeBattery, idThemeFullscreen, idHotkeys, idAutostart, idLogging}
+	return []uint16{idKeepScreen, idBatteryAllowed, idIdleEnhanced, idThemeBattery, idThemeFullscreen, idHotkeys, idAutostart, idLogging, idLockKeys, idLockCaps, idLockNum, idLockScroll, idLockFullscreen}
 }
 
 func (p *panel) label(id uint16, value string, useFont windows.Handle, x, y, width, height int) {
@@ -341,7 +359,10 @@ func (p *panel) applyDependentStates() {
 		p.setVisible(idThemeLocationStatus, sunrise)
 		p.setVisible(idThemeHint, sunrise)
 	}
-	for _, id := range []uint16{idTabPower, idTabTheme, idTabApp} {
+	for _, id := range []uint16{idLockCaps, idLockNum, idLockScroll, idLockFullscreen} {
+		p.setEnabled(id, p.checks[idLockKeys])
+	}
+	for _, id := range []uint16{idTabPower, idTabTheme, idTabApp, idTabNotifications} {
 		pInvalidateRect.Call(uintptr(p.controls[id]), 0, 0)
 	}
 }
@@ -353,6 +374,7 @@ func pageControlIDs() map[int][]uint16 {
 		1: {idThemeScheduleTitle, idThemeBehaviorTitle, idThemeModeLabel, idThemeMode, idLightTimeLabel, idLightTime, idDarkTimeLabel, idDarkTime,
 			idLocationLabel, idLocationSource, idThemeLocationStatus, idThemeBattery, idThemeFullscreen, idThemeHint},
 		2: {idAppGeneralTitle, idAppAboutTitle, idLanguageLabel, idLanguage, idHotkeys, idAutostart, idLogging, idProjectHomeLabel, idProjectHome},
+		3: {idNotificationsTitle, idLockKeys, idLockCaps, idLockNum, idLockScroll, idNotificationsBehavior, idLockFullscreen, idNotificationsHint, idLockPreview},
 	}
 }
 
@@ -371,39 +393,27 @@ func (p *panel) position(suggested *nativeform.Rect) {
 	scale := p.scale()
 	nativeform.PlaceWindow(nativeform.WindowPlacement{Window: p.hwnd, Anchor: p.hwnd, Owner: p.state.Owner,
 		Style: p.style, ExStyle: p.exStyle, ClientWidth: int(windowWidth*scale + 0.5), ClientHeight: int(contentHeight*scale + 0.5),
-		DPI: uint32(scale*96 + 0.5), Suggested: suggested})
+		DPI: uint32(scale/max(1, p.textScale)*96 + 0.5), Suggested: suggested})
 	p.syncViewport()
 }
 
 func (p *panel) syncViewport() {
-	physicalWidth, physicalHeight, err := nativeform.ClientSize(p.hwnd)
-	if err != nil {
+	if p.viewport == nil {
 		return
 	}
-	scale := p.scale()
-	p.viewportHeight = max(1, int(float64(physicalHeight)/scale+0.5))
-	maximum := max(0, contentHeight-p.viewportHeight)
-	p.contentOffset = max(0, min(p.contentOffset, maximum))
+	p.viewport.Sync(p.hwnd, p.scale(), windowWidth, contentHeight, p.palette)
 	for id := range p.controls {
-		if _, field := p.surfaces.ForControl(id); field {
-			continue
+		if _, field := p.surfaces.ForControl(id); !field {
+			p.positionControl(id)
 		}
-		p.positionControl(id)
 	}
 	for id := range p.controls {
 		if _, field := p.surfaces.ForControl(id); field {
 			p.positionControl(id)
 		}
 	}
-	if p.contentScroll != nil {
-		barWidth := max(1, int(float64(nativeform.ScrollbarWidth)*scale+0.5))
-		inset := max(1, int(2*scale+0.5))
-		p.contentScroll.SetScale(scale)
-		p.contentScroll.SetBounds(physicalWidth-barWidth-inset, inset, barWidth, max(1, physicalHeight-2*inset))
-		p.contentScroll.SetMetrics(contentHeight, p.viewportHeight, p.contentOffset)
-	}
+	pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
 }
-
 func (p *panel) positionControl(id uint16) {
 	control := p.controls[id]
 	b, ok := p.bounds[id]
@@ -425,31 +435,15 @@ func (p *panel) positionControl(id uint16) {
 }
 
 func (p *panel) positionHandle(control windows.Handle, b bounds) {
+	offsetX, offsetY := 0, 0
+	if p.viewport != nil {
+		offsetX, offsetY = p.viewport.X, p.viewport.Y
+	}
 	scale := p.scale()
-	pSetWindowPos.Call(uintptr(control), 0, uintptr(int(float64(b.x)*scale)), uintptr(int(float64(b.y-p.contentOffset)*scale)),
+	pSetWindowPos.Call(uintptr(control), 0, uintptr(int(float64(b.x-offsetX)*scale)), uintptr(int(float64(b.y-offsetY)*scale)),
 		uintptr(max(1, int(float64(b.width)*scale))), uintptr(max(1, int(float64(b.height)*scale))), swpNoZOrder|swpNoActivate)
 }
 
-func (p *panel) scrollTo(position int) {
-	maximum := max(0, contentHeight-p.viewportHeight)
-	position = max(0, min(position, maximum))
-	if position == p.contentOffset {
-		return
-	}
-	p.contentOffset = position
-	p.syncViewport()
-	pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
-}
-
 func (p *panel) scrollWheel(wParam uintptr) bool {
-	if contentHeight <= p.viewportHeight {
-		return false
-	}
-	delta := int16(wParam >> 16)
-	if delta > 0 {
-		p.scrollTo(p.contentOffset - 36)
-	} else if delta < 0 {
-		p.scrollTo(p.contentOffset + 36)
-	}
-	return delta != 0
+	return p.viewport != nil && p.viewport.Wheel(wParam)
 }

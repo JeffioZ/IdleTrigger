@@ -166,8 +166,8 @@ func Run(args []string) error {
 				err = automationpanel.Capture(state, text, captureScale, job.theme == controlpanel.ThemeDark, true, captureWindow)
 			case "process-picker":
 				err = processpicker.Capture(fixedProcessPickerOptions(job.language, text), fixedProcessGroups(), captureScale, job.theme == controlpanel.ThemeDark, captureWindow)
-			case "settings", "settings-theme", "settings-app":
-				page := map[string]int{"settings": 0, "settings-theme": 1, "settings-app": 2}[job.surface]
+			case "settings", "settings-theme", "settings-app", "settings-notifications":
+				page := map[string]int{"settings": 0, "settings-theme": 1, "settings-app": 2, "settings-notifications": 3}[job.surface]
 				err = settingspanel.CapturePage(fixedSettingsSnapshot(job.language), text, captureScale, job.theme == controlpanel.ThemeDark, page, captureWindow)
 			default:
 				err = controlpanel.Capture(fixedSnapshot(job.language, job.theme), text, captureScale, func(hwnd windows.Handle) error {
@@ -417,7 +417,7 @@ func parse(args []string) (options, error) {
 				if opts.surface != "" {
 					return options{}, fmt.Errorf("screenshot surface specified more than once")
 				}
-				if value != "control" && value != "automation" && value != "automation-editor" && value != "process-picker" && value != "settings" && value != "settings-theme" && value != "settings-app" && value != "popup-system" {
+				if value != "control" && value != "automation" && value != "automation-editor" && value != "process-picker" && value != "settings" && value != "settings-theme" && value != "settings-app" && value != "settings-notifications" && value != "popup-system" {
 					return options{}, fmt.Errorf("unsupported screenshot surface %q", value)
 				}
 				opts.surface = value
@@ -474,7 +474,7 @@ func parse(args []string) (options, error) {
 }
 
 func usage() string {
-	return "usage:\n  IdleTrigger.exe screenshot --readme-set --output DIRECTORY\n  IdleTrigger.exe screenshot --review-set --output DIRECTORY\n  IdleTrigger.exe screenshot --popup-review-set --output DIRECTORY\n  IdleTrigger.exe screenshot [--surface control|automation|automation-editor|process-picker|settings|settings-theme|settings-app] --language en|zh-CN --theme light|dark --output FILE.png"
+	return "usage:\n  IdleTrigger.exe screenshot --readme-set --output DIRECTORY\n  IdleTrigger.exe screenshot --review-set --output DIRECTORY\n  IdleTrigger.exe screenshot --popup-review-set --output DIRECTORY\n  IdleTrigger.exe screenshot [--surface control|automation|automation-editor|process-picker|settings|settings-theme|settings-app|settings-notifications] --language en|zh-CN --theme light|dark --output FILE.png"
 }
 
 func (opts options) jobs() ([]job, error) {
@@ -513,7 +513,7 @@ func (opts options) jobs() ([]job, error) {
 		name  string
 	}{{controlpanel.ThemeLight, "light"}, {controlpanel.ThemeDark, "dark"}} {
 		for _, language := range []string{"en", "zh-CN"} {
-			for _, surface := range []string{"control", "automation", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app"} {
+			for _, surface := range []string{"control", "automation", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app", "settings-notifications"} {
 				name := fmt.Sprintf("%s-%s-%s.png", screenshotSurfaceFilename(surface), language, theme.name)
 				jobs = append(jobs, job{surface: surface, language: language, theme: theme.value, path: filepath.Join(opts.output, name)})
 			}
@@ -534,7 +534,7 @@ func screenshotSurfaceFilename(surface string) string {
 }
 
 func fixedSettingsSnapshot(language string) settingspanel.State {
-	return settingspanel.State{KeepScreenOn: true, NoSleepOnBattery: false, NoSleepBatteryThreshold: 20, Version: "devtools",
+	return settingspanel.State{LockKeysEnabled: true, LockKeysCapsEnabled: true, LockKeysNumEnabled: true, LockKeysScrollEnabled: true, LockKeysSkipFullscreen: true, KeepScreenOn: true, NoSleepOnBattery: false, NoSleepBatteryThreshold: 20, Version: "devtools",
 		IdleTimeoutMinutes: 30, IdleAction: "lock", IdleWarningSeconds: 30, IdleEnhancedMonitor: true,
 		ThemeMode: "sunrise", ThemeLightTime: "07:00", ThemeDarkTime: "19:00", ThemeIPLocationEnabled: true,
 		ThemeLocationStatus: fmt.Sprintf(i18n.T(language, "settings_location_ip_resolved"), "Shanghai, China"),

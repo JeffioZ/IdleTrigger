@@ -81,6 +81,7 @@ func (p *panel) position(style, exStyle uint32) error {
 	if !ok {
 		return fmt.Errorf("locate control panel monitor work area")
 	}
+	width, height = min(width, work.Right-work.Left), min(height, work.Bottom-work.Top)
 	x, y := panelOrigin(work, width, height, int32(p.sc(16)))
 	insertAfter := ^uintptr(0)
 	if p.developerCapturePanel || p.captureHost {
@@ -93,6 +94,7 @@ func (p *panel) position(style, exStyle uint32) error {
 	if result, _, callErr := pSetWindowPos.Call(uintptr(p.hwnd), insertAfter, uintptr(x), uintptr(y), uintptr(width), uintptr(height), swpNoActivate); result == 0 {
 		return fmt.Errorf("position control panel: %w", callErr)
 	}
+	p.syncViewport()
 	return nil
 }
 
@@ -119,7 +121,7 @@ func (p *panel) desiredWindowSizeForDPI(dpi uint32) (int32, int32, error) {
 }
 
 func (p *panel) desiredWindowSize(layoutDPI, frameDPI uint32) (int32, int32, error) {
-	scale := panelScaleForDPI(layoutDPI, p.captureScale)
+	scale := (panelScaleForDPI(layoutDPI, p.captureScale) * max(1, p.textScale))
 	effectiveDPI := frameDPI
 	if p.captureScale > 0 {
 		effectiveDPI = uint32(p.captureScale*96 + 0.5)
@@ -235,7 +237,8 @@ func (p *panel) positionForResolvedDPI(layoutDPI, frameDPI uint32, suggested rec
 	if result, _, callErr := pGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); result == 0 {
 		return fmt.Errorf("read resolved control panel work area: %w", callErr)
 	}
-	margin := int32(float64(16)*panelScaleForDPI(layoutDPI, p.captureScale) + 0.5)
+	margin := int32(float64(16)*(panelScaleForDPI(layoutDPI, p.captureScale)*max(1, p.textScale)) + 0.5)
+	width, height = min(width, info.Work.Right-info.Work.Left), min(height, info.Work.Bottom-info.Work.Top)
 	x, y := panelOrigin(info.Work, width, height, margin)
 	if result, _, callErr := pSetWindowPos.Call(
 		uintptr(p.hwnd), 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height),
@@ -243,6 +246,7 @@ func (p *panel) positionForResolvedDPI(layoutDPI, frameDPI uint32, suggested rec
 	); result == 0 {
 		return fmt.Errorf("position resolved control panel DPI bounds: %w", callErr)
 	}
+	p.syncViewport()
 	return nil
 }
 
@@ -258,7 +262,7 @@ func (p *panel) applyPendingDPI() {
 	if !p.refreshFontsForDPI(dpi) {
 		// Keep the outer frame consistent with the metrics that remain active
 		// when Windows cannot allocate the replacement GDI fonts.
-		resolvedDPI = uint32(p.metrics.scale*96 + 0.5)
+		resolvedDPI = uint32(p.metrics.scale/max(1, p.textScale)*96 + 0.5)
 		mylog.Info("Control panel DPI font rebuild failed; retaining dpi=%d", resolvedDPI)
 	}
 	if err := p.positionForResolvedDPI(resolvedDPI, dpi, suggested, hasSuggested); err != nil {
@@ -335,7 +339,15 @@ func wndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 				p.openQuickMenu()
 			}
 			return 0
+		case 0x020A: // WM_MOUSEWHEEL
+			if p.viewport != nil && p.viewport.Wheel(wp) {
+				return 0
+			}
 		case wmDestroy:
+			if p.viewport != nil {
+				p.viewport.Close()
+				p.viewport = nil
+			}
 			clearPanel(p, hwnd)
 		case wmEraseBkgnd:
 			p.fill(windows.Handle(wp), p.backgroundBrush)
@@ -354,6 +366,18 @@ func wndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 				return 1
 			}
 		case wmSettingChange, wmSysColorChange, wmThemeChanged:
+			if msg == wmSettingChange && p.font != 0 {
+				next := font.TextScaleFactor()
+				if next != p.textScale {
+					previous := p.textScale
+					p.textScale = next
+					if p.refreshFontsForDPI(uint32(dpiForWindow(p.hwnd)*96 + 0.5)) {
+						_ = p.position(p.style, p.exStyle)
+					} else {
+						p.textScale = previous
+					}
+				}
+			}
 			p.refreshTheme(true)
 			// Theme application already updates every child and commits a complete
 			// frame. Letting DefWindowProc process the same broadcast afterward can
@@ -386,7 +410,7 @@ func wndProc(hwnd windows.Handle, msg uint32, wp, lp uintptr) uintptr {
 
 func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 	p.closeChoice(false)
-	newScale := panelScaleForDPI(dpi, p.captureScale)
+	newScale := panelScaleForDPI(dpi, p.captureScale) * max(1, p.textScale)
 	if newScale <= 0 || newScale == p.metrics.scale {
 		return true
 	}
@@ -417,6 +441,7 @@ func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 		}
 	}
 	if p.tooltip != 0 {
+		pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 		pSendMessage.Call(uintptr(p.tooltip), ttmSetMaxTipWidth, 0, uintptr(p.sc(360)))
 	}
 	for _, font := range []windows.Handle{oldFont, oldSection, oldSubtitle} {
@@ -428,6 +453,10 @@ func (p *panel) refreshFontsForDPI(dpi uint32) bool {
 }
 
 func (p *panel) positionDPIControls() {
+	x, y := 0, 0
+	if p.viewport != nil {
+		x, y = p.viewport.X, p.viewport.Y
+	}
 	flags := uintptr(swpNoZOrder | swpNoActivate)
 	deferred, _, _ := pBeginDeferWindowPos.Call(uintptr(len(p.controlBounds)))
 	if deferred != 0 {
@@ -438,7 +467,7 @@ func (p *panel) positionDPIControls() {
 			}
 			next, _, _ := pDeferWindowPos.Call(
 				deferred, uintptr(hwnd), 0,
-				uintptr(p.sc(bounds.x)), uintptr(p.sc(bounds.y)),
+				uintptr(p.sc(bounds.x-x)), uintptr(p.sc(bounds.y-y)),
 				uintptr(p.sc(bounds.width)), uintptr(p.sc(bounds.height)), flags,
 			)
 			if next == 0 {
@@ -460,7 +489,7 @@ func (p *panel) positionDPIControls() {
 		if hwnd := p.controls[id]; hwnd != 0 {
 			pSetWindowPos.Call(
 				uintptr(hwnd), 0,
-				uintptr(p.sc(bounds.x)), uintptr(p.sc(bounds.y)),
+				uintptr(p.sc(bounds.x-x)), uintptr(p.sc(bounds.y-y)),
 				uintptr(p.sc(bounds.width)), uintptr(p.sc(bounds.height)), flags,
 			)
 		}
@@ -471,4 +500,13 @@ type drawItemPointer *drawItem
 
 func drawItemFromLParam(lp uintptr) *drawItem {
 	return *(*drawItemPointer)(unsafe.Pointer(&lp))
+}
+
+func (p *panel) syncViewport() {
+	if p.viewport == nil {
+		return
+	}
+	p.viewport.Sync(p.hwnd, p.metrics.scale, p.metrics.style.Layout.PanelWidth, p.clientH, p.palette)
+	p.positionDPIControls()
+	pInvalidateRect.Call(uintptr(p.hwnd), 0, 0)
 }

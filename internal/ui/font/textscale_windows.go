@@ -2,6 +2,7 @@ package font
 
 import (
 	"math"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
@@ -63,6 +64,8 @@ func scaleRequestedSize(size int32) int32 {
 }
 
 func querySystemTextScaleFactor() float64 {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	initialized, _, _ := pRoInitialize.Call(roInitMultithreaded)
 	if int32(initialized) >= 0 {
 		defer pRoUninitialize.Call()

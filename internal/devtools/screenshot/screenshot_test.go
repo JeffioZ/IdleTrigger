@@ -94,13 +94,13 @@ func TestReviewSetCoversEverySurfaceLanguageAndTheme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 28 {
-		t.Fatalf("review job count = %d, want 28", len(jobs))
+	if len(jobs) != 32 {
+		t.Fatalf("review job count = %d, want 32", len(jobs))
 	}
 	want := map[string]bool{}
 	for _, theme := range []string{"light", "dark"} {
 		for _, language := range []string{"en", "zh-CN"} {
-			for _, surface := range []string{"control-panel", "automation-manager", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app"} {
+			for _, surface := range []string{"control-panel", "automation-manager", "automation-editor", "process-picker", "settings", "settings-theme", "settings-app", "settings-notifications"} {
 				want[surface+"-"+language+"-"+theme+".png"] = true
 			}
 		}

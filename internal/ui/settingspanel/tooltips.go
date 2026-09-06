@@ -21,7 +21,7 @@ func (p *panel) createTooltips() {
 	p.tooltip = windows.Handle(hwnd)
 	p.tooltipText = make(map[windows.Handle][]uint16)
 	pSendMessage.Call(hwnd, ttmSetMaxTipWidth, 0, uintptr(int(380*p.scale())))
-	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 
 	for _, binding := range settingsTooltipBindings() {
 		p.addTooltip(binding.key, binding.ids...)
@@ -50,6 +50,10 @@ func settingsTooltipBindings() []tooltipBinding {
 		{"tip_battery_theme", []uint16{idThemeBattery}},
 		{"tip_fullscreen", []uint16{idThemeFullscreen}},
 		{"tip_language", []uint16{idLanguageLabel, idLanguage}},
+		{"tip_lock_keys", []uint16{idLockKeys}},
+		{"tip_lock_key_selection", []uint16{idLockCaps, idLockNum, idLockScroll}},
+		{"tip_notification_fullscreen", []uint16{idLockFullscreen}},
+		{"tip_notification_preview", []uint16{idLockPreview}},
 		{"tip_hotkeys", []uint16{idHotkeys}},
 		{"tip_autostart", []uint16{idAutostart}},
 		{"tip_logging", []uint16{idLogging}},

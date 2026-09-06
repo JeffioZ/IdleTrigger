@@ -29,6 +29,8 @@ type trackedControl struct {
 // hover, press and focus changes. Native controls continue to own their input,
 // keyboard and accessibility behavior.
 type InteractionTracker struct {
+	// OnFocus lets a containing viewport reveal a keyboard-focused control.
+	OnFocus      func(windows.Handle)
 	focusVisible bool
 }
 
@@ -196,6 +198,9 @@ func interactionWndProc(hwnd windows.Handle, message uint32, wParam, lParam uint
 			changed = true
 		}
 	case wmSetFocus:
+		if entry.owner.OnFocus != nil {
+			entry.owner.OnFocus(hwnd)
+		}
 		if !entry.state.Focused {
 			entry.state.Focused = true
 			changed = true

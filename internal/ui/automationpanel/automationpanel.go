@@ -77,6 +77,7 @@ const (
 )
 
 type panel struct {
+	textScale           float64
 	hwnd                windows.Handle
 	state               State
 	onSave              OnSave
@@ -511,10 +512,11 @@ func (p *panel) create() error {
 	}
 	p.hwnd = windows.Handle(hwnd)
 	firstFrame := nativeform.BeginFirstFrame(p.hwnd)
+	p.textScale = font.TextScaleFactor()
 	p.dpiScale = p.windowScale()
 	scale := p.scale()
-	p.font, _ = font.New(int32(14*scale+0.5), 400, p.state.Chinese)
-	p.sectionFont, _ = font.New(int32(14*scale+0.5), 600, p.state.Chinese)
+	p.font, _ = font.NewForLayout(int32(14*scale+0.5), 400, p.state.Chinese)
+	p.sectionFont, _ = font.NewForLayout(int32(14*scale+0.5), 600, p.state.Chinese)
 	p.applyTheme()
 	contentScroll, scrollErr := nativeform.NewScrollbar(nativeform.ScrollbarOptions{
 		Parent: p.hwnd, Palette: p.palette, Background: p.palette.WindowBackground, Scale: scale,

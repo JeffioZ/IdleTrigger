@@ -107,6 +107,16 @@ func DetectThemeSwitchPause(cancel <-chan struct{}) (ThemeSwitchPauseReason, err
 	return ThemeSwitchPauseNone, firstErr
 }
 
+// SuppressPassiveNotifications uses only lightweight shell/window checks.
+// Unlike theme-switch detection, it never samples GPU activity or waits.
+func SuppressPassiveNotifications() bool {
+	if reason, err := shellThemeSwitchPause(); err == nil && reason != ThemeSwitchPauseNone {
+		return true
+	}
+	_, _, fullscreen := foregroundWindowContext()
+	return fullscreen
+}
+
 func shellThemeSwitchPause() (ThemeSwitchPauseReason, error) {
 	var state uint32
 	result, _, _ := pSHQueryNotificationState.Call(uintptr(unsafe.Pointer(&state)))

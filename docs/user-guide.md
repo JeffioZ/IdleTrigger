@@ -28,6 +28,7 @@ Open **Settings** for persistent feature behavior:
 | --- | --- |
 | **Power** | Keep the display on, battery policy and threshold, idle timeout, reminder countdown, timeout action, and Enhanced Monitoring |
 | **Day / Night** | Fixed-time or sunrise/sunset schedule, time-zone or approximate IP location, and battery/fullscreen behavior |
+| **On-screen notices** | Lock-key selection, fullscreen suppression, and a sample preview |
 | **Application** | Display language, global hotkeys, auto-start, debug logging, and the project link |
 
 The Settings header always shows the current version. Every saved preference has a home in the control panel, Settings, or the automatic-task manager, so editing TOML is not required for normal use.
@@ -69,6 +70,14 @@ Switch Windows light and dark themes at fixed times or at sunrise and sunset. Yo
 Automatic changes coalesce nearby power and display events, wait briefly for the display topology to settle, and use stronger recovery only for higher-risk multi-display or resume scenarios. No extra setting is required. If part of the Windows shell still shows stale colors, choose **Repair Theme** on the main panel.
 
 Sunrise and sunset use the Windows time zone by default, with optional approximate IP-based location. IP results are kept in memory only; if lookup is disabled or unavailable, IdleTrigger falls back to the Windows time zone, UTC offset, and finally a built-in default location. If Windows theme settings are unavailable or blocked, IdleTrigger disables this section but keeps its settings.
+
+## ⌨️ On-screen Notices
+
+Enable lock-key notifications in **Settings > On-screen notices**. This feature is off by default. You can select Caps Lock, Num Lock, and Scroll Lock independently; disabling the master switch preserves those selections.
+
+Notices appear briefly on the foreground application's monitor without taking keyboard focus or intercepting mouse input. They follow Windows animation settings. By default, notices are hidden during detected fullscreen apps or presentations, and skipped changes are not replayed afterward. This option does not suppress system-action countdown warnings.
+
+**Preview notice** shows a Caps Lock On sample without changing the real key state or saving settings. Windows text-size preferences also apply to the app's text; enlarged control and settings panels provide scrolling when needed.
 
 ## ⚙️ Configuration
 

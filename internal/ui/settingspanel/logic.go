@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/JeffioZ/idletrigger/internal/ui/locknotify"
 	"github.com/JeffioZ/idletrigger/internal/ui/nativeform"
 )
 
@@ -81,16 +82,18 @@ func (p *panel) handleCommand(id, notification uint16) {
 		return
 	}
 	switch id {
-	case idKeepScreen, idBatteryAllowed, idIdleEnhanced, idThemeBattery, idThemeFullscreen, idHotkeys, idAutostart, idLogging:
+	case idKeepScreen, idBatteryAllowed, idIdleEnhanced, idThemeBattery, idThemeFullscreen, idHotkeys, idAutostart, idLogging, idLockKeys, idLockCaps, idLockNum, idLockScroll, idLockFullscreen:
 		p.setChecked(id, !p.checks[id])
 		p.applyDependentStates()
 		p.clearValidation()
 	case idThemeMode, idLocationSource, idIdleAction, idLanguage:
 		p.toggleChoice(id)
-	case idTabPower, idTabTheme, idTabApp:
-		p.page = map[uint16]int{idTabPower: 0, idTabTheme: 1, idTabApp: 2}[id]
+	case idTabPower, idTabTheme, idTabApp, idTabNotifications:
+		p.page = map[uint16]int{idTabPower: 0, idTabTheme: 1, idTabApp: 2, idTabNotifications: 3}[id]
 		p.closeChoice(false)
 		p.applyDependentStates()
+	case idLockPreview:
+		locknotify.Preview(p.state.Language)
 	case idProjectHome:
 		if p.onProjectHome != nil {
 			p.onProjectHome()
@@ -104,23 +107,28 @@ func (p *panel) handleCommand(id, notification uint16) {
 
 func (p *panel) requestFromControls() (SaveRequest, uint16, string) {
 	draft := settingsDraft{
-		BaseRevision:        p.state.Revision,
-		KeepScreenOn:        p.checks[idKeepScreen],
-		NoSleepOnBattery:    p.checks[idBatteryAllowed],
-		BatteryThreshold:    p.controlText(idBatteryThreshold),
-		IdleTimeout:         p.controlText(idIdleTimeout),
-		WarningSeconds:      p.controlText(idWarningSeconds),
-		IdleAction:          p.choiceIndex(idIdleAction),
-		IdleEnhancedMonitor: p.checks[idIdleEnhanced],
-		IdleEnabled:         p.state.IdleEnabled,
-		ThemeMode:           p.choiceIndex(idThemeMode),
-		LightTime:           p.controlText(idLightTime),
-		DarkTime:            p.controlText(idDarkTime),
-		LocationSource:      p.choiceIndex(idLocationSource),
-		ThemeDarkOnBattery:  p.checks[idThemeBattery],
-		ThemeSkipFullscreen: p.checks[idThemeFullscreen],
-		Language:            p.choiceIndex(idLanguage),
-		HotkeysEnabled:      p.checks[idHotkeys], AutostartEnabled: p.checks[idAutostart], LoggingEnabled: p.checks[idLogging],
+		BaseRevision:           p.state.Revision,
+		KeepScreenOn:           p.checks[idKeepScreen],
+		NoSleepOnBattery:       p.checks[idBatteryAllowed],
+		BatteryThreshold:       p.controlText(idBatteryThreshold),
+		IdleTimeout:            p.controlText(idIdleTimeout),
+		WarningSeconds:         p.controlText(idWarningSeconds),
+		IdleAction:             p.choiceIndex(idIdleAction),
+		IdleEnhancedMonitor:    p.checks[idIdleEnhanced],
+		IdleEnabled:            p.state.IdleEnabled,
+		ThemeMode:              p.choiceIndex(idThemeMode),
+		LightTime:              p.controlText(idLightTime),
+		DarkTime:               p.controlText(idDarkTime),
+		LocationSource:         p.choiceIndex(idLocationSource),
+		ThemeDarkOnBattery:     p.checks[idThemeBattery],
+		ThemeSkipFullscreen:    p.checks[idThemeFullscreen],
+		Language:               p.choiceIndex(idLanguage),
+		LockKeysEnabled:        p.checks[idLockKeys],
+		LockKeysCapsEnabled:    p.checks[idLockCaps],
+		LockKeysNumEnabled:     p.checks[idLockNum],
+		LockKeysScrollEnabled:  p.checks[idLockScroll],
+		LockKeysSkipFullscreen: p.checks[idLockFullscreen],
+		HotkeysEnabled:         p.checks[idHotkeys], AutostartEnabled: p.checks[idAutostart], LoggingEnabled: p.checks[idLogging],
 	}
 	request, id, key := parseSettingsDraft(draft)
 	if key != "" {
@@ -130,12 +138,13 @@ func (p *panel) requestFromControls() (SaveRequest, uint16, string) {
 }
 
 type settingsDraft struct {
-	BaseRevision, BatteryThreshold, IdleTimeout, WarningSeconds               string
-	LightTime, DarkTime                                                       string
-	KeepScreenOn, NoSleepOnBattery                                            bool
-	IdleEnabled, IdleEnhancedMonitor, ThemeDarkOnBattery, ThemeSkipFullscreen bool
-	HotkeysEnabled, AutostartEnabled, LoggingEnabled                          bool
-	IdleAction, ThemeMode, LocationSource, Language                           int
+	BaseRevision, BatteryThreshold, IdleTimeout, WarningSeconds                            string
+	LightTime, DarkTime                                                                    string
+	KeepScreenOn, NoSleepOnBattery                                                         bool
+	IdleEnabled, IdleEnhancedMonitor, ThemeDarkOnBattery, ThemeSkipFullscreen              bool
+	LockKeysEnabled, HotkeysEnabled, AutostartEnabled, LoggingEnabled                      bool
+	LockKeysCapsEnabled, LockKeysNumEnabled, LockKeysScrollEnabled, LockKeysSkipFullscreen bool
+	IdleAction, ThemeMode, LocationSource, Language                                        int
 }
 
 func parseSettingsDraft(draft settingsDraft) (SaveRequest, uint16, string) {
@@ -143,7 +152,12 @@ func parseSettingsDraft(draft settingsDraft) (SaveRequest, uint16, string) {
 		NoSleepOnBattery: draft.NoSleepOnBattery, IdleEnabled: draft.IdleEnabled, IdleEnhancedMonitor: draft.IdleEnhancedMonitor,
 		ThemeLightTime: draft.LightTime, ThemeDarkTime: draft.DarkTime, ThemeDarkOnBattery: draft.ThemeDarkOnBattery,
 		ThemeSkipFullscreen: draft.ThemeSkipFullscreen, HotkeysEnabled: draft.HotkeysEnabled,
-		AutostartEnabled: draft.AutostartEnabled, LoggingEnabled: draft.LoggingEnabled}
+		LockKeysEnabled:        draft.LockKeysEnabled,
+		LockKeysCapsEnabled:    draft.LockKeysCapsEnabled,
+		LockKeysNumEnabled:     draft.LockKeysNumEnabled,
+		LockKeysScrollEnabled:  draft.LockKeysScrollEnabled,
+		LockKeysSkipFullscreen: draft.LockKeysSkipFullscreen,
+		AutostartEnabled:       draft.AutostartEnabled, LoggingEnabled: draft.LoggingEnabled}
 	thresholdText := strings.TrimSpace(draft.BatteryThreshold)
 	if !draft.NoSleepOnBattery && thresholdText == "" {
 		thresholdText = "0"
@@ -194,7 +208,12 @@ func requestFromState(state State) SaveRequest {
 		ThemeLightTime: state.ThemeLightTime, ThemeDarkTime: state.ThemeDarkTime,
 		ThemeIPLocationEnabled: state.ThemeIPLocationEnabled, ThemeDarkOnBattery: state.ThemeDarkOnBattery,
 		ThemeSkipFullscreen: state.ThemeSkipFullscreen, Language: state.Language, HotkeysEnabled: state.HotkeysEnabled,
-		AutostartEnabled: state.AutostartEnabled, LoggingEnabled: state.LoggingEnabled}
+		LockKeysEnabled:        state.LockKeysEnabled,
+		LockKeysCapsEnabled:    state.LockKeysCapsEnabled,
+		LockKeysNumEnabled:     state.LockKeysNumEnabled,
+		LockKeysScrollEnabled:  state.LockKeysScrollEnabled,
+		LockKeysSkipFullscreen: state.LockKeysSkipFullscreen,
+		AutostartEnabled:       state.AutostartEnabled, LoggingEnabled: state.LoggingEnabled}
 }
 
 func (p *panel) save() {

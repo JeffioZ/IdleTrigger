@@ -77,6 +77,9 @@ func (p *panel) frameControls() []windows.Handle {
 			controls = append(controls, control)
 		}
 	}
+	if p.viewport != nil {
+		controls = append(controls, p.viewport.Windows()...)
+	}
 	return controls
 }
 
@@ -345,7 +348,8 @@ func (p *panel) create() error {
 	if p.captureScale > 0 {
 		scale = p.captureScale
 	}
-	p.metrics = newPanelMetrics(defaultPanelStyle, scale)
+	p.textScale = font.TextScaleFactor()
+	p.metrics = newPanelMetrics(defaultPanelStyle, scale*p.textScale)
 	p.font = p.makeFont(p.metrics.style.Fonts.BodySize, p.metrics.style.Fonts.BodyWeight)
 	p.sectionFont = p.makeFont(p.metrics.style.Fonts.SectionSize, p.metrics.style.Fonts.SectionWeight)
 	p.subtitleFont = p.makeFont(p.metrics.style.Fonts.SubtitleSize, p.metrics.style.Fonts.SubtitleWeight)
@@ -362,6 +366,12 @@ func (p *panel) create() error {
 	}
 	if !p.captureHost {
 		trayicon.SetTabNavigationWindow(p.hwnd, p.enterKeyboardNavigation)
+	}
+	var viewportErr error
+	p.viewport, viewportErr = nativeform.NewViewport(p.hwnd, p.syncViewport)
+	if viewportErr != nil {
+		pDestroyWindow.Call(uintptr(p.hwnd))
+		return viewportErr
 	}
 	// Position the still-hidden top-level window first. This mirrors the native
 	// form windows and prevents a cold-start frame at the temporary creation
@@ -395,7 +405,7 @@ func dpiForWindow(hwnd windows.Handle) float64 {
 }
 
 func (p *panel) makeFont(size int32, weight int32) windows.Handle {
-	font, choice := font.New(int32(float64(size)*p.metrics.scale+0.5), weight, p.isChinese)
+	font, choice := font.NewForLayout(int32(float64(size)*p.metrics.scale+0.5), weight, p.isChinese)
 	if p.fontChoice.Face == "" {
 		p.fontChoice = choice
 	}

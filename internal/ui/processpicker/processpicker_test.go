@@ -774,6 +774,30 @@ func TestProcessPickerAppliesSuggestedRectAcrossDPIChanges(t *testing.T) {
 	}
 }
 
+func TestDPIFontFailureRetainsUsableLayout(t *testing.T) {
+	requireNativeIntegration(t)
+	err := Capture(testPickerOptions(), nil, 1, false, func(hwnd windows.Handle) error {
+		p := activePickerForTest(t, hwnd)
+		previousScale, previousFont := p.dpiScale, p.font
+		previousFactory := newFontForPicker
+		defer func() { newFontForPicker = previousFactory }()
+		newFontForPicker = func(int32, int32, bool) (windows.Handle, font.Choice) { return 0, font.Choice{} }
+		suggested := nativeform.Rect{Left: 19, Top: 23, Right: 1019, Bottom: 723}
+		pSendMessage.Call(uintptr(hwnd), wmDpiChanged, 192|(192<<16), uintptr(unsafe.Pointer(&suggested)))
+		if p.hwnd == 0 || p.font != previousFont || p.dpiScale != previousScale || p.pendingSuggested != nil {
+			t.Fatal("failed DPI font rebuild discarded the working layout or retained stale placement")
+		}
+		newFontForPicker = previousFactory
+		if !p.rebuildForDPI() {
+			t.Fatal("font rebuild did not recover")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessPickerReleasesResourcesAcrossRepresentativeCycles(t *testing.T) {
 	requireNativeIntegration(t)
 	const (

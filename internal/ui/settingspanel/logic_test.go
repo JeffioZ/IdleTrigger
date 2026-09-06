@@ -121,7 +121,8 @@ func TestEverySettingsControlHasLocalizedHelp(t *testing.T) {
 		idIdleTimeout: true, idIdleAction: true, idWarningSeconds: true, idIdleEnhanced: true,
 		idThemeMode: true, idLightTime: true, idDarkTime: true, idLocationSource: true,
 		idThemeBattery: true, idThemeFullscreen: true,
-		idLanguage: true, idHotkeys: true, idAutostart: true,
+		idLanguage: true, idHotkeys: true, idLockKeys: true, idAutostart: true,
+		idLockCaps: true, idLockNum: true, idLockScroll: true, idLockFullscreen: true, idLockPreview: true,
 		idLogging: true, idProjectHome: true, idCancel: true, idSave: true,
 	}
 	for _, binding := range settingsTooltipBindings() {
@@ -146,6 +147,25 @@ func TestChoiceControlsExposeTheirVisibleLabelsToAccessibility(t *testing.T) {
 	} {
 		if got := choiceLabelID(id); got != want {
 			t.Errorf("choice %d label = %d, want %d", id, got, want)
+		}
+	}
+}
+
+func TestLockKeysSettingSurvivesDraftAndState(t *testing.T) {
+	draft := validDraft()
+	draft.LockKeysEnabled = true
+	draft.LockKeysCapsEnabled, draft.LockKeysSkipFullscreen = true, true
+	request, id, key := parseSettingsDraft(draft)
+	if id != 0 || key != "" || !request.LockKeysEnabled || !request.LockKeysCapsEnabled || request.LockKeysNumEnabled || request.LockKeysScrollEnabled || !request.LockKeysSkipFullscreen {
+		t.Fatalf("lost draft setting: %+v", request)
+	}
+	fromState := requestFromState(State{LockKeysEnabled: true, LockKeysNumEnabled: true, LockKeysScrollEnabled: true, LockKeysSkipFullscreen: true})
+	if !fromState.LockKeysEnabled || fromState.LockKeysCapsEnabled || !fromState.LockKeysNumEnabled || !fromState.LockKeysScrollEnabled || !fromState.LockKeysSkipFullscreen {
+		t.Fatal("lost saved setting")
+	}
+	for _, id := range []uint16{idLockKeys, idLockCaps, idLockNum, idLockScroll, idLockFullscreen, idLockPreview} {
+		if pageForControl(id) != 3 {
+			t.Fatalf("notice control %d is on the wrong page", id)
 		}
 	}
 }

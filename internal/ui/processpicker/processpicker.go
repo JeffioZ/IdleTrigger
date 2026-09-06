@@ -153,6 +153,7 @@ type openFileName struct {
 }
 
 type picker struct {
+	textScale        float64
 	hwnd             windows.Handle
 	options          Options
 	controls         map[uint16]windows.Handle
@@ -464,7 +465,7 @@ var (
 		}
 		return windows.Handle(hwnd), nil
 	}
-	newFontForPicker            = font.New
+	newFontForPicker            = font.NewForLayout
 	newCueBannerForPicker       = nativeform.NewCueBanner
 	newScrollbarForPicker       = nativeform.NewScrollbar
 	newListboxScrollForPicker   = nativeform.NewListboxScrollbar
@@ -667,6 +668,7 @@ func (p *picker) releaseResources() {
 		}
 		p.releaseStateImages()
 		if p.tooltip != 0 {
+			pSendMessage.Call(uintptr(p.tooltip), wmSetFont, uintptr(p.font), 0)
 			pDestroyWindow.Call(uintptr(p.tooltip))
 			p.tooltip = 0
 		}
@@ -744,6 +746,7 @@ func (p *picker) create() (err error) {
 	}
 	p.hwnd = hwnd
 	firstFrame := nativeform.BeginFirstFrame(p.hwnd)
+	p.textScale = font.TextScaleFactor()
 	p.dpiScale = p.windowScale()
 	scale := p.scale()
 	p.font, _ = newFontForPicker(int32(14*scale+0.5), 400, p.options.Chinese)
@@ -1094,7 +1097,7 @@ func (p *picker) createTooltips() error {
 		return fmt.Errorf("create process picker tooltip: %w", err)
 	}
 	p.tooltip = hwnd
-	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette)
+	nativeform.ApplyTooltip(p.tooltip, p.themeDark, p.palette, p.font)
 	pSendMessage.Call(uintptr(hwnd), ttmSetMaxTipWidth, 0, uintptr(int(360*p.scale())))
 	for id, key := range map[uint16]string{
 		idSearch: "tip_process_search", idRefresh: "tip_process_refresh", idBrowse: "tip_process_browse",

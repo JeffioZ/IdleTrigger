@@ -695,3 +695,44 @@ func annotatedConfigBody(text string) (string, bool) {
 	}
 	return text[idx:], true
 }
+
+func TestLockKeysConfigMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "IdleTrigger.toml")
+	if err := os.WriteFile(path, []byte("hotkeys_enabled = false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LockKeysEnabled {
+		t.Fatal("migration must keep notifications opt-in")
+	}
+	if !cfg.LockKeysCapsEnabled || !cfg.LockKeysNumEnabled || !cfg.LockKeysScrollEnabled || !cfg.LockKeysSkipFullscreen {
+		t.Fatal("migration must select all keys and protect fullscreen by default")
+	}
+	cfg.LockKeysEnabled = true
+	cfg.LockKeysNumEnabled = false
+	cfg.LockKeysSkipFullscreen = false
+	if _, err := saveToAtRevision(path, cfg, cfg.SourceRevision); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadFrom(path)
+	if err != nil || !cfg.LockKeysEnabled || cfg.LockKeysNumEnabled || cfg.LockKeysSkipFullscreen || !cfg.LockKeysCapsEnabled || !cfg.LockKeysScrollEnabled {
+		t.Fatalf("enabled setting did not survive reload: %+v %v", cfg, err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadFrom(path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ModTime() != after.ModTime() {
+		t.Fatal("unchanged configuration was rewritten")
+	}
+}

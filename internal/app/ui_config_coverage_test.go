@@ -12,7 +12,7 @@ func TestEverySerializedConfigFieldHasAUIOwner(t *testing.T) {
 		"language": "settings", "idle_enabled": "control panel", "idle_timeout_minutes": "settings", "idle_action": "settings",
 		"idle_warning_seconds": "settings", "idle_enhanced_monitor": "settings", "nosleep_enabled": "control panel",
 		"keep_screen_on": "settings", "nosleep_on_battery": "settings", "nosleep_battery_threshold": "settings",
-		"hotkeys_enabled": "settings", "automation_enabled": "control panel", "automation_rules": "automation manager",
+		"lock_keys_enabled": "settings", "lock_keys_caps_enabled": "settings", "lock_keys_num_enabled": "settings", "lock_keys_scroll_enabled": "settings", "lock_keys_skip_fullscreen": "settings", "hotkeys_enabled": "settings", "automation_enabled": "control panel", "automation_rules": "automation manager",
 		"logging_enabled": "settings", "theme_switch_enabled": "control panel", "theme_light_time": "settings",
 		"theme_dark_time": "settings", "theme_mode": "settings", "theme_ip_location_enabled": "settings",
 		"theme_dark_on_battery": "settings", "theme_skip_fullscreen": "settings",
@@ -49,11 +49,12 @@ func TestSettingsPanelStateMapsDetailedConfig(t *testing.T) {
 	cfg.IdleEnabled, cfg.IdleTimeoutMinutes, cfg.IdleAction, cfg.IdleEnhancedMonitor = true, 45, config.ActionLock, true
 	cfg.ThemeLightTime, cfg.ThemeDarkTime = "06:12", "20:34"
 	cfg.ThemeIPLocationEnabled = true
+	cfg.LockKeysEnabled = true
 	cfg.SourceRevision = "revision"
 	cfg.ThemeDarkOnBattery, cfg.ThemeSkipFullscreen = true, true
 	cfg.Language, cfg.HotkeysEnabled, cfg.AutostartEnabled, cfg.LoggingEnabled = "zh-CN", true, true, true
 	state := (&runtimeState{cfg: cfg, lang: "zh-CN"}).settingsPanelState()
-	if !state.KeepScreenOn || !state.NoSleepOnBattery || state.NoSleepBatteryThreshold != 42 || !state.IdleEnabled || state.IdleTimeoutMinutes != 45 ||
+	if !state.LockKeysEnabled || !state.KeepScreenOn || !state.NoSleepOnBattery || state.NoSleepBatteryThreshold != 42 || !state.IdleEnabled || state.IdleTimeoutMinutes != 45 ||
 		state.IdleAction != "lock" || !state.IdleEnhancedMonitor || state.IdleWarningSeconds != 75 ||
 		state.ThemeMode != "sunrise" || state.ThemeLightTime != "06:12" || state.ThemeDarkTime != "20:34" ||
 		!state.ThemeIPLocationEnabled ||

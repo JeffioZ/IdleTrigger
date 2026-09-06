@@ -18,47 +18,51 @@ import (
 )
 
 type State struct {
-	KeepScreenOn, NoSleepOnBattery bool
-	NoSleepBatteryThreshold        int
-	IdleEnabled                    bool
-	IdleTimeoutMinutes             int
-	IdleAction                     string
-	IdleWarningSeconds             int
-	IdleEnhancedMonitor            bool
-	ThemeMode                      string
-	ThemeLightTime, ThemeDarkTime  string
-	ThemeIPLocationEnabled         bool
-	ThemeLocationStatus            string
-	ThemeDarkOnBattery             bool
-	ThemeSkipFullscreen            bool
-	Language                       string
-	HotkeysEnabled                 bool
-	AutostartEnabled               bool
-	LoggingEnabled                 bool
-	Version                        string
-	Revision                       string
-	Chinese                        bool
-	Owner                          windows.Handle
+	KeepScreenOn, NoSleepOnBattery                                                         bool
+	NoSleepBatteryThreshold                                                                int
+	IdleEnabled                                                                            bool
+	IdleTimeoutMinutes                                                                     int
+	IdleAction                                                                             string
+	IdleWarningSeconds                                                                     int
+	IdleEnhancedMonitor                                                                    bool
+	ThemeMode                                                                              string
+	ThemeLightTime, ThemeDarkTime                                                          string
+	ThemeIPLocationEnabled                                                                 bool
+	ThemeLocationStatus                                                                    string
+	ThemeDarkOnBattery                                                                     bool
+	ThemeSkipFullscreen                                                                    bool
+	Language                                                                               string
+	LockKeysEnabled                                                                        bool
+	LockKeysCapsEnabled, LockKeysNumEnabled, LockKeysScrollEnabled, LockKeysSkipFullscreen bool
+	HotkeysEnabled                                                                         bool
+	AutostartEnabled                                                                       bool
+	LoggingEnabled                                                                         bool
+	Version                                                                                string
+	Revision                                                                               string
+	Chinese                                                                                bool
+	Owner                                                                                  windows.Handle
 }
 
 type SaveRequest struct {
-	BaseRevision                   string
-	KeepScreenOn, NoSleepOnBattery bool
-	NoSleepBatteryThreshold        int
-	IdleEnabled                    bool
-	IdleTimeoutMinutes             int
-	IdleAction                     string
-	IdleWarningSeconds             int
-	IdleEnhancedMonitor            bool
-	ThemeMode                      string
-	ThemeLightTime, ThemeDarkTime  string
-	ThemeIPLocationEnabled         bool
-	ThemeDarkOnBattery             bool
-	ThemeSkipFullscreen            bool
-	Language                       string
-	HotkeysEnabled                 bool
-	AutostartEnabled               bool
-	LoggingEnabled                 bool
+	BaseRevision                                                                           string
+	KeepScreenOn, NoSleepOnBattery                                                         bool
+	NoSleepBatteryThreshold                                                                int
+	IdleEnabled                                                                            bool
+	IdleTimeoutMinutes                                                                     int
+	IdleAction                                                                             string
+	IdleWarningSeconds                                                                     int
+	IdleEnhancedMonitor                                                                    bool
+	ThemeMode                                                                              string
+	ThemeLightTime, ThemeDarkTime                                                          string
+	ThemeIPLocationEnabled                                                                 bool
+	ThemeDarkOnBattery                                                                     bool
+	ThemeSkipFullscreen                                                                    bool
+	Language                                                                               string
+	LockKeysEnabled                                                                        bool
+	LockKeysCapsEnabled, LockKeysNumEnabled, LockKeysScrollEnabled, LockKeysSkipFullscreen bool
+	HotkeysEnabled                                                                         bool
+	AutostartEnabled                                                                       bool
+	LoggingEnabled                                                                         bool
 }
 
 type SaveResult struct {
@@ -78,6 +82,7 @@ type choice struct {
 }
 
 type panel struct {
+	textScale                                float64
 	hwnd                                     windows.Handle
 	state                                    State
 	text                                     TextFunc
@@ -105,10 +110,9 @@ type panel struct {
 	captureHost                              bool
 	captureScale                             float64
 	themeOverride                            *bool
-	contentScroll                            *nativeform.Scrollbar
+	viewport                                 *nativeform.Viewport
 	tooltip                                  windows.Handle
 	tooltipText                              map[windows.Handle][]uint16
-	contentOffset, viewportHeight            int
 	validationError                          bool
 	page                                     int
 }
@@ -163,6 +167,16 @@ const (
 	idThemeLocationStatus   uint16 = 164
 	idProjectHomeLabel      uint16 = 165
 	idVersion               uint16 = 166
+	idLockKeys              uint16 = 167
+	idTabNotifications      uint16 = 168
+	idNotificationsTitle    uint16 = 169
+	idLockCaps              uint16 = 170
+	idLockNum               uint16 = 171
+	idLockScroll            uint16 = 172
+	idLockFullscreen        uint16 = 173
+	idLockPreview           uint16 = 174
+	idNotificationsHint     uint16 = 175
+	idNotificationsBehavior uint16 = 176
 	idFieldSurfaceBase      uint16 = 500
 
 	wmDestroy         = 0x0002
@@ -377,7 +391,7 @@ func CapturePage(state State, text TextFunc, scale float64, dark bool, page int,
 		clearActive(p)
 		return err
 	}
-	p.page = max(0, min(page, 2))
+	p.page = max(0, min(page, 3))
 	p.applyDependentStates()
 	defer func() {
 		if p.hwnd != 0 {
@@ -437,10 +451,11 @@ func (p *panel) create() error {
 	}
 	p.hwnd = windows.Handle(hwnd)
 	firstFrame := nativeform.BeginFirstFrame(p.hwnd)
+	p.textScale = font.TextScaleFactor()
 	p.dpiScale = p.windowScale()
-	p.font, _ = font.New(int32(14*p.scale()+0.5), 400, p.state.Chinese)
-	p.sectionFont, _ = font.New(int32(14*p.scale()+0.5), 600, p.state.Chinese)
-	p.titleFont, _ = font.New(int32(17*p.scale()+0.5), 600, p.state.Chinese)
+	p.font, _ = font.NewForLayout(int32(14*p.scale()+0.5), 400, p.state.Chinese)
+	p.sectionFont, _ = font.NewForLayout(int32(14*p.scale()+0.5), 600, p.state.Chinese)
+	p.titleFont, _ = font.NewForLayout(int32(17*p.scale()+0.5), 600, p.state.Chinese)
 	if p.font == 0 || p.sectionFont == 0 || p.titleFont == 0 {
 		pDestroyWindow.Call(hwnd)
 		return fmt.Errorf("create settings fonts")
@@ -450,13 +465,17 @@ func (p *panel) create() error {
 		pDestroyWindow.Call(hwnd)
 		return err
 	}
-	bar, err := nativeform.NewScrollbar(nativeform.ScrollbarOptions{Parent: p.hwnd, Palette: p.palette,
-		Background: p.palette.WindowBackground, Scale: p.scale(), OnChange: p.scrollTo})
+	bar, err := nativeform.NewViewport(p.hwnd, p.syncViewport)
 	if err != nil {
 		pDestroyWindow.Call(hwnd)
 		return err
 	}
-	p.contentScroll = bar
+	p.viewport = bar
+	p.interaction.OnFocus = func(hwnd windows.Handle) {
+		if b, ok := p.bounds[p.controlID(hwnd)]; ok {
+			p.viewport.EnsureVisible(b.x, b.y, b.width, b.height)
+		}
+	}
 	p.position(nil)
 	if !p.captureHost && p.state.Owner != 0 {
 		if enabled, _, _ := pIsWindowEnabled.Call(uintptr(p.state.Owner)); enabled != 0 {
@@ -486,10 +505,10 @@ func (p *panel) t(key string) string {
 
 func (p *panel) scale() float64 {
 	if p.captureScale > 0 {
-		return p.captureScale
+		return p.captureScale * max(1, p.textScale)
 	}
 	if p.dpiScale > 0 {
-		return p.dpiScale
+		return p.dpiScale * max(1, p.textScale)
 	}
 	return 1
 }
@@ -509,8 +528,8 @@ func (p *panel) frameControls() []windows.Handle {
 			out = append(out, control)
 		}
 	}
-	if p.contentScroll != nil && p.contentScroll.Window() != 0 {
-		out = append(out, p.contentScroll.Window())
+	if p.viewport != nil {
+		out = append(out, p.viewport.Windows()...)
 	}
 	return out
 }
