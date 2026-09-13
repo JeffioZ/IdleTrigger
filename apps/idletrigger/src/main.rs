@@ -711,6 +711,7 @@ unsafe extern "system" fn hidden_proc(
             }
             WM_REFRESH_UI => {
                 theme_engine::finish_repair();
+                automation::show_save_errors();
                 apply_stay_awake();
                 refresh_checkboxes();
                 refresh_status();

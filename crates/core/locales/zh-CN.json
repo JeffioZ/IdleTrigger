@@ -405,5 +405,6 @@
   "logic_none": "无进程命中",
   "cli_status_tray_off": "托盘：未运行",
   "nosleep_battery_threshold_display": "电池电量阈值（%）",
-  "error_single_instance": "无法确认应用是否已经运行，已停止启动：%s"
+  "error_single_instance": "无法确认应用是否已经运行，已停止启动：%s",
+  "automation_checkpoint_failed": "任务“%s”的触发记录保存失败，已跳过本次计划动作。请检查目录写入权限和磁盘空间。\n%s"
 }

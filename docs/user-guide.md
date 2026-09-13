@@ -36,9 +36,9 @@ A shared scan runs about every five seconds, so very short processes can be miss
 
 共享扫描约每 5 秒一次，极短进程可能漏检。进程启动触发器先建立基线，已有进程不算新启动；消失有 5 秒宽限，扫描失败不等于全部退出。计划进程条件不满足时可跳过或等待至截止时间。跨午夜时间段按开始日判断星期。任务依赖 IdleTrigger 运行，不会安装到 Windows 任务计划程序。
 
-Schedules remain due during the scheduled minute and the following minute, including after startup or resume; older times are skipped. If saving an occurrence checkpoint fails, the action still proceeds and the error is logged. Restarting before the record can be saved may allow it to run again.
+Schedules remain due during the scheduled minute and the following minute, including after startup or resume; older times are skipped. A scheduled action is queued only after its occurrence checkpoint is saved successfully. Save failures skip the action and display an error; the same occurrence is not retried during that app session. After restarting, an unsaved occurrence can be reconsidered if it is still within the grace window, but must be saved before it can run.
 
-计划在指定分钟和下一分钟内仍可触发，包括启动或恢复之后；超过此窗口不补执行。触发记录保存失败时仍继续执行并记日志，记录成功保存前重启可能再次触发。
+计划在指定分钟和下一分钟内仍可触发，包括启动或恢复之后；超过此窗口不补执行。计划动作只有在触发记录成功保存后才进入倒计时。保存失败会跳过动作并提示错误，同次运行不重试该次计划；重启后，未保存的记录若仍在容差窗口内可重新判断，但仍须先成功保存才能执行。
 
 ## Themes and notifications / 主题与提示
 

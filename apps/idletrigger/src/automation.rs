@@ -279,10 +279,9 @@ fn tick_with_snapshot(
             continue;
         }
         if monotonic_now >= pending.deadline {
-            record_occurrence(&id, pending.occurrence);
+            record_occurrence(rule, pending.occurrence);
         } else if condition(rule) {
-            record_occurrence(&id, pending.occurrence.clone());
-            fire_event(rule, rule_once_date(rule));
+            fire_event(rule, Some(pending.occurrence.clone()));
         } else {
             WAITING_EVENTS.lock().unwrap().insert(id, pending);
         }
@@ -314,8 +313,7 @@ fn tick_with_snapshot(
                         .has_scheduled_occurrence(&rule.id, &occurrence);
                     if !already {
                         if condition(rule) {
-                            record_occurrence(&rule.id, occurrence);
-                            fire_event(rule, rule_once_date(rule));
+                            fire_event(rule, Some(occurrence));
                         } else if rule.blocked_policy == auto::BLOCKED_WAIT
                             && rule.max_wait_minutes > 0
                         {
@@ -329,7 +327,7 @@ fn tick_with_snapshot(
                                 },
                             );
                         } else {
-                            record_occurrence(&rule.id, occurrence);
+                            record_occurrence(rule, occurrence);
                         }
                     }
                 }
@@ -344,7 +342,7 @@ fn tick_with_snapshot(
                     .any(|t| present.get(&t.key()) == Some(&true));
                 let fire = PROCESS_TRACKER.lock().unwrap().edge(rule, any);
                 if fire {
-                    fire_event(rule, rule_once_date(rule));
+                    fire_event(rule, None);
                 }
             }
             _ => {}
@@ -384,8 +382,8 @@ fn request_refresh() {
     }
 }
 
-fn fire_event(rule: &auto::Rule, once_date: Option<String>) {
-    dispatch_event(rule, once_date, || unsafe {
+fn fire_event(rule: &auto::Rule, occurrence: Option<String>) {
+    dispatch_event(rule, occurrence, || unsafe {
         let hidden = crate::hwnd(&crate::HIDDEN);
         // A null HWND posts a thread message successfully, but no window will
         // consume it. Treat a missing recipient as a failed dispatch.
@@ -400,7 +398,12 @@ fn fire_event(rule: &auto::Rule, once_date: Option<String>) {
     });
 }
 
-fn dispatch_event(rule: &auto::Rule, once_date: Option<String>, notify: impl FnOnce() -> bool) {
+fn dispatch_event(rule: &auto::Rule, occurrence: Option<String>, notify: impl FnOnce() -> bool) {
+    if let Some(occurrence) = occurrence
+        && !record_occurrence(rule, occurrence)
+    {
+        return;
+    }
     if ACTION_BUSY
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -418,7 +421,7 @@ fn dispatch_event(rule: &auto::Rule, once_date: Option<String>, notify: impl FnO
         action: rule.action.clone(),
         seconds,
         rule_id: rule.id.clone(),
-        once_date,
+        once_date: rule_once_date(rule),
     });
     if !notify() {
         *pending = None;
@@ -431,23 +434,51 @@ fn dispatch_event(rule: &auto::Rule, once_date: Option<String>, notify: impl FnO
     }
 }
 
-fn record_occurrence(rule_id: &str, occurrence: String) {
+static SAVE_ERRORS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+fn record_occurrence(rule: &auto::Rule, occurrence: String) -> bool {
+    // Remember cancelled occurrences in this process too: do not retry the
+    // same action or show another error on every scan during its grace window.
     RUNTIME_STATE
         .lock()
         .unwrap()
-        .record_scheduled_occurrence(rule_id, occurrence);
-    persist_state();
+        .record_scheduled_occurrence(&rule.id, occurrence);
+    match persist_state() {
+        Ok(()) => true,
+        Err(error) => {
+            crate::log_line(&format!(
+                "automation event {} cancelled: state save failed: {error}",
+                rule.id
+            ));
+            SAVE_ERRORS.lock().unwrap().insert(
+                rule.id.clone(),
+                crate::t_args(
+                    "automation_checkpoint_failed",
+                    &[&rule.name, &error.to_string()],
+                ),
+            );
+            request_refresh();
+            false
+        }
+    }
 }
 
-/// Persists the runtime state; call after occurrence changes.
-pub fn persist_state() {
-    let Some(path) = STATE_PATH.lock().unwrap().clone() else {
-        return;
-    };
-    let state = RUNTIME_STATE.lock().unwrap().clone();
-    if let Err(err) = auto::save_runtime_state(&path, &state) {
-        crate::log_line(&format!("automation state save failed: {err}"));
+/// Display worker failures on the UI thread, with no scheduler locks held.
+pub fn show_save_errors() {
+    let errors = std::mem::take(&mut *SAVE_ERRORS.lock().unwrap());
+    if !errors.is_empty() {
+        crate::warn_dialog("", &errors.into_values().collect::<Vec<_>>().join("\n\n"));
     }
+}
+
+fn persist_state() -> std::io::Result<()> {
+    let path = STATE_PATH
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| std::io::Error::other("automation state path unavailable"))?;
+    let state = RUNTIME_STATE.lock().unwrap().clone();
+    auto::save_runtime_state(&path, &state)
 }
 
 /// Cancelling a one-shot rule disables only that specific rule (identified
@@ -857,6 +888,66 @@ mod date_tests {
 mod runtime_tests {
     use super::*;
     #[test]
+    fn checkpoint_failure_blocks_dispatch_and_success_is_saved_before_notification() {
+        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let old_state = std::mem::take(&mut *RUNTIME_STATE.lock().unwrap());
+        let old_path = STATE_PATH.lock().unwrap().take();
+        let old_errors = std::mem::take(&mut *SAVE_ERRORS.lock().unwrap());
+        let directory = std::env::temp_dir().join(format!(
+            "IdleTrigger-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let path = directory.join("IdleTrigger.state.json");
+        // A directory at the destination makes the atomic replacement fail.
+        std::fs::create_dir_all(&path).unwrap();
+        *STATE_PATH.lock().unwrap() = Some(path.clone());
+        let rule = auto::Rule {
+            id: "checkpoint-test".into(),
+            name: "Checkpoint test".into(),
+            action: auto::ACTION_LOCK.into(),
+            trigger: auto::TRIGGER_DAILY.into(),
+            ..Default::default()
+        };
+        let occurrence = "2026-09-13T12:00";
+        dispatch_event(&rule, Some(occurrence.into()), || {
+            panic!("failed save must not dispatch")
+        });
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst));
+        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(
+            RUNTIME_STATE
+                .lock()
+                .unwrap()
+                .has_scheduled_occurrence(&rule.id, occurrence)
+        );
+        assert!(SAVE_ERRORS.lock().unwrap().contains_key(&rule.id));
+        assert!(path.is_dir());
+
+        std::fs::remove_dir(&path).unwrap();
+        let next = "2026-09-14T12:00";
+        let mut notified = false;
+        dispatch_event(&rule, Some(next.into()), || {
+            let (saved, error) = auto::load_runtime_state(&path);
+            assert!(error.is_none());
+            assert!(saved.has_scheduled_occurrence(&rule.id, next));
+            notified = true;
+            false // Do not deliver a real action to the UI.
+        });
+        assert!(notified);
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst));
+        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        *RUNTIME_STATE.lock().unwrap() = old_state;
+        *STATE_PATH.lock().unwrap() = old_path;
+        *SAVE_ERRORS.lock().unwrap() = old_errors;
+    }
+
+    #[test]
     fn scheduled_process_conditions_wait_and_expire_without_dispatch() {
         let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
         let previous_config = crate::CONFIG
@@ -965,6 +1056,7 @@ executable = "missing.exe"
         *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
         clear_overrides();
         RUNTIME_STATE.lock().unwrap().last_occurrences.clear();
+        SAVE_ERRORS.lock().unwrap().clear();
         *crate::CONFIG.lock().unwrap() = previous_config;
     }
 

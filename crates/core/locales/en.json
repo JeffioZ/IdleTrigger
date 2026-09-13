@@ -405,5 +405,6 @@
   "logic_none": "No process matches",
   "cli_status_tray_off": "Tray: not running",
   "nosleep_battery_threshold_display": "Battery threshold (%)",
-  "error_single_instance": "Could not check whether the app is already running. Startup was stopped: %s"
+  "error_single_instance": "Could not check whether the app is already running. Startup was stopped: %s",
+  "automation_checkpoint_failed": "The occurrence record for task \"%s\" could not be saved. This scheduled action was skipped. Check the folder's write access and available disk space.\n%s"
 }
