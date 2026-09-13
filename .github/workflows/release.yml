@@ -8,6 +8,13 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -15,45 +22,49 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Toolchain components
         run: |
-          rustup component add clippy rustfmt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup target add i686-pc-windows-msvc
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --target x86_64-pc-windows-msvc,i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate release tag
         run: |
-          # Port of tools/validate-release-tag.ps1: strict SemVer vMAJOR.MINOR.PATCH
-          # with Windows uint16 version components.
+          # SemVer labels/metadata do not enter the fixed Windows version.
           $tag = $env:RELEASE_TAG
           $semVerPattern = '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
-          if (-not [regex]::IsMatch($tag, $semVerPattern)) {
+          $parsed = [regex]::Match($tag, $semVerPattern)
+          if (-not $parsed.Success) {
             Write-Error "Release tag '$tag' is not strict SemVer in the form vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]."
             exit 1
           }
           $version = $tag.Substring(1)
-          foreach ($part in ([regex]::Matches($version, '[0-9]+') | Select-Object -First 4)) {
-            if ([uint32]$part.Value -gt [uint16]::MaxValue) {
+          foreach ($part in 'major', 'minor', 'patch') {
+            [uint16]$component = 0
+            if (-not [uint16]::TryParse($parsed.Groups[$part].Value, [ref]$component)) {
               Write-Error "Release tag '$tag' contains a Windows version component outside 0..65535."
               exit 1
             }
           }
           Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_PRERELEASE=$($parsed.Groups['prerelease'].Success.ToString().ToLowerInvariant())"
 
       - name: Verify
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --workspace
+          cargo test --locked --workspace --all-features --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --workspace --all-features --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
@@ -61,12 +72,17 @@ jobs:
           IDLETRIGGER_VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --locked --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item target/x86_64-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x64.exe -Force
-          cargo build --release --target i686-pc-windows-msvc
+          cargo build --locked --release --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item target/i686-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x86.exe -Force
+
+      - name: Verify release artifacts
+        run: |
+          ./.github/scripts/verify-windows-artifact.ps1 -Path dist/IdleTrigger-x64.exe -Architecture x64 -Version $env:RELEASE_VERSION
+          ./.github/scripts/verify-windows-artifact.ps1 -Path dist/IdleTrigger-x86.exe -Architecture x86 -Version $env:RELEASE_VERSION
 
       - name: Checksums
         run: |
@@ -87,6 +103,7 @@ jobs:
         with:
           name: IdleTrigger ${{ env.RELEASE_TAG }}
           draft: true
+          prerelease: ${{ env.RELEASE_PRERELEASE == 'true' }}
           fail_on_unmatched_files: true
           files: |
             dist/IdleTrigger-x86.exe

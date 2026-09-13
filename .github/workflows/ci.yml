@@ -3,6 +3,13 @@ name: Lint
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
 on:
   workflow_dispatch:
   push:
@@ -17,36 +24,45 @@ concurrency:
 jobs:
   lint:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Toolchain components
         run: |
-          rustup component add clippy rustfmt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup target add i686-pc-windows-msvc
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --target x86_64-pc-windows-msvc,i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: rustfmt
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        run: |
+          cargo test --locked --workspace --all-features --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --workspace --all-features --target i686-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build supported Windows architectures
         env:
           IDLETRIGGER_VERSION: ci
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --locked --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --release --target i686-pc-windows-msvc
+          cargo build --locked --release --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify release artifacts
+        run: |
+          ./.github/scripts/verify-windows-artifact.ps1 -Path target/x86_64-pc-windows-msvc/release/IdleTrigger.exe -Architecture x64 -Version ci
+          ./.github/scripts/verify-windows-artifact.ps1 -Path target/i686-pc-windows-msvc/release/IdleTrigger.exe -Architecture x86 -Version ci
 
       - name: Build devtools variant
         env:
           IDLETRIGGER_VERSION: ci
-        run: cargo build --release --features devtools --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --features devtools --target x86_64-pc-windows-msvc

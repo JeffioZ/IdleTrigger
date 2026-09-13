@@ -27,23 +27,28 @@ Config writes are serialized and published only after successful saving. Drafts 
 Install Rust MSVC, Visual Studio C++ Build Tools, and Windows SDK. From the repository root / 安装对应工具后在仓库根目录执行：
 
 ```powershell
-rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
-rustup component add rustfmt clippy
+$env:RUSTUP_TOOLCHAIN = 'stable'
+rustup toolchain install stable --profile minimal --component clippy,rustfmt --target x86_64-pc-windows-msvc,i686-pc-windows-msvc
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo build --release --target x86_64-pc-windows-msvc
-cargo build --release --target i686-pc-windows-msvc
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features --target x86_64-pc-windows-msvc
+cargo test --locked --workspace --all-features --target i686-pc-windows-msvc
+cargo build --locked --release --target x86_64-pc-windows-msvc
+cargo build --locked --release --target i686-pc-windows-msvc
 ```
 
 Outputs: `target/<target>/release/IdleTrigger.exe`. `.cargo/config.toml` enables static CRT linking. `IDLETRIGGER_VERSION` sets the displayed/resource version; local builds default to the package version. Commit dependency changes with `Cargo.lock`.
 
 产物为上述路径，`.cargo/config.toml` 启用静态 CRT。`IDLETRIGGER_VERSION` 设置显示及资源版本，本地默认包版本。依赖变化需同步提交 `Cargo.lock`。
 
+CI follows stable Rust and uses `--locked` to prevent implicit dependency changes. It runs tests on both architectures with all features, checks normal release artifacts with `.github/scripts/verify-windows-artifact.ps1`, then builds the diagnostic variant. The artifact check covers PE architecture, GUI subsystem, version fields, manifest markers, imported DLLs, and exclusion of diagnostic switches. It does not replace testing on the oldest supported Windows version.
+
+CI 使用 stable Rust，通过 `--locked` 阻止隐式依赖变更；双架构启用全部功能运行测试，用 `.github/scripts/verify-windows-artifact.ps1` 检查正式产物，再构建诊断版。产物检查覆盖 PE 架构、GUI 子系统、版本字段、manifest 标记、DLL 导入及诊断开关排除，不能替代最低支持 Windows 版本上的运行验证。
+
 ## Diagnostics / 诊断
 
 ```powershell
-cargo build --release --features devtools --target x86_64-pc-windows-msvc
+cargo build --locked --release --features devtools --target x86_64-pc-windows-msvc
 ```
 
 Only devtools builds recognize these switches, all requiring `IDLETRIGGER_DEVTOOLS=1`. Use an isolated writable folder and separate configuration with automatic features disabled. Preview modes must not execute real system actions.

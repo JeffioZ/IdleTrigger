@@ -15,6 +15,10 @@ devtools = []
 name = "IdleTrigger"
 path = "src/main.rs"
 
+[[test]]
+name = "build_version"
+path = "build_version.rs"
+
 [dependencies]
 idletrigger-core = { workspace = true }
 toml_edit = { workspace = true }
