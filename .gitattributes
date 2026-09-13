@@ -3,7 +3,6 @@
 
 # Source files
 *.rs    text eol=lf
-*.slint text eol=lf
 
 # Scripts
 *.ps1   text eol=lf

@@ -1,11 +1,5 @@
-//! DWM colorization refresh for theme repair — Go `repair.go` parity.
-//!
-//! Windows 11 22H2+ only. The Go version uses COM IThemeManager2 + Legacy
-//! IThemeManager with hand-rolled vtables to apply a nudged auxiliary
-//! theme. Here we achieve the same DWM re-commit by patching the theme
-//! file and nudging `HKCU\...\DWM\ColorizationColor` directly, then
-//! broadcasting the 5-notification set — ~200 lines of manual COM vtable
-//! code replaced by two registry writes with the same observable effect.
+//! Windows 11 22H2+ DWM colorization repair: apply an auxiliary theme through
+//! COM, restore the original theme and color preferences, then notify apps.
 
 use std::io;
 use std::path::PathBuf;
@@ -26,20 +20,87 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 /// Runs the full DWM refresh.
-pub fn refresh_dwm_colorization(apps_light: bool, system_light: bool) -> io::Result<()> {
+pub fn refresh_dwm_colorization() -> io::Result<()> {
+    let session = crate::theme_com::Session::new().map_err(|e| io::Error::other(e.to_string()))?;
     let snapshot = current_theme_snapshot()?;
-    let accent = current_accent_color();
+    let apps_light = read_registry_dword(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        "AppsUseLightTheme",
+    )
+    .map(|v| v != 0)
+    .unwrap_or_else(|| theme_mode(&snapshot, "AppMode"));
+    let system_light = read_registry_dword(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        "SystemUsesLightTheme",
+    )
+    .map(|v| v != 0)
+    .unwrap_or_else(|| theme_mode(&snapshot, "SystemMode"));
+    let accent = current_accent_color()
+        .ok_or_else(|| io::Error::other("Windows accent color is unavailable"))?;
+    let original_dwm =
+        read_registry_dword("Software\\Microsoft\\Windows\\DWM", "ColorizationColor");
     let patched = patch_theme_file(&snapshot, apps_light, system_light, accent);
-    let _path = write_refresh_theme(&patched)?;
-    write_dwm_colorization(nudged_colorization(accent))?;
-    write_personalize("AppsUseLightTheme", apps_light)?;
-    write_personalize("SystemUsesLightTheme", system_light)?;
-    Ok(())
+    let path = write_refresh_theme(&patched)?;
+    let applied = session.apply(&path.to_string_lossy());
+    if applied.is_ok() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    // Always attempt recovery, including when applying the helper theme failed.
+    let mut errors = Vec::new();
+    if let Err(error) = applied {
+        errors.push(format!("apply helper theme: {error}"));
+    }
+    if let Err(error) = session.restore()
+        && let Err(retry) = session.restore()
+    {
+        errors.push(format!("restore original theme: {error}; retry: {retry}"));
+    }
+    if let Some(color) = original_dwm
+        && let Err(error) = write_dwm_colorization(color)
+    {
+        errors.push(error.to_string());
+    }
+    for (key, light) in [
+        ("AppsUseLightTheme", apps_light),
+        ("SystemUsesLightTheme", system_light),
+    ] {
+        if let Err(error) = write_personalize(key, light) {
+            errors.push(error.to_string());
+        } else if read_registry_dword(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            key,
+        ) != Some(light as u32)
+        {
+            errors.push(format!("Windows did not retain {key}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(errors.join("; ")))
+    }
 }
 
-fn themes_dir() -> PathBuf {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    PathBuf::from(local).join("Microsoft\\Windows\\Themes")
+fn theme_mode(source: &str, key: &str) -> bool {
+    let mut section = false;
+    for line in source.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line.eq_ignore_ascii_case("[VisualStyles]");
+        } else if section
+            && let Some((name, value)) = line.split_once('=')
+            && name.trim().eq_ignore_ascii_case(key)
+        {
+            return !value.trim().eq_ignore_ascii_case("Dark");
+        }
+    }
+    true
+}
+fn themes_dir() -> io::Result<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| io::Error::other("LOCALAPPDATA is unavailable"))?;
+    Ok(local.join("Microsoft\\Windows\\Themes"))
 }
 
 fn current_theme_snapshot() -> io::Result<String> {
@@ -51,14 +112,13 @@ fn current_theme_snapshot() -> io::Result<String> {
         candidates.push(path);
     }
     candidates.push(
-        themes_dir()
+        themes_dir()?
             .join("Custom.theme")
             .to_string_lossy()
             .to_string(),
     );
     for path in &candidates {
-        if let Ok(text) = std::fs::read_to_string(path)
-            && text.len() <= 1 << 20
+        if let Ok(text) = read_theme_snapshot(path)
             && has_section(&text, "Theme")
             && has_section(&text, "VisualStyles")
         {
@@ -68,6 +128,33 @@ fn current_theme_snapshot() -> io::Result<String> {
     Err(io::Error::other(
         "no current Windows theme file path is available",
     ))
+}
+
+fn read_theme_snapshot(path: &str) -> io::Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((1 << 20) + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1 << 20 {
+        return Err(io::Error::other("theme snapshot exceeds the size limit"));
+    }
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(io::Error::other("incomplete UTF-16 theme"));
+        }
+        let text: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .collect();
+        String::from_utf16(&text).map_err(io::Error::other)
+    } else {
+        String::from_utf8(bytes)
+            .map(|s| s.trim_start_matches('\u{feff}').to_string())
+            .map_err(io::Error::other)
+    }
 }
 
 fn has_section(text: &str, section: &str) -> bool {
@@ -113,18 +200,20 @@ fn read_registry_string(subkey: &str, value: &str) -> Option<String> {
     }
 }
 
-fn current_accent_color() -> u32 {
+fn current_accent_color() -> Option<u32> {
     if let Some(data) = read_registry_binary(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
         "AccentPalette",
     ) && data.len() >= 16
     {
-        return 0xFF00_0000 | (data[12] as u32) << 16 | (data[13] as u32) << 8 | data[14] as u32;
+        return Some(
+            0xFF00_0000 | (data[12] as u32) << 16 | (data[13] as u32) << 8 | data[14] as u32,
+        );
     }
     if let Some(v) = read_registry_dword("Software\\Microsoft\\Windows\\DWM", "ColorizationColor") {
-        return 0xFF00_0000 | (v & 0x00FF_FFFF);
+        return Some(0xFF00_0000 | (v & 0x00FF_FFFF));
     }
-    0xFF00_0000
+    None
 }
 
 fn read_registry_dword(subkey: &str, value: &str) -> Option<u32> {
@@ -210,58 +299,55 @@ fn patch_theme_file(source: &str, apps_light: bool, system_light: bool, accent: 
     } else {
         "\n"
     };
-    let lines: Vec<String> = source
-        .split("\r\n")
-        .flat_map(|s| s.split('\n'))
-        .map(|s| s.to_string())
-        .collect();
-    let app_mode = if apps_light { "Light" } else { "Dark" };
-    let system_mode = if system_light { "Light" } else { "Dark" };
-    let nudged = format!("0X{:08X}", nudged_colorization(accent));
-    let theme_id = format!("{{{}}}", pseudo_guid_upper());
-
-    let mut result: Vec<String> = Vec::with_capacity(lines.len());
-    let mut section = String::new();
-    let mut pending: Vec<(&str, String)> = vec![
-        ("DisplayName", "IdleTrigger DWM Refresh".into()),
-        ("ThemeId", theme_id),
-        ("AutoColorization", "0".into()),
-        ("ColorizationColor", nudged),
-        ("AppMode", app_mode.into()),
-        ("SystemMode", system_mode.into()),
-    ];
-
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if section == "Theme" || section == "VisualStyles" {
-                for (k, v) in &pending {
-                    result.push(format!("{k}={v}"));
+    let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
+    let id = format!("{{{}}}", pseudo_guid_upper());
+    let color = format!("0X{:08X}", nudged_colorization(accent));
+    for (section, values) in [
+        (
+            "Theme",
+            vec![("DisplayName", "IdleTrigger DWM Refresh"), ("ThemeId", &id)],
+        ),
+        (
+            "VisualStyles",
+            vec![
+                ("AutoColorization", "0"),
+                ("ColorizationColor", &color),
+                ("AppMode", if apps_light { "Light" } else { "Dark" }),
+                ("SystemMode", if system_light { "Light" } else { "Dark" }),
+            ],
+        ),
+    ] {
+        let header = format!("[{section}]");
+        let Some(start) = lines
+            .iter()
+            .position(|line| line.trim().eq_ignore_ascii_case(&header))
+            .map(|i| i + 1)
+        else {
+            continue;
+        };
+        let end = (start..lines.len())
+            .find(|i| lines[*i].trim().starts_with('['))
+            .unwrap_or(lines.len());
+        let mut missing = Vec::new();
+        for (key, value) in values {
+            let mut found = false;
+            for line in &mut lines[start..end] {
+                if line
+                    .split_once('=')
+                    .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(key))
+                {
+                    *line = format!("{key}={value}");
+                    found = true;
                 }
-                pending.clear();
             }
-            section = trimmed[1..trimmed.len() - 1].to_string();
-            result.push(line.to_string());
-        } else if (section == "Theme" || section == "VisualStyles")
-            && let Some(eq) = trimmed.find('=')
-        {
-            let key = trimmed[..eq].trim();
-            if let Some(pos) = pending.iter().position(|(k, _)| *k == key) {
-                let v = pending.remove(pos).1;
-                result.push(format!("{key}={v}"));
-            } else {
-                result.push(line.to_string());
+            if !found {
+                missing.push(format!("{key}={value}"));
             }
-        } else {
-            result.push(line.to_string());
         }
+        lines.splice(end..end, missing);
     }
-    for (k, v) in &pending {
-        result.push(format!("{k}={v}"));
-    }
-    result.join(newline)
+    lines.join(newline) + newline
 }
-
 fn pseudo_guid_upper() -> String {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -280,7 +366,7 @@ fn pseudo_guid_upper() -> String {
 }
 
 fn write_refresh_theme(content: &str) -> io::Result<PathBuf> {
-    let dir = themes_dir();
+    let dir = themes_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("IdleTriggerDwmRefresh.theme");
     std::fs::write(&path, content)?;
@@ -369,10 +455,29 @@ unsafe fn send_timeout(hwnd: windows::Win32::Foundation::HWND, msg: u32, lp: LPA
 
 /// Whether the OS supports the full DWM refresh (Win11 22H2+, build ≥ 22621).
 pub fn full_dwm_refresh_available() -> bool {
-    read_registry_string(
-        "Software\\Microsoft\\Windows NT\\CurrentVersion",
-        "CurrentBuildNumber",
-    )
-    .and_then(|v| v.trim().parse::<u32>().ok())
-    .is_some_and(|build| build >= 22621)
+    crate::system::windows_build() >= 22621
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn helper_theme_updates_only_the_correct_sections_and_preserves_modes() {
+        let source = "[theme]\r\nDisplayName=Original\r\n[Control Panel\\Desktop]\r\nWallpaper=keep.jpg\r\n[visualstyles]\r\nappmode=Dark\r\nSystemMode=Light\r\nPath=keep.msstyles\r\n[Sounds]\r\nAppMode=untouched\r\n";
+        let patched = patch_theme_file(source, false, true, 0xff123456);
+        assert!(patched.contains("Wallpaper=keep.jpg\r\n"));
+        assert!(patched.contains("Path=keep.msstyles\r\n"));
+        assert!(patched.contains("[Sounds]\r\nAppMode=untouched\r\n"));
+        let visual = patched
+            .split("[visualstyles]")
+            .nth(1)
+            .unwrap()
+            .split("[Sounds]")
+            .next()
+            .unwrap();
+        assert!(visual.contains("ColorizationColor=0XFF123457"));
+        assert!(!visual.contains("DisplayName="));
+        assert!(!theme_mode(&patched, "AppMode"));
+        assert!(theme_mode(&patched, "SystemMode"));
+    }
 }

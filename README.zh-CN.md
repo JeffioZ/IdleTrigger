@@ -4,11 +4,6 @@
 
 <p><strong>轻量、原生的 Windows 电源自动化托盘工具，一个 EXE 即可使用。</strong></p>
 
-<blockquote>
-  <p><strong>Rust 重写版：</strong>本仓库已从 Go 重写为 Rust（windows-rs 直调原生 Win32，无 UI 框架）。
-  除下述个别项外功能与 Go 版对齐；本 README 描述 Rust 构建。</p>
-</blockquote>
-
 <p>让任务持续运行，在真实输入空闲后执行电源动作，<br>并按时间或进程自动管理电源状态与 Windows 主题。</p>
 
 <p>
@@ -30,7 +25,7 @@
 ## 🪟 原生控制浮层
 
 <p align="center"><sub>适配 Windows 深浅色与显示器 DPI。<br>
-Rust 重写版的新截图稍后补充；Go 版界面保留在 git 历史中。</sub></p>
+支持键盘导航，切换显示器 DPI 时保留正在编辑的内容。</sub></p>
 
 左键托盘图标使用快捷控制，需要调整长期生效的选项时打开“设置”。
 
@@ -45,7 +40,7 @@ Rust 重写版的新截图稍后补充；Go 版界面保留在 git 历史中。<
 
 **为轻量而设计：** IdleTrigger 是面向 Windows 10 / Windows Server 2016 及以上的原生 Win32 便携程序。无需安装器、服务、WebView、模拟输入或额外运行时。设置保存在 EXE 旁边的可读 TOML 文件中。
 
-> **系统要求（Rust 版）：** Windows 10 1607 / Server 2016 及以上（x64 或 x86）。
+> **系统要求：** Windows 10 1607 / Server 2016 及以上（x64 或 x86）。
 > 实际下限为 1607（per-monitor DPI API 要求）；主题标题栏深色在 20H1+ 使用新 DWM 属性，
 > 1809–1909 自动回退旧属性。
 
@@ -60,13 +55,13 @@ Rust 重写版的新截图稍后补充；Go 版界面保留在 git 历史中。<
 | | 说明 |
 | --- | --- |
 | 📝 | [配置参考](IdleTrigger.example.toml)——所有 TOML 字段的中英文说明 |
-| 🗂️ | [文档索引](docs/README.md)——Rust 重写期间的文档状态 |
+| 🗂️ | [文档索引](docs/README.md)——使用、开发与发布说明 |
 
-Go 版的使用指南与开发文档正在随重写更新，旧版保留在最后一次 Go 发布的 git 历史中。
+自动任务、配置和命令行用法见[使用指南](docs/user-guide.md)；构建与验证见[开发指南](docs/development.md)。
 
 ## 🤝 致谢
 
-Rust 重写版使用 [tray-icon](https://crates.io/crates/tray-icon)、[windows-rs](https://crates.io/crates/windows)、[toml_edit](https://crates.io/crates/toml_edit)、[serde](https://crates.io/crates/serde) 等 crate。Go 版的托盘集成基于 [getlantern/systray v1.2.2](https://github.com/getlantern/systray) 调整（Apache-2.0 声明保留在 git 历史中）。保持唤醒功能受到 [NoSleep](https://github.com/CHerSun/NoSleep) 启发。Windows 11 主题修复为独立实现，其行为参考了 [Auto Dark Mode 的 DWM 刷新策略](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs)。
+IdleTrigger 使用 [tray-icon](https://crates.io/crates/tray-icon)、[windows-rs](https://crates.io/crates/windows)、[toml_edit](https://crates.io/crates/toml_edit)、[serde](https://crates.io/crates/serde) 等 crate。Go 版的托盘集成基于 [getlantern/systray v1.2.2](https://github.com/getlantern/systray) 调整（Apache-2.0 声明保留在 git 历史中）。保持唤醒功能受到 [NoSleep](https://github.com/CHerSun/NoSleep) 启发。Windows 11 主题修复为独立实现，其行为参考了 [Auto Dark Mode 的 DWM 刷新策略](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs)。
 
 ## 📄 许可证
 

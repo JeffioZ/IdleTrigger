@@ -111,11 +111,10 @@ fn checks() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i
 }
 
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
+static DRAFT_BASE: std::sync::Mutex<Option<idletrigger_core::config::Config>> =
+    std::sync::Mutex::new(None);
 static PAGE: AtomicI32 = AtomicI32::new(0);
-static FONT_BODY: AtomicIsize = AtomicIsize::new(0);
-static FONT_SECTION: AtomicIsize = AtomicIsize::new(0);
-static FONT_TITLE: AtomicIsize = AtomicIsize::new(0);
-static FONT_LINK: AtomicIsize = AtomicIsize::new(0);
+static AUTOSTART_BASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TOOLTIP_HWND: AtomicIsize = AtomicIsize::new(0);
 
 fn s(v: i32) -> i32 {
@@ -179,6 +178,7 @@ fn set_checked(parent: HWND, id: i32, value: bool) {
     unsafe {
         let control = get(parent, id);
         if !control.is_invalid() {
+            crate::accessibility::check(control, value);
             // Erase before repaint: with erase=false, DPI-rounded corners can
             // retain stale pixels from the previous check state, making the
             // toggle appear to need two clicks.
@@ -198,6 +198,7 @@ fn combo_sel(parent: HWND, id: i32) -> usize {
 }
 
 pub fn show() {
+    let _dpi = crate::dpi::Scope::window(crate::hwnd(&crate::PANEL));
     unsafe {
         if current().is_invalid() {
             create();
@@ -226,6 +227,10 @@ pub fn theme_hwnd() -> HWND {
     current()
 }
 
+pub fn default_button() -> HWND {
+    get(theme_hwnd(), ID_SAVE)
+}
+
 /// Devtools capture support: switches the visible page.
 #[cfg(feature = "devtools")]
 pub fn devtools_select_page(page: i32) {
@@ -243,11 +248,6 @@ fn create() {
         let body = crate::make_font_pub(14, 400);
         let section = crate::make_font_pub(14, 600);
         let title_font = crate::make_font_pub(17, 600);
-        let link_font = make_link_font(14);
-        FONT_BODY.store(body.0 as isize, Ordering::SeqCst);
-        FONT_SECTION.store(section.0 as isize, Ordering::SeqCst);
-        FONT_TITLE.store(title_font.0 as isize, Ordering::SeqCst);
-        FONT_LINK.store(link_font.0 as isize, Ordering::SeqCst);
 
         register_class(instance);
 
@@ -281,6 +281,7 @@ fn create() {
         )
         .expect("settings window");
         SETTINGS_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        crate::dpi::install(hwnd);
         theme::apply_to_window(hwnd);
         crate::set_window_icons_pub(hwnd);
 
@@ -291,30 +292,7 @@ fn create() {
         theme::retheme_children(hwnd);
         create_tooltip(hwnd);
         retheme_tooltip();
-    }
-}
-
-/// Message-font derivative with an underline, for the project-home link
-/// (Go DrawTextLink renders the URL underlined).
-fn make_link_font(size_px: i32) -> HFONT {
-    unsafe {
-        let mut metrics = NONCLIENTMETRICSW {
-            cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
-            ..Default::default()
-        };
-        if SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
-            metrics.cbSize,
-            Some(&mut metrics as *mut _ as *mut core::ffi::c_void),
-            Default::default(),
-        )
-        .is_ok()
-        {
-            metrics.lfMessageFont.lfHeight = -s(size_px);
-            metrics.lfMessageFont.lfUnderline = 1;
-            return windows::Win32::Graphics::Gdi::CreateFontIndirectW(&metrics.lfMessageFont);
-        }
-        HFONT::default()
+        crate::viewport::fit(hwnd);
     }
 }
 
@@ -826,18 +804,8 @@ unsafe fn label(
     right: bool,
 ) -> HWND {
     // SS_RIGHT = 2 (Go labelRight uses the raw style value).
-    let extra = if right { 2 } else { 0 };
+    let extra = 0x0080 | if right { 0x4002 } else { 0 }; // SS_NOPREFIX, SS_RIGHT | SS_ENDELLIPSIS
     unsafe {
-        // Left labels shrink to their measured text so a long translation can
-        // never sit under a neighboring field (Go CheckboxHitWidth pattern);
-        // right-aligned and full-width labels keep their grid rect.
-        let mut b = b;
-        if !right && b.2 > 0 && b.2 <= 220 {
-            let measured = logical_text_width(parent, font, text, b.2);
-            if measured > 0 {
-                b.2 = measured;
-            }
-        }
         child(
             parent,
             windows::core::w!("STATIC"),
@@ -957,7 +925,7 @@ fn combo(parent: HWND, id: i32, b: (i32, i32, i32, i32), items: &[String]) {
 }
 
 fn body_font() -> HFONT {
-    HFONT(FONT_BODY.load(Ordering::SeqCst) as *mut _)
+    crate::make_font_pub(14, 400)
 }
 
 fn is_chinese() -> bool {
@@ -1037,6 +1005,7 @@ fn populate(hwnd: HWND) {
         autostart,
         logging,
     ) = crate::cfg_map(|c| {
+        *DRAFT_BASE.lock().unwrap() = Some(c.clone());
         (
             c.keep_screen_on,
             c.nosleep_on_battery,
@@ -1063,6 +1032,7 @@ fn populate(hwnd: HWND) {
         )
     });
 
+    AUTOSTART_BASE.store(autostart, Ordering::SeqCst);
     for (id, value) in [
         (ID_KEEP_SCREEN, keep_screen),
         (ID_BATTERY_ALLOWED, battery_allowed),
@@ -1078,9 +1048,7 @@ fn populate(hwnd: HWND) {
         (ID_AUTOSTART, autostart),
         (ID_LOGGING, logging),
     ] {
-        checks()
-            .get_or_insert_with(Default::default)
-            .insert(id, value);
+        set_checked(hwnd, id, value);
     }
 
     set_text(hwnd, ID_BATTERY_THRESH, &battery_threshold.to_string());
@@ -1122,9 +1090,10 @@ fn location_status_text(ip_enabled: bool) -> String {
             return t_pub("settings_location_ip_resolved").replace("%s", &label);
         }
         return t_pub("settings_location_ip_pending")
-            .replace("%s", &t_pub("settings_location_auto"));
+            .replace("%s", &t_pub(crate::theme_engine::location(false).2));
     }
-    t_pub("settings_location_auto_status").replace("%s", &t_pub("settings_location_auto"))
+    t_pub("settings_location_auto_status")
+        .replace("%s", &t_pub(crate::theme_engine::location(false).2))
 }
 
 /// Page membership — Go pageControlIDs().
@@ -1353,42 +1322,48 @@ fn valid_time(value: &str) -> bool {
 
 /// Whether the open draft differs from the live config (Go cancel() check).
 fn draft_differs(hwnd: HWND, draft: &Draft) -> bool {
-    let (cfg_keep, cfg_batt, cfg_thresh, cfg_timeout, cfg_action, cfg_warning, cfg_enhanced) =
-        crate::cfg_map(|c| {
-            (
-                c.keep_screen_on,
-                c.nosleep_on_battery,
-                c.nosleep_battery_threshold,
-                c.idle_timeout_minutes,
-                c.idle_action.clone(),
-                c.idle_warning_seconds,
-                c.idle_enhanced_monitor,
-            )
-        });
-    let (cfg_mode, cfg_light, cfg_dark, cfg_ip, cfg_batt_dark, cfg_fullscreen, cfg_lang) =
-        crate::cfg_map(|c| {
-            (
-                c.theme_mode.clone(),
-                c.theme_light_time.clone(),
-                c.theme_dark_time.clone(),
-                c.theme_ip_location_enabled,
-                c.theme_dark_on_battery,
-                c.theme_skip_fullscreen,
-                c.language.clone(),
-            )
-        });
-    let (cfg_lock, cfg_caps, cfg_num, cfg_scroll, cfg_lock_full, cfg_hotkeys, cfg_logging) =
-        crate::cfg_map(|c| {
-            (
-                c.lock_keys_enabled,
-                c.lock_keys_caps_enabled,
-                c.lock_keys_num_enabled,
-                c.lock_keys_scroll_enabled,
-                c.lock_keys_skip_fullscreen,
-                c.hotkeys_enabled,
-                c.logging_enabled,
-            )
-        });
+    let base = DRAFT_BASE
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| crate::cfg_map(Clone::clone));
+
+    let (cfg_keep, cfg_batt, cfg_thresh, cfg_timeout, cfg_action, cfg_warning, cfg_enhanced) = {
+        let c = &base;
+        (
+            c.keep_screen_on,
+            c.nosleep_on_battery,
+            c.nosleep_battery_threshold,
+            c.idle_timeout_minutes,
+            c.idle_action.clone(),
+            c.idle_warning_seconds,
+            c.idle_enhanced_monitor,
+        )
+    };
+    let (cfg_mode, cfg_light, cfg_dark, cfg_ip, cfg_batt_dark, cfg_fullscreen, cfg_lang) = {
+        let c = &base;
+        (
+            c.theme_mode.clone(),
+            c.theme_light_time.clone(),
+            c.theme_dark_time.clone(),
+            c.theme_ip_location_enabled,
+            c.theme_dark_on_battery,
+            c.theme_skip_fullscreen,
+            c.language.clone(),
+        )
+    };
+    let (cfg_lock, cfg_caps, cfg_num, cfg_scroll, cfg_lock_full, cfg_hotkeys, cfg_logging) = {
+        let c = &base;
+        (
+            c.lock_keys_enabled,
+            c.lock_keys_caps_enabled,
+            c.lock_keys_num_enabled,
+            c.lock_keys_scroll_enabled,
+            c.lock_keys_skip_fullscreen,
+            c.hotkeys_enabled,
+            c.logging_enabled,
+        )
+    };
 
     let action_idx = IDLE_ACTIONS
         .iter()
@@ -1421,7 +1396,7 @@ fn draft_differs(hwnd: HWND, draft: &Draft) -> bool {
         || draft.scroll != cfg_scroll
         || draft.lock_fullscreen != cfg_lock_full
         || draft.hotkeys != cfg_hotkeys
-        || draft.autostart != crate::system::autostart_is_enabled()
+        || draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst)
         || draft.logging != cfg_logging
         || control_text(hwnd, ID_BATTERY_THRESH).trim() != cfg_thresh.to_string()
 }
@@ -1441,9 +1416,12 @@ fn save() {
             return;
         }
 
-        let hotkeys_changed = crate::cfg_map(|c| c.hotkeys_enabled) != draft.hotkeys;
         let autostart_was = crate::system::autostart_is_enabled();
-        crate::cfg_edit(|c| {
+        let base = DRAFT_BASE.lock().unwrap().clone();
+        if let Err(err) = crate::commit_config(|c, _| {
+            if base.as_ref() != Some(c) {
+                return Err(t_pub("settings_save_conflict"));
+            }
             c.keep_screen_on = draft.keep_screen;
             c.nosleep_on_battery = draft.battery_allowed;
             c.nosleep_battery_threshold = draft.battery_threshold.unwrap_or(0);
@@ -1470,21 +1448,26 @@ fn save() {
             c.lock_keys_skip_fullscreen = draft.lock_fullscreen;
             c.hotkeys_enabled = draft.hotkeys;
             c.logging_enabled = draft.logging;
-        });
+            Ok(())
+        }) {
+            set_text(hwnd, ID_VALIDATION, &err);
+            return;
+        }
+        *DRAFT_BASE.lock().unwrap() = Some(crate::cfg_map(Clone::clone));
+        let mut failures = Vec::new();
         crate::log_line("settings changed");
-        crate::persist_config();
         crate::apply_stay_awake();
         crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
         crate::refresh_checkboxes();
         crate::refresh_status();
         crate::theme::apply_to_all();
 
-        if hotkeys_changed {
+        {
             crate::system::unregister_all();
             if draft.hotkeys {
                 let failed = crate::system::register_all();
                 if !failed.is_empty() {
-                    crate::log_line(&format!("hotkeys failed: {}", failed.join(", ")));
+                    failures.push(format!("{}: {}", t_pub("menu_hotkeys"), failed.join(", ")));
                 }
             }
         }
@@ -1495,10 +1478,25 @@ fn save() {
                     .unwrap_or_default();
                 if crate::system::autostart_enable(&exe) {
                     crate::log_line("autostart enabled from settings");
+                } else {
+                    failures.push(t_pub("menu_autostart"));
                 }
             } else if crate::system::autostart_disable() {
                 crate::log_line("autostart disabled from settings");
+            } else {
+                failures.push(t_pub("menu_autostart"));
             }
+        }
+        AUTOSTART_BASE.store(crate::system::autostart_is_enabled(), Ordering::SeqCst);
+        if !failures.is_empty() {
+            let details = failures.join(", ");
+            crate::log_line(&format!("settings system integration failed: {details}"));
+            set_text(
+                hwnd,
+                ID_VALIDATION,
+                &t_pub("settings_system_apply_failed").replace("%s", &details),
+            );
+            return;
         }
         let _ = DestroyWindow(hwnd);
     }
@@ -1538,6 +1536,10 @@ unsafe fn open_project_home(hwnd: HWND) {
 
 unsafe fn create_tooltip(hwnd: HWND) {
     unsafe {
+        let old = HWND(TOOLTIP_HWND.swap(0, Ordering::SeqCst) as *mut _);
+        if !old.is_invalid() {
+            let _ = DestroyWindow(old);
+        }
         let tip = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             TOOLTIPS_CLASSW,
@@ -1777,7 +1779,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             | ID_NOTIFICATIONS_HINT
                     );
                     let disabled = !IsWindowEnabled(child_hwnd).as_bool();
-                    let text = if disabled {
+                    let text = if id == ID_VALIDATION && GetWindowTextLengthW(child_hwnd) > 0 {
+                        palette.danger_surface_text
+                    } else if disabled {
                         palette.disabled_text
                     } else if is_section {
                         palette.text
@@ -1839,24 +1843,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 );
                 LRESULT(theme::bg_brush().0 as isize)
             }
-            WM_DPICHANGED => {
-                // Rebuild at the new scale on next open.
-                let _ = DestroyWindow(hwnd);
-                LRESULT(0)
-            }
             WM_DESTROY => {
                 SETTINGS_HWND.store(0, Ordering::SeqCst);
                 TOOLTIP_HWND.store(0, Ordering::SeqCst);
                 PAGE.store(0, Ordering::SeqCst);
-                for slot in [&FONT_BODY, &FONT_SECTION, &FONT_TITLE, &FONT_LINK] {
-                    let font = HFONT(slot.load(Ordering::SeqCst) as *mut _);
-                    if !font.is_invalid() {
-                        let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                            windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
-                        );
-                    }
-                    slot.store(0, Ordering::SeqCst);
-                }
                 let _ = EnableWindow(crate::hwnd(&crate::PANEL), true);
                 crate::refresh_status();
                 LRESULT(0)
@@ -2027,5 +2017,141 @@ fn center_on_parent(win_w: i32, win_h: i32) -> (i32, i32) {
             y = y.clamp(work.top, work.bottom - win_h);
         }
         (x, y)
+    }
+}
+
+/// Refresh captions and choice labels while retaining every draft value.
+pub fn refresh_language() {
+    let hwnd = current();
+    if hwnd.is_invalid() {
+        return;
+    }
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(wide(&t_pub("settings_title")).as_ptr()));
+    }
+    for (id, key) in [
+        (ID_TITLE, "settings_title"),
+        (ID_DESCRIPTION, "settings_description"),
+        (ID_TAB_POWER, "settings_tab_power"),
+        (ID_TAB_THEME, "settings_tab_theme"),
+        (ID_TAB_NOTIFICATIONS, "settings_tab_notifications"),
+        (ID_TAB_APP, "settings_tab_app"),
+        (ID_POWER_TITLE, "settings_power_title"),
+        (ID_KEEP_SCREEN, "settings_keep_screen"),
+        (ID_BATTERY_ALLOWED, "settings_battery_allowed"),
+        (ID_BATTERY_LBL, "settings_battery_threshold"),
+        (ID_POWER_HINT, "settings_power_hint"),
+        (ID_IDLE_TITLE, "settings_idle_title"),
+        (ID_IDLE_ENHANCED, "menu_idle_enhanced"),
+        (ID_IDLE_TIMEOUT_LBL, "settings_idle_timeout_minutes"),
+        (ID_WARNING_LBL, "settings_idle_warning_seconds"),
+        (ID_IDLE_ACTION_LBL, "settings_idle_action"),
+        (ID_THEME_SCHEDULE_TITLE, "settings_theme_schedule_group"),
+        (ID_THEME_MODE_LBL, "settings_theme_mode"),
+        (ID_LIGHT_TIME_LBL, "settings_light_time"),
+        (ID_DARK_TIME_LBL, "settings_dark_time"),
+        (ID_LOCATION_LBL, "settings_location_source"),
+        (ID_THEME_HINT, "settings_theme_hint"),
+        (ID_THEME_BEHAVIOR_TITLE, "settings_theme_behavior_group"),
+        (ID_THEME_BATTERY, "menu_theme_battery_dark"),
+        (ID_THEME_FULLSCREEN, "menu_theme_skip_fullscreen"),
+        (ID_APP_GENERAL_TITLE, "settings_app_general_group"),
+        (ID_LANGUAGE_LBL, "settings_language"),
+        (ID_HOTKEYS, "menu_hotkeys"),
+        (ID_AUTOSTART, "menu_autostart"),
+        (ID_LOGGING, "menu_logging"),
+        (ID_APP_ABOUT_TITLE, "settings_app_about_group"),
+        (ID_NOTIFICATIONS_TITLE, "settings_lock_keys"),
+        (ID_LOCK_KEYS, "settings_lock_keys_enable"),
+        (ID_NOTIFICATIONS_BEHAVIOR, "settings_notification_behavior"),
+        (ID_LOCK_FULLSCREEN, "settings_notification_fullscreen"),
+        (ID_NOTIFICATIONS_HINT, "settings_notification_hint"),
+        (ID_LOCK_PREVIEW, "settings_notification_preview"),
+        (ID_SAVE, "common_save"),
+        (ID_CANCEL, "common_cancel"),
+        (ID_PROJECT_HOME_LBL, "settings_project_home_label"),
+    ] {
+        set_text(hwnd, id, &t_pub(key));
+    }
+    set_text(
+        hwnd,
+        ID_VERSION,
+        &t_pub("settings_version").replace("%s", crate::APP_VERSION),
+    );
+    for (id, labels) in [
+        (ID_IDLE_ACTION, idle_action_labels()),
+        (
+            ID_THEME_MODE,
+            vec![
+                t_pub("settings_theme_fixed"),
+                t_pub("settings_theme_sunrise"),
+            ],
+        ),
+        (
+            ID_LOCATION_SOURCE,
+            vec![
+                t_pub("settings_location_auto"),
+                t_pub("settings_location_ip"),
+            ],
+        ),
+        (
+            ID_LANGUAGE,
+            vec![
+                t_pub("menu_lang_auto"),
+                t_pub("menu_lang_en"),
+                t_pub("menu_lang_zh"),
+            ],
+        ),
+    ] {
+        let control = get(hwnd, id);
+        let selected = crate::choice::selection(control);
+        let items = labels
+            .into_iter()
+            .map(|label| (label.clone(), label))
+            .collect::<Vec<_>>();
+        crate::choice::set_items(control, &items);
+        crate::choice::select_index(control, selected);
+    }
+    set_text(
+        hwnd,
+        ID_THEME_LOCATION_STATUS,
+        &location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1),
+    );
+    unsafe {
+        create_tooltip(hwnd);
+    }
+    refresh_theme(hwnd);
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::*;
+    #[test]
+    fn relabeling_preserves_native_edits_choice_and_save_baseline() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let old_config = crate::CONFIG.lock().unwrap().replace(Default::default());
+        let old_locale = crate::I18N
+            .write()
+            .unwrap()
+            .replace(idletrigger_core::i18n::I18n::load("en"));
+        create();
+        let window = current();
+        let edit = get(window, ID_IDLE_TIMEOUT);
+        set_text(window, ID_IDLE_TIMEOUT, "073");
+        crate::choice::select_index(get(window, ID_LANGUAGE), 2);
+        let baseline = DRAFT_BASE.lock().unwrap().clone();
+        *crate::I18N.write().unwrap() = Some(idletrigger_core::i18n::I18n::load("zh-CN"));
+        refresh_language();
+        assert_eq!(get(window, ID_IDLE_TIMEOUT), edit);
+        assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
+        assert_eq!(control_text(window, ID_TITLE), "设置");
+        assert_eq!(combo_sel(window, ID_LANGUAGE), 2);
+        assert_eq!(*DRAFT_BASE.lock().unwrap(), baseline);
+        unsafe {
+            DestroyWindow(window).unwrap();
+        }
+        *crate::CONFIG.lock().unwrap() = old_config;
+        *crate::I18N.write().unwrap() = old_locale;
     }
 }

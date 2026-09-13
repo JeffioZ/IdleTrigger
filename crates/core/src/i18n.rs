@@ -38,3 +38,67 @@ fn parse_flat(text: &str) -> Option<HashMap<String, String>> {
     }
     Some(map)
 }
+
+/// Substitute the locale's ordered string/integer slots in one pass. Values
+/// are never parsed again, even when a rule name contains `%s` or `%d`.
+pub fn format(template: &str, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    let mut arguments = arguments.iter();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.peek().copied() {
+                Some('s' | 'd') => {
+                    let kind = chars.next().unwrap();
+                    if let Some(value) = arguments.next() {
+                        output.push_str(value);
+                    } else {
+                        output.push('%');
+                        output.push(kind);
+                    }
+                    continue;
+                }
+                Some('%') => {
+                    chars.next();
+                    output.push('%');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        output.push(ch);
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn substitutions_preserve_literal_percent_in_arguments() {
+        assert_eq!(
+            format("%s: %s / %d / %%", &["name %s", "动作 %d", "3"]),
+            "name %s: 动作 %d / 3 / %"
+        );
+    }
+    #[test]
+    fn locale_keys_and_placeholder_order_match() {
+        let en = parse_flat(EN).unwrap();
+        let zh = parse_flat(ZH_CN).unwrap();
+        assert_eq!(en.len(), zh.len());
+        let placeholders = |text: &str| {
+            text.as_bytes()
+                .windows(2)
+                .filter(|w| w[0] == b'%' && matches!(w[1], b's' | b'd'))
+                .map(|w| w[1])
+                .collect::<Vec<_>>()
+        };
+        for (key, value) in en {
+            assert_eq!(
+                placeholders(&value),
+                placeholders(zh.get(&key).unwrap()),
+                "{key}"
+            );
+        }
+    }
+}

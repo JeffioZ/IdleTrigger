@@ -34,6 +34,103 @@ static CONTROLS: Mutex<Option<HashMap<isize, Tracked>>> = Mutex::new(None);
 // control never shows the frame.
 static FOCUS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+pub fn keyboard_navigation() {
+    FOCUS_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Keep the native edit (including its cue accessibility text), but paint the
+/// empty-field hint with the same readable palette as the other form controls.
+pub fn cue_banner(control: HWND, key: &'static str) {
+    unsafe {
+        let text: Vec<u16> = crate::t_pub(key).encode_utf16().chain([0]).collect();
+        SendMessageW(
+            control,
+            0x1501,
+            Some(WPARAM(1)),
+            Some(LPARAM(text.as_ptr() as isize)),
+        );
+        let mut existing = 0;
+        if windows::Win32::UI::Shell::GetWindowSubclass(
+            control,
+            Some(cue_proc),
+            0x49544355,
+            Some(&mut existing),
+        )
+        .as_bool()
+        {
+            *(existing as *mut &'static str) = key;
+            return;
+        }
+        let data = Box::into_raw(Box::new(key));
+        if !windows::Win32::UI::Shell::SetWindowSubclass(
+            control,
+            Some(cue_proc),
+            0x49544355,
+            data as usize,
+        )
+        .as_bool()
+        {
+            drop(Box::from_raw(data));
+        }
+    }
+}
+
+unsafe extern "system" fn cue_proc(
+    control: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    data: usize,
+) -> LRESULT {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    unsafe {
+        if msg == WM_NCDESTROY {
+            let _ = RemoveWindowSubclass(control, Some(cue_proc), id);
+            drop(Box::from_raw(data as *mut &'static str));
+            return DefSubclassProc(control, msg, wp, lp);
+        }
+        let result = DefSubclassProc(control, msg, wp, lp);
+        if matches!(msg, WM_PAINT | WM_PRINTCLIENT) && GetWindowTextLengthW(control) == 0 {
+            let dc = if msg == WM_PRINTCLIENT {
+                HDC(wp.0 as *mut _)
+            } else {
+                GetDC(Some(control))
+            };
+            if !dc.is_invalid() {
+                let saved = SaveDC(dc);
+                let mut rect = RECT::default();
+                SendMessageW(
+                    control,
+                    0x00B2,
+                    None,
+                    Some(LPARAM(&mut rect as *mut _ as isize)),
+                ); // EM_GETRECT
+                let p = crate::theme::palette();
+                crate::paint::fill_rect(dc, &rect, p.surface);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, windows::Win32::Foundation::COLORREF(p.muted));
+                let font = SendMessageW(control, WM_GETFONT, None, None);
+                SelectObject(dc, HGDIOBJ(font.0 as *mut _));
+                let key = *(data as *const &'static str);
+                let mut text: Vec<u16> = crate::t_pub(key).encode_utf16().collect();
+                DrawTextW(
+                    dc,
+                    &mut text,
+                    &mut rect,
+                    DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | DT_VCENTER,
+                );
+                let _ = RestoreDC(dc, saved);
+                if msg != WM_PRINTCLIENT {
+                    ReleaseDC(Some(control), dc);
+                }
+            }
+        }
+        result
+    }
+}
+
 fn with_map<R>(f: impl FnOnce(&mut HashMap<isize, Tracked>) -> R) -> R {
     let mut guard = CONTROLS.lock().unwrap();
     f(guard.get_or_insert_with(HashMap::new))
@@ -102,10 +199,6 @@ pub fn control_state(control: HWND, item_state: u32) -> ControlState {
 /// memory bitmap and blit once, so repeated hover/focus repaints never flash
 /// the control background and text stays ClearType-crisp on an opaque surface.
 pub unsafe fn draw_buffered(hdc: HDC, bounds: &RECT, paint: impl FnOnce(HDC, &RECT)) -> bool {
-    // Opt-out escape hatch for diagnosing paint issues.
-    if std::env::var("IDLETRIGGER_NO_BUFFER").is_ok() {
-        return false;
-    }
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, SRCCOPY,
         SelectObject,
@@ -223,6 +316,7 @@ unsafe extern "system" fn tracked_proc(
                 invalidate(hwnd);
             }
             WM_NCDESTROY => {
+                crate::accessibility::clear(hwnd);
                 with_map(|m| {
                     m.remove(&key);
                 });
@@ -237,13 +331,17 @@ unsafe extern "system" fn tracked_proc(
             }
             _ => {}
         }
-        CallWindowProcW(
+        let result = CallWindowProcW(
             std::mem::transmute::<isize, WNDPROC>(old),
             hwnd,
             msg,
             wparam,
             lparam,
-        )
+        );
+        if matches!(msg, WM_SETFOCUS | WM_KILLFOCUS | WM_ENABLE) {
+            crate::accessibility::refresh(hwnd);
+        }
+        result
     }
 }
 
@@ -298,3 +396,86 @@ pub fn draw_item(lparam: LPARAM) -> Option<DrawItem> {
 
 const ODT_BUTTON: u32 = 4;
 const ODT_STATIC: u32 = 5;
+
+/// Owned tooltip window; reinstallation replaces translated text atomically.
+pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
+    use windows::Win32::UI::Controls::*;
+    use windows::core::{PCWSTR, PWSTR, w};
+    unsafe {
+        let old = GetPropW(parent, w!("IdleTriggerFormTooltip"));
+        if !old.is_invalid() {
+            let _ = DestroyWindow(HWND(old.0));
+        }
+        let _ = RemovePropW(parent, w!("IdleTriggerFormTooltip"));
+        let Ok(tip) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            TOOLTIPS_CLASSW,
+            w!(""),
+            WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP),
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            None,
+            None,
+            None,
+        ) else {
+            return;
+        };
+        if SetPropW(
+            parent,
+            w!("IdleTriggerFormTooltip"),
+            Some(windows::Win32::Foundation::HANDLE(tip.0)),
+        )
+        .is_err()
+        {
+            let _ = DestroyWindow(tip);
+            return;
+        }
+        SendMessageW(
+            tip,
+            TTM_SETMAXTIPWIDTH,
+            None,
+            Some(LPARAM(crate::scale_pub(480) as isize)),
+        );
+        for (id, key) in bindings {
+            let Ok(control) = GetDlgItem(Some(parent), *id as i32) else {
+                continue;
+            };
+            let mut text = crate::t_pub(key)
+                .encode_utf16()
+                .chain([0])
+                .collect::<Vec<_>>();
+            let tool = TTTOOLINFOW {
+                cbSize: size_of::<TTTOOLINFOW>() as u32,
+                uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+                hwnd: parent,
+                uId: control.0 as usize,
+                lpszText: PWSTR(text.as_mut_ptr()),
+                ..Default::default()
+            };
+            SendMessageW(
+                tip,
+                TTM_ADDTOOLW,
+                None,
+                Some(LPARAM(&tool as *const _ as isize)),
+            );
+        }
+        let empty = [0u16];
+        let _ = SetWindowTheme(tip, PCWSTR(empty.as_ptr()), PCWSTR(empty.as_ptr()));
+        let p = crate::theme::palette();
+        SendMessageW(
+            tip,
+            TTM_SETTIPBKCOLOR,
+            Some(WPARAM(p.tooltip_bg as usize)),
+            None,
+        );
+        SendMessageW(
+            tip,
+            TTM_SETTIPTEXTCOLOR,
+            Some(WPARAM(p.tooltip_text as usize)),
+            None,
+        );
+    }
+}

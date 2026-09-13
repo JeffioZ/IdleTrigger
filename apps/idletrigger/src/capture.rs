@@ -19,6 +19,11 @@ pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
         GetClientRect(hwnd, &mut rect).map_err(|e| io::Error::other(e.to_string()))?;
         let width = (rect.right - rect.left).max(1) as usize;
         let height = (rect.bottom - rect.top).max(1) as usize;
+        let bytes = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|n| *n <= 256 * 1024 * 1024)
+            .ok_or_else(|| io::Error::other("capture dimensions exceed the memory limit"))?;
 
         let window_dc = GetDC(Some(hwnd));
         if window_dc.is_invalid() {
@@ -31,6 +36,7 @@ pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
         }
         let bitmap = CreateCompatibleBitmap(window_dc, width as i32, height as i32);
         if bitmap.is_invalid() {
+            let _ = DeleteDC(mem_dc);
             let _ = ReleaseDC(Some(hwnd), window_dc);
             return Err(io::Error::other("CreateCompatibleBitmap failed"));
         }
@@ -48,7 +54,8 @@ pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
             SRCCOPY | CAPTUREBLT,
         );
 
-        let mut pixels = vec![0u8; width * height * 4];
+        let _ = SelectObject(mem_dc, old_obj);
+        let mut pixels = vec![0u8; bytes];
         let mut copied_rows = 0;
         if blit.is_ok() {
             let mut info = BITMAPINFO {
@@ -74,7 +81,6 @@ pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
             );
         }
 
-        let _ = SelectObject(mem_dc, old_obj);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = DeleteDC(mem_dc);
         let _ = ReleaseDC(Some(hwnd), window_dc);

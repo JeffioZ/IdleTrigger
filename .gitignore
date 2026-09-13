@@ -11,6 +11,7 @@ IdleTrigger.toml.bak
 IdleTrigger.state.json
 IdleTrigger.log
 IdleTrigger.log.*
+IdleTrigger-panic.txt
 .IdleTrigger-*.toml.tmp
 .IdleTrigger-state-*.json.tmp
 .IdleTrigger-screenshot-*.png.tmp

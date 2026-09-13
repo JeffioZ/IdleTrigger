@@ -11,11 +11,11 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, HMENU,
-    KillTimer, LoadCursorW, LoadIconW, MoveWindow, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetWindowRect, HMENU, KillTimer, LoadCursorW, LoadIconW,
+    MoveWindow, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SetTimer, SetWindowTextW, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
+    WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -28,7 +28,12 @@ const TIMER: usize = 7;
 static WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static TEXT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static SECONDS_LEFT: AtomicI32 = AtomicI32::new(0);
-static CURRENT: Mutex<Option<(String, Option<String>, String)>> = Mutex::new(None); // (action, once_date, rule_id)
+#[derive(Clone)]
+struct Countdown {
+    pending: automation::PendingAction,
+    deadline: std::time::Instant,
+}
+static CURRENT: Mutex<Option<Countdown>> = Mutex::new(None);
 
 const IDC_EXECUTE: usize = 232;
 
@@ -74,6 +79,7 @@ pub fn create() {
         .expect("action warning window");
         WINDOW.store(hwnd.0 as isize, Ordering::SeqCst);
         crate::ACTION_WARN_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        crate::dpi::install(hwnd);
         crate::theme::apply_to_window(hwnd);
 
         let text = CreateWindowExW(
@@ -84,7 +90,7 @@ pub fn create() {
             s(20),
             s(18),
             s(380),
-            s(20) * 2,
+            s(84),
             Some(hwnd),
             Some(HMENU(IDC_TEXT as *mut _)),
             Some(instance.into()),
@@ -98,7 +104,12 @@ pub fn create() {
             WINDOW_EX_STYLE(0),
             windows::core::w!("BUTTON"),
             PCWSTR(wide(&crate::t_pub("automation_cancel_once")).as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | WS_VISIBLE.0
+                    | windows::Win32::UI::WindowsAndMessaging::WS_TABSTOP.0
+                    | windows::Win32::UI::WindowsAndMessaging::BS_OWNERDRAW as u32,
+            ),
             s(20),
             s(116),
             s(120),
@@ -110,6 +121,7 @@ pub fn create() {
         )
         .expect("action warning cancel");
         crate::set_control_font_pub(cancel, font);
+        crate::nativeform::track(cancel);
 
         // Run-now button: executes the pending action immediately (clears
         // the remaining queue like the Go OnExecute path).
@@ -117,7 +129,12 @@ pub fn create() {
             WINDOW_EX_STYLE(0),
             windows::core::w!("BUTTON"),
             PCWSTR(wide(&crate::t_pub("automation_execute_now")).as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
+            WINDOW_STYLE(
+                WS_CHILD.0
+                    | WS_VISIBLE.0
+                    | windows::Win32::UI::WindowsAndMessaging::WS_TABSTOP.0
+                    | windows::Win32::UI::WindowsAndMessaging::BS_OWNERDRAW as u32,
+            ),
             s(148),
             s(116),
             s(120),
@@ -129,6 +146,7 @@ pub fn create() {
         )
         .expect("action warning execute");
         crate::set_control_font_pub(execute, font);
+        crate::nativeform::track(execute);
     }
 }
 
@@ -141,17 +159,37 @@ pub fn show_pending() {
     let Some(pending) = PENDING_ACTION.lock().unwrap().take() else {
         return;
     };
-    *CURRENT.lock().unwrap() = Some((
-        pending.action.clone(),
-        pending.once_date.clone(),
-        pending.rule_id.clone(),
-    ));
+    if !pending.is_current() {
+        ACTION_BUSY.store(false, Ordering::SeqCst);
+        return;
+    }
+    *CURRENT.lock().unwrap() = Some(Countdown {
+        pending: pending.clone(),
+        deadline: std::time::Instant::now()
+            + std::time::Duration::from_secs(pending.seconds as u64),
+    });
     SECONDS_LEFT.store(pending.seconds, Ordering::SeqCst);
     ACTION_BUSY.store(true, Ordering::SeqCst);
-    update_text(pending.action.as_str(), pending.seconds);
+    update_text(&pending, pending.seconds);
     unsafe {
         let hwnd = HWND(WINDOW.load(Ordering::SeqCst) as *mut _);
+        for (id, key) in [
+            (IDC_CANCEL, "automation_cancel_once"),
+            (IDC_EXECUTE, "automation_execute_now"),
+        ] {
+            if let Ok(button) =
+                windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), id as i32)
+            {
+                let _ = SetWindowTextW(button, PCWSTR(wide(&crate::t_pub(key)).as_ptr()));
+            }
+        }
+        layout_warning(
+            hwnd,
+            HWND(TEXT.load(Ordering::SeqCst) as *mut _),
+            &[IDC_CANCEL, IDC_EXECUTE],
+        );
         center(hwnd);
+        crate::viewport::fit(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = SetTimer(Some(hwnd), TIMER, 1000, None);
     }
@@ -161,11 +199,82 @@ pub fn show_pending() {
     ));
 }
 
-fn update_text(action: &str, seconds: i32) {
-    let action_label = crate::t_pub(&format!("menu_action_{action}"));
-    let text = crate::t_pub("msg_idle_warning")
-        .replace("%s", &action_label)
-        .replace("%d", &seconds.to_string());
+pub fn default_button(hwnd: HWND) -> Option<HWND> {
+    if hwnd.0 as isize != WINDOW.load(Ordering::SeqCst) {
+        return None;
+    }
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), IDC_CANCEL as i32).ok()
+    }
+}
+
+/// Measure wrapped content before showing; the shared viewport handles a small work area.
+pub fn layout_warning(hwnd: HWND, label: HWND, buttons: &[usize]) {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    let s = crate::scale_pub;
+    unsafe {
+        crate::viewport::begin_layout(hwnd);
+        let len = GetWindowTextLengthW(label).max(0) as usize;
+        let mut text = vec![0u16; len + 1];
+        let count = GetWindowTextW(label, &mut text).max(0) as usize;
+        let dc = GetDC(Some(label));
+        if dc.is_invalid() {
+            return;
+        }
+        let font = SendMessageW(label, WM_GETFONT, None, None);
+        let old = SelectObject(dc, HGDIOBJ(font.0 as *mut _));
+        let mut rect = windows::Win32::Foundation::RECT {
+            right: s(390),
+            ..Default::default()
+        };
+        DrawTextW(
+            dc,
+            &mut text[..count],
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        SelectObject(dc, old);
+        ReleaseDC(Some(label), dc);
+        let body = rect.bottom.max(s(64));
+        let _ = MoveWindow(label, s(20), s(18), s(390), body, true);
+        let width =
+            (s(390) - s(8) * buttons.len().saturating_sub(1) as i32) / buttons.len().max(1) as i32;
+        for (index, id) in buttons.iter().enumerate() {
+            if let Ok(button) = GetDlgItem(Some(hwnd), *id as i32) {
+                let _ = MoveWindow(
+                    button,
+                    s(20) + index as i32 * (width + s(8)),
+                    s(34) + body,
+                    width,
+                    s(36),
+                    true,
+                );
+            }
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            s(430),
+            body + s(88),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn update_text(pending: &automation::PendingAction, seconds: i32) {
+    let action_label = crate::t_pub(&format!("menu_action_{}", pending.action));
+    let name = pending
+        .rule
+        .as_ref()
+        .map_or(pending.rule_id.as_str(), |rule| rule.name.as_str());
+    let text = crate::t_args(
+        "automation_warning_body",
+        &[name, &action_label, &seconds.to_string()],
+    );
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     unsafe {
         let _ = SetWindowTextW(
@@ -196,58 +305,63 @@ unsafe fn center(hwnd: HWND) {
 }
 
 fn tick() {
-    let left = SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1;
-    if left <= 0 {
-        let current = CURRENT.lock().unwrap().take();
+    let current = CURRENT.lock().unwrap().clone();
+    let Some(current) = current else {
+        return;
+    };
+    if !current.pending.is_current() {
         close(false);
-        if let Some((action, once_date, rule_id)) = current {
-            // Go OnExecute: a completed one-shot rule is also disabled and
-            // persisted — it has fired, so it must not fire again.
-            if once_date.is_some() {
-                automation::disable_rule_after_cancel(&rule_id);
-            }
-            crate::log_line(&format!("action executing: {action}"));
-            crate::execute_system_action(&action);
-        }
-    } else if let Some((action, _, _)) = CURRENT.lock().unwrap().clone() {
-        update_text(&action, left);
+        return;
+    }
+    let left = current
+        .deadline
+        .saturating_duration_since(std::time::Instant::now());
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() != 0);
+    if seconds == 0 {
+        execute_now();
+    } else {
+        SECONDS_LEFT.store(seconds as i32, Ordering::SeqCst);
+        update_text(&current.pending, seconds as i32);
     }
 }
 
 fn close(cancelled: bool) {
-    if !ACTION_BUSY.swap(false, Ordering::SeqCst) {
+    let current = CURRENT.lock().unwrap().take();
+    if current.is_none() {
         return;
     }
-    let current = CURRENT.lock().unwrap().take();
     unsafe {
         let hwnd = HWND(WINDOW.load(Ordering::SeqCst) as *mut _);
         let _ = KillTimer(Some(hwnd), TIMER);
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
     if cancelled {
-        // Cancelling disables only the specific one-shot rule.
-        if let Some((_, Some(_date), rule_id)) = &current {
-            automation::disable_rule_after_cancel(rule_id);
+        if let Some(current) = &current
+            && current.pending.is_current()
+            && current.pending.once_date.is_some()
+        {
+            automation::disable_rule_after_cancel(&current.pending.rule_id);
         }
         crate::log_line("action countdown cancelled");
     }
+    ACTION_BUSY.store(false, Ordering::SeqCst);
 }
 
-/// Run-now: stop the countdown and execute immediately (Go OnExecute).
 fn execute_now() {
-    let left = SECONDS_LEFT.load(Ordering::SeqCst);
-    let _ = left;
-    let current = CURRENT.lock().unwrap().take();
+    let current = CURRENT.lock().unwrap().clone();
+    let Some(current) = current else {
+        return;
+    };
+    let valid = current.pending.is_current();
     close(false);
-    if let Some((action, once_date, rule_id)) = current {
-        if once_date.is_some() {
-            automation::disable_rule_after_cancel(&rule_id);
+    if valid {
+        if current.pending.once_date.is_some() {
+            automation::disable_rule_after_cancel(&current.pending.rule_id);
         }
-        crate::log_line(&format!("action executed now: {action}"));
-        crate::execute_system_action(&action);
+        crate::log_line(&format!("action executing: {}", current.pending.action));
+        crate::execute_system_action(&current.pending.action);
     }
 }
-
 unsafe extern "system" fn action_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -272,6 +386,7 @@ unsafe extern "system" fn action_wnd_proc(
                 tick();
                 LRESULT(0)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_DRAWITEM => draw_warning_button(lparam),
             windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
                 erase_theme_bg(hwnd, wparam);
                 LRESULT(1)
@@ -296,14 +411,30 @@ unsafe extern "system" fn action_wnd_proc(
     }
 }
 
-// Silence unused-import warnings for items used only on some cfg paths.
-#[allow(dead_code)]
-fn _pins() {
-    let _ = DispatchMessageW;
-    let _ = GetMessageW;
-    let _ = TranslateMessage;
-
-    let _ = WS_EX_LAYERED;
+pub fn draw_warning_button(lparam: LPARAM) -> LRESULT {
+    let Some(item) = crate::nativeform::draw_item(lparam) else {
+        return LRESULT(0);
+    };
+    let paint = |dc, rect: &windows::Win32::Foundation::RECT| unsafe {
+        let mut text = [0u16; 128];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(item.control, &mut text);
+        crate::paint::draw_button(
+            dc,
+            rect,
+            crate::make_font_pub(14, 400),
+            &String::from_utf16_lossy(&text[..len.max(0) as usize]),
+            crate::theme::palette(),
+            crate::theme::bg_color(),
+            crate::nativeform::control_state(item.control, item.state),
+            crate::scale_pub(4),
+        );
+    };
+    unsafe {
+        if !crate::nativeform::draw_buffered(item.dc, &item.bounds, paint) {
+            paint(item.dc, &item.bounds);
+        }
+    }
+    LRESULT(1)
 }
 
 /// Themed background fill shared by the popup modules.
@@ -367,7 +498,7 @@ pub const VK_CAPITAL: i32 = 0x14;
 pub const VK_NUMLOCK: i32 = 0x90;
 pub const VK_SCROLL: i32 = 0x91;
 
-static LN_WINDOW: AtomicI32 = AtomicI32::new(0);
+static LN_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// A rendered premultiplied BGRA card (Go surface).
 struct Surface {
@@ -448,7 +579,7 @@ pub fn lock_create() {
             None,
         )
         .expect("lock notify window");
-        LN_WINDOW.store(hwnd.0 as i32, Ordering::SeqCst);
+        LN_WINDOW.store(hwnd.0 as isize, Ordering::SeqCst);
         crate::LOCK_NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
     }
 }
@@ -507,6 +638,23 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
     let p = crate::theme::palette();
     let title_font = notification_font(scale(28), 500);
     let label_font = notification_font(scale(15), 400);
+    struct Fonts(
+        windows::Win32::Graphics::Gdi::HFONT,
+        windows::Win32::Graphics::Gdi::HFONT,
+    );
+    impl Drop for Fonts {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.0.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(self.0.0));
+                }
+                if !self.1.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(self.1.0));
+                }
+            }
+        }
+    }
+    let _fonts = Fonts(title_font, label_font);
     if title_font.is_invalid() || label_font.is_invalid() {
         return None;
     }
@@ -544,6 +692,9 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
             }
         };
         if bitmap.is_invalid() || bits.is_null() {
+            if !bitmap.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
             let _ = DeleteDC(dc);
             return None;
         }
@@ -614,8 +765,6 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
                 slice[index + 3] = (alpha * 255.0).round() as u8;
             }
         }
-        let _ = DeleteObject(HGDIOBJ(title_font.0));
-        let _ = DeleteObject(HGDIOBJ(label_font.0));
         Some(Surface {
             dc,
             bitmap,
@@ -882,6 +1031,9 @@ pub fn poll(last_states: &mut [(i32, i16)]) {
         )
     });
     if !enabled {
+        for (vk, last) in last_states.iter_mut() {
+            *last = key_toggled(*vk);
+        }
         return;
     }
     // Fullscreen / presentation suppression (Go contract: hide during
@@ -904,6 +1056,8 @@ pub fn poll(last_states: &mut [(i32, i16)]) {
     for (vk, last) in last_states.iter_mut() {
         let state = key_toggled(*vk);
         if state != *last && allowed(*vk) {
+            #[cfg(feature = "devtools")]
+            crate::devtools::trace_input(&format!("lock key {vk}: {state}"));
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                     Some(crate::hwnd(&crate::HIDDEN)),
@@ -924,4 +1078,76 @@ fn key_toggled(vk: i32) -> i16 {
 /// Reads one lock key's toggle state (for seeding the poll history).
 pub fn poll_state(vk: i32) -> i16 {
     key_toggled(vk)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn long_warning_keeps_buttons_below_the_complete_body() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            let form = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_POPUP,
+                0,
+                0,
+                430,
+                180,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let long = wide(&"A long task name with spaces and 中文名称. ".repeat(20));
+            let label = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                PCWSTR(long.as_ptr()),
+                WS_CHILD,
+                0,
+                0,
+                100,
+                20,
+                Some(form),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let button = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("BUTTON"),
+                windows::core::w!("Cancel"),
+                WS_CHILD,
+                0,
+                0,
+                100,
+                20,
+                Some(form),
+                Some(HMENU(231usize as *mut _)),
+                None,
+                None,
+            )
+            .unwrap();
+            layout_warning(form, label, &[231]);
+            let mut body = windows::Win32::Foundation::RECT::default();
+            let mut action = body;
+            GetWindowRect(label, &mut body).unwrap();
+            GetWindowRect(button, &mut action).unwrap();
+            assert!(body.bottom - body.top > crate::scale_pub(84));
+            assert!(action.top > body.bottom);
+            crate::dpi::install(form);
+            crate::viewport::fit(form);
+            crate::viewport::reveal_control(form, button);
+            GetWindowRect(button, &mut action).unwrap();
+            let work = crate::display::work_area_for(form);
+            assert!(action.top >= work.top && action.bottom <= work.bottom);
+            DestroyWindow(form).unwrap();
+        }
+    }
 }

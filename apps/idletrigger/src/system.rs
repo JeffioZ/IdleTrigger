@@ -102,7 +102,82 @@ pub fn autostart_is_enabled() -> bool {
     }
 }
 
+/// Repair only an existing registration; never opt the user into autostart.
+pub fn autostart_ensure_current() -> Result<(), String> {
+    unsafe {
+        let mut key = HKEY::default();
+        let opened = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide(SUBKEY).as_ptr()),
+            None,
+            KEY_READ,
+            &mut key,
+        );
+        if opened == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        if opened != ERROR_SUCCESS {
+            return Err(format!("open autostart: {}", opened.0));
+        }
+        let result = (|| {
+            let mut size = 0;
+            let name = wide(VALUE_NAME);
+            let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
+            let status = RegQueryValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                Some(&mut kind),
+                None,
+                Some(&mut size),
+            );
+            if status == ERROR_FILE_NOT_FOUND {
+                return Ok(());
+            }
+            if status != ERROR_SUCCESS || kind != REG_SZ || size > 128 * 1024 {
+                return Err("invalid autostart registration".into());
+            }
+            let mut data = vec![0u8; size as usize];
+            let status = RegQueryValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                None,
+                Some(data.as_mut_ptr()),
+                Some(&mut size),
+            );
+            if status != ERROR_SUCCESS || !size.is_multiple_of(2) {
+                return Err("could not read autostart registration".into());
+            }
+            data.truncate(size as usize);
+            let current = String::from_utf16(
+                &data
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                    .take_while(|c| *c != 0)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| e.to_string())?;
+            let path = std::env::current_exe()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned();
+            if current != format!("\"{path}\" --minimized") && !autostart_enable(&path) {
+                return Err("could not update autostart registration".into());
+            }
+            Ok(())
+        })();
+        let _ = RegCloseKey(key);
+        result
+    }
+}
+
 pub fn autostart_enable(exe_path: &str) -> bool {
+    if exe_path.is_empty() || exe_path.contains(['\0', '"']) {
+        return false;
+    }
     unsafe {
         let subkey = wide(SUBKEY);
         let name = wide(VALUE_NAME);
@@ -121,8 +196,9 @@ pub fn autostart_enable(exe_path: &str) -> bool {
         {
             return false;
         }
-        let value: Vec<u8> = format!("\"{exe_path}\"")
+        let value: Vec<u8> = format!("\"{exe_path}\" --minimized")
             .encode_utf16()
+            .chain([0])
             .flat_map(|c| c.to_le_bytes())
             .collect();
         let ok = RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(&value))
@@ -137,19 +213,59 @@ pub fn autostart_disable() -> bool {
         let subkey = wide(SUBKEY);
         let name = wide(VALUE_NAME);
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
+        let opened = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             PCWSTR(subkey.as_ptr()),
             None,
             KEY_WRITE,
             &mut hkey,
-        ) != ERROR_SUCCESS
-        {
+        );
+        if opened != ERROR_SUCCESS {
             // Nothing to remove counts as success.
-            return true;
+            return opened == ERROR_FILE_NOT_FOUND;
         }
         let result = RegDeleteValueW(hkey, PCWSTR(name.as_ptr()));
         let _ = RegCloseKey(hkey);
         result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
     }
+}
+/// OS build from the machine registry; HKCU does not contain this version key.
+pub fn windows_build() -> u32 {
+    static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BUILD.get_or_init(|| unsafe {
+        use windows::Win32::System::Registry::*;
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::w!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"),
+            None,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut key,
+        ) != windows::Win32::Foundation::ERROR_SUCCESS
+        {
+            return 0;
+        }
+        let mut bytes = [0u8; 64];
+        let mut size = bytes.len() as u32;
+        let result = RegQueryValueExW(
+            key,
+            windows::core::w!("CurrentBuildNumber"),
+            None,
+            None,
+            Some(bytes.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(key);
+        if result != windows::Win32::Foundation::ERROR_SUCCESS {
+            return 0;
+        }
+        let text: Vec<u16> = bytes[..size as usize]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|c| *c != 0)
+            .collect();
+        String::from_utf16_lossy(&text).parse().unwrap_or(0)
+    })
 }

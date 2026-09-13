@@ -10,7 +10,7 @@ use std::path::Path;
 /// The annotated template, identical to `IdleTrigger.example.toml`.
 const TEMPLATE: &str = include_str!("../../../IdleTrigger.example.toml");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub language: String,
     pub logging_enabled: bool,
@@ -89,12 +89,20 @@ impl Config {
         if !matches!(self.theme_mode.as_str(), "fixed" | "sunrise") {
             self.theme_mode = "sunrise".into();
         }
+        if !crate::automation::valid_hhmm(&self.theme_light_time) {
+            self.theme_light_time = "07:00".into();
+        }
+        if !crate::automation::valid_hhmm(&self.theme_dark_time) {
+            self.theme_dark_time = "19:00".into();
+        }
         self
     }
 }
 
 /// The loaded configuration plus the parsed document used for round-trips.
 pub struct Loaded {
+    /// Exact input used by this load, for optimistic external-edit detection.
+    pub source_text: Option<String>,
     pub config: Config,
     /// Human-readable load problem; defaults were used for broken fields.
     pub load_error: Option<String>,
@@ -109,12 +117,14 @@ pub fn load(path: &Path) -> Loaded {
     match std::fs::read_to_string(path) {
         Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
             Ok(document) => Loaded {
+                source_text: Some(text),
                 config: read_config(&document, defaults).sanitized(),
                 load_error: None,
                 document,
                 created_from_template: false,
             },
             Err(err) => Loaded {
+                source_text: Some(text),
                 config: defaults.sanitized(),
                 load_error: Some(format!("parse error: {err}")),
                 document: template_document(),
@@ -122,12 +132,14 @@ pub fn load(path: &Path) -> Loaded {
             },
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Loaded {
+            source_text: None,
             config: defaults.sanitized(),
             load_error: None,
             document: template_document(),
             created_from_template: true,
         },
         Err(err) => Loaded {
+            source_text: None,
             config: defaults.sanitized(),
             load_error: Some(format!("read error: {err}")),
             document: template_document(),
@@ -217,6 +229,12 @@ fn save_candidate(
 ) -> std::io::Result<()> {
     let set_value = |doc: &mut toml_edit::DocumentMut, key: &str, mut value: toml_edit::Value| {
         if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
+            if (old.is_bool() && old.as_bool() == value.as_bool())
+                || (old.is_integer() && old.as_integer() == value.as_integer())
+                || (old.is_str() && old.as_str() == value.as_str())
+            {
+                return;
+            }
             *value.decor_mut() = old.decor().clone();
         }
         doc[key] = toml_edit::Item::Value(value);
@@ -315,8 +333,18 @@ fn save_candidate(
             .unwrap_or("config"),
         std::process::id()
     ));
-    std::fs::write(&tmp, document.to_string())?;
-    std::fs::rename(&tmp, path)?;
+    let text = document.to_string();
+    if std::fs::read_to_string(path).is_ok_and(|original| original == text) {
+        return Ok(());
+    }
+    let result = (|| {
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
     Ok(())
 }
 

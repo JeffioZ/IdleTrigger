@@ -116,7 +116,7 @@ impl ProcessTarget {
 }
 
 /// One built-in automatic task.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
     pub name: String,
@@ -225,9 +225,11 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         if r.id.is_empty() {
             r.id = format!("rule-{}", index + 1);
         }
-        let id_key = r.id.to_lowercase();
-        if seen_ids.contains_key(&id_key) {
-            r.id = format!("{}-{}", r.id, index + 1);
+        let base = r.id.clone();
+        let mut suffix = index + 1;
+        while seen_ids.contains_key(&r.id.to_lowercase()) {
+            r.id = format!("{base}-{suffix}");
+            suffix += 1;
         }
         seen_ids.insert(r.id.to_lowercase(), ());
         r.name = r.name.trim().to_string();
@@ -546,7 +548,7 @@ pub fn valid_hhmm(value: &str) -> bool {
         && value[3..].parse::<u32>().map(|m| m < 60).unwrap_or(false)
 }
 
-fn valid_date(value: &str) -> bool {
+pub fn valid_date(value: &str) -> bool {
     let parts: Vec<&str> = value.split('-').collect();
     if parts.len() != 3 {
         return false;
@@ -559,7 +561,16 @@ fn valid_date(value: &str) -> bool {
     }
     let month: u32 = parts[1].parse().unwrap_or(0);
     let day: u32 = parts[2].parse().unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+    let year: u32 = parts[0].parse().unwrap_or(0);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    year > 0 && (1..=max_day).contains(&day)
 }
 
 /// Weekday key for a day-of-week where 0 = Sunday (chrono-free).
@@ -813,6 +824,10 @@ mod tests {
         assert!(!valid_hhmm("7:30"));
         assert!(!valid_hhmm("07:60"));
         assert!(!valid_hhmm("0700"));
+        assert!(valid_date("2024-02-29"));
+        assert!(!valid_date("2026-02-29"));
+        assert!(!valid_date("2026-04-31"));
+        assert!(!valid_date("0000-01-01"));
     }
 
     #[test]
@@ -834,5 +849,13 @@ mod tests {
         ];
         let (_, issues) = prepare_rules(&rules);
         assert!(issues.iter().any(|i| i.message.contains("duplicate")));
+        let rules = vec![
+            rule("a", ACTION_LOCK, TRIGGER_DAILY),
+            rule("a", ACTION_LOCK, TRIGGER_DAILY),
+            rule("a-2", ACTION_LOCK, TRIGGER_DAILY),
+        ];
+        let ids: std::collections::BTreeSet<_> =
+            normalize_rules(rules).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 3);
     }
 }

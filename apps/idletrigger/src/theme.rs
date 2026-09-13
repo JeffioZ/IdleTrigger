@@ -15,12 +15,6 @@ use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 use windows::core::{BOOL, PCWSTR};
 
 // Go palette tokens (colors/palette.go).
-const LIGHT_BG: u32 = 0x00FAF8F6; // RGB(246,248,250)
-const LIGHT_TEXT: u32 = 0x00241E19; // RGB(25,30,36)
-const LIGHT_SUBTLE: u32 = 0x005E5246; // RGB(70,82,94)
-const DARK_BG: u32 = 0x002A2420; // RGB(32,36,42)
-const DARK_TEXT: u32 = 0x00FAF7F4; // RGB(244,247,250)
-const DARK_SUBTLE: u32 = 0x00DCD4CC; // RGB(204,212,220)
 
 // Choice-popup-batch fields carry allow(dead_code) until that batch lands.
 /// Full Go palette (colors/palette.go Palette) for owner-drawn controls.
@@ -135,6 +129,10 @@ unsafe impl Sync for SurfaceBrushPair {}
 /// Both themes' edit-interior brush pairs, built once (a single-theme cache
 /// keeps a stale white surface in dark mode after theme flips).
 pub fn surface_brush_pairs() -> (SurfaceBrushPair, SurfaceBrushPair) {
+    if let Some(p) = crate::theme_contrast::palette() {
+        let pair = SurfaceBrushPair(cached_brush(p.surface), cached_brush(p.disabled_surface));
+        return (pair, pair);
+    }
     use std::sync::OnceLock;
     static PAIRS: OnceLock<(SurfaceBrushPair, SurfaceBrushPair)> = OnceLock::new();
     *PAIRS.get_or_init(|| unsafe {
@@ -157,6 +155,9 @@ pub fn surface_brush_pairs() -> (SurfaceBrushPair, SurfaceBrushPair) {
 
 /// Live palette for the active theme.
 pub fn palette() -> &'static Palette {
+    if let Some(p) = crate::theme_contrast::palette() {
+        return p;
+    }
     if is_dark() {
         &DARK_PALETTE
     } else {
@@ -166,43 +167,38 @@ pub fn palette() -> &'static Palette {
 
 static DARK: AtomicBool = AtomicBool::new(false);
 
-/// Send/Sync wrapper for a GDI brush handle. HBRUSH values are process-wide
-/// kernel-backed handles usable from any thread; the raw pointer type just
-/// isn't annotated as such.
-#[derive(Clone, Copy)]
-struct SendBrush(HBRUSH);
-unsafe impl Send for SendBrush {}
-unsafe impl Sync for SendBrush {}
-
-/// Pre-created light/dark brushes, filled on first use. Created once, never
-/// destroyed — no rebuild, no leak, safe from any thread.
-static BRUSHES: OnceLock<(SendBrush, SendBrush)> = OnceLock::new();
-
 pub fn is_dark() -> bool {
     DARK.load(Ordering::SeqCst)
 }
 
 pub fn bg_color() -> u32 {
-    if is_dark() { DARK_BG } else { LIGHT_BG }
+    palette().window_bg
 }
 
 pub fn text_color() -> u32 {
-    if is_dark() { DARK_TEXT } else { LIGHT_TEXT }
+    palette().text
 }
 
 pub fn subtle_color() -> u32 {
-    if is_dark() { DARK_SUBTLE } else { LIGHT_SUBTLE }
+    palette().text2
 }
 
 /// Brush for window backgrounds and WM_CTLCOLORSTATIC.
 pub fn bg_brush() -> HBRUSH {
-    let brushes = BRUSHES.get_or_init(|| unsafe {
-        (
-            SendBrush(CreateSolidBrush(COLORREF(LIGHT_BG))),
-            SendBrush(CreateSolidBrush(COLORREF(DARK_BG))),
-        )
-    });
-    (if is_dark() { brushes.1 } else { brushes.0 }).0
+    cached_brush(bg_color())
+}
+
+fn cached_brush(color: u32) -> HBRUSH {
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u32, isize>>> =
+        std::sync::LazyLock::new(Default::default);
+    HBRUSH(
+        *CACHE
+            .lock()
+            .unwrap()
+            .entry(color)
+            .or_insert_with(|| unsafe { CreateSolidBrush(COLORREF(color)).0 as isize })
+            as *mut _,
+    )
 }
 
 /// Devtools capture support: force a theme regardless of the system value.
@@ -213,18 +209,19 @@ pub fn force_dark(value: bool) {
 
 /// Reads the registry light/dark preference. Returns true when it changed.
 pub fn refresh_from_registry() -> bool {
-    let dark = read_apps_use_light_theme()
+    let contrast = crate::theme_contrast::refresh();
+    let dark = read_light_preference("AppsUseLightTheme")
         .map(|light| !light)
         .unwrap_or(false);
-    dark != DARK.swap(dark, Ordering::SeqCst)
+    (dark != DARK.swap(dark, Ordering::SeqCst)) | contrast
 }
 
-fn read_apps_use_light_theme() -> Option<bool> {
+pub fn read_light_preference(name: &str) -> Option<bool> {
     let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
         .encode_utf16()
         .chain([0])
         .collect();
-    let value: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain([0]).collect();
+    let value: Vec<u16> = name.encode_utf16().chain([0]).collect();
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(
@@ -239,16 +236,17 @@ fn read_apps_use_light_theme() -> Option<bool> {
         }
         let mut data = [0u8; 4];
         let mut size = 4u32;
+        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
         let ok = RegQueryValueExW(
             hkey,
             PCWSTR(value.as_ptr()),
             None,
-            None,
+            Some(&mut kind),
             Some(data.as_mut_ptr()),
             Some(&mut size),
         ) == ERROR_SUCCESS;
         let _ = RegCloseKey(hkey);
-        if ok && size >= 4 {
+        if ok && size == 4 && kind == windows::Win32::System::Registry::REG_DWORD {
             Some(u32::from_le_bytes(data) != 0)
         } else {
             None
@@ -256,36 +254,17 @@ fn read_apps_use_light_theme() -> Option<bool> {
     }
 }
 
-// Go palette accents and tooltip colors (colors/palette.go) — COLORREF
-// (0x00BBGGRR).
-#[allow(dead_code)]
-const LIGHT_ACCENT: u32 = 0x00B5_7600; // RGB(0, 118, 181)
-#[allow(dead_code)]
-const DARK_ACCENT: u32 = 0x00B4_780A; // RGB(10, 120, 180)
-const LIGHT_TOOLTIP_BG: u32 = 0x00FF_FDFB; // RGB(251, 253, 255)
-const LIGHT_TOOLTIP_TEXT: u32 = 0x0024_1E19; // RGB(25, 30, 36)
-const DARK_TOOLTIP_BG: u32 = 0x0043_3B34; // RGB(52, 59, 67)
-const DARK_TOOLTIP_TEXT: u32 = 0x00FA_F7F4; // RGB(244, 247, 250)
-
 #[allow(dead_code)]
 pub fn accent_color() -> u32 {
-    if is_dark() { DARK_ACCENT } else { LIGHT_ACCENT }
+    palette().accent
 }
 
 pub fn tooltip_bg_color() -> u32 {
-    if is_dark() {
-        DARK_TOOLTIP_BG
-    } else {
-        LIGHT_TOOLTIP_BG
-    }
+    palette().tooltip_bg
 }
 
 pub fn tooltip_text_color() -> u32 {
-    if is_dark() {
-        DARK_TOOLTIP_TEXT
-    } else {
-        LIGHT_TOOLTIP_TEXT
-    }
+    palette().tooltip_text
 }
 
 /// Applies the immersive dark-mode title bar and forces a repaint. Attribute
@@ -351,7 +330,7 @@ pub fn apply_control_theme(hwnd: HWND) {
         return;
     }
     let class = String::from_utf16_lossy(&buffer[..len as usize]).to_uppercase();
-    let dark = is_dark();
+    let dark = is_dark() && crate::theme_contrast::palette().is_none();
     let name = if dark {
         if class == "COMBOBOX" {
             "DarkMode_CFD"
@@ -389,12 +368,25 @@ unsafe fn get_proc_by_ordinal(
     module: windows::Win32::Foundation::HMODULE,
     ordinal: u16,
 ) -> windows::Win32::Foundation::FARPROC {
+    if crate::system::windows_build() < 17763 {
+        return None;
+    }
     unsafe {
         windows::Win32::System::LibraryLoader::GetProcAddress(
             module,
             windows::core::PCSTR(ordinal as usize as *const u8),
         )
     }
+}
+
+fn uxtheme() -> Option<windows::Win32::Foundation::HMODULE> {
+    static MODULE: OnceLock<isize> = OnceLock::new();
+    let module = *MODULE.get_or_init(|| unsafe {
+        windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
+            .map(|module| module.0 as isize)
+            .unwrap_or(0)
+    });
+    (module != 0).then_some(windows::Win32::Foundation::HMODULE(module as *mut _))
 }
 
 /// uxtheme ordinal 133 (AllowDarkModeForWindow) — the companion switch that
@@ -404,9 +396,7 @@ fn allow_dark_for_window(hwnd: HWND, allow: bool) {
     type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, BOOL) -> BOOL;
     static FN: OnceLock<Option<AllowDarkModeForWindow>> = OnceLock::new();
     let func = *FN.get_or_init(|| unsafe {
-        let uxtheme =
-            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
-                .ok()?;
+        let uxtheme = uxtheme()?;
         get_proc_by_ordinal(uxtheme, 133).map(|p| std::mem::transmute(p))
     });
     if let Some(func) = func {
@@ -421,9 +411,7 @@ fn set_preferred_app_mode_allow_dark() {
     static FN: OnceLock<Option<SetPreferredAppMode>> = OnceLock::new();
     static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let func = *FN.get_or_init(|| unsafe {
-        let uxtheme =
-            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
-                .ok()?;
+        let uxtheme = uxtheme()?;
         get_proc_by_ordinal(uxtheme, 135).map(|p| std::mem::transmute(p))
     });
     if let Some(func) = func
@@ -444,9 +432,7 @@ pub fn prepare_popup_menu(owner: HWND, dark: bool) {
     static FLUSH: OnceLock<Option<RefreshPolicy>> = OnceLock::new();
     static REFRESH: OnceLock<Option<RefreshPolicy>> = OnceLock::new();
     unsafe {
-        let uxtheme =
-            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
-                .ok();
+        let uxtheme = uxtheme();
         let Some(uxtheme) = uxtheme else { return };
         // RefreshImmersiveColorPolicyState — ordinal 104.
         let refresh = *REFRESH.get_or_init(|| {
@@ -472,25 +458,7 @@ pub fn prepare_popup_menu(owner: HWND, dark: bool) {
 /// cached menu themes. Called at startup and on every theme flip so the tray
 /// menu (owned by the tray-icon crate) follows dark/light.
 pub fn set_process_menu_theme(dark: bool) {
-    crate::log_line(&format!("set_process_menu_theme called, dark={}", dark));
-    unsafe {
-        type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
-        let uxtheme =
-            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
-                .ok();
-        if let Some(ux) = uxtheme
-            && let Some(func) = get_proc_by_ordinal(ux, 135)
-                .map(|p| std::mem::transmute::<_, SetPreferredAppMode>(p))
-        {
-            let mode = if dark { 2 } else { 3 }; // ForceDark or ForceLight
-            let result = func(mode);
-            crate::log_line(&format!(
-                "SetPreferredAppMode({}) returned {}",
-                mode, result
-            ));
-        }
-    }
-    prepare_popup_menu(HWND(std::ptr::null_mut()), dark);
+    prepare_popup_menu(HWND::default(), dark);
 }
 
 /// SetPreferredAppMode with an explicit preference (AllowDark=1 when dark,
@@ -500,15 +468,19 @@ fn set_preferred_app_mode_for(dark: bool) {
     type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
     static FN: OnceLock<Option<SetPreferredAppMode>> = OnceLock::new();
     let func = *FN.get_or_init(|| unsafe {
-        let uxtheme =
-            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("uxtheme.dll"))
-                .ok()?;
+        let uxtheme = uxtheme()?;
         get_proc_by_ordinal(uxtheme, 135).map(|p| std::mem::transmute(p))
     });
     if let Some(func) = func {
         // Go forcedThemePreference: ForceDark=2 when dark, ForceLight=3 when
         // light (AllowDark=1 alone does not repaint existing menus).
-        let mode = if dark { 2 } else { 3 };
+        let mode = if crate::system::windows_build() < 18362 {
+            i32::from(dark)
+        } else if dark {
+            2
+        } else {
+            3
+        };
         let _ = unsafe { func(mode) };
     }
 }

@@ -3,144 +3,168 @@
 //! forwarded to the running instance; direct actions (`sleep`, `lock`,
 //! `autostart`, `version`) run in-process.
 
+use crate::pipe::Pipe;
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, mpsc};
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{
-    FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
-};
-use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
-    PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-};
-use windows::core::PCWSTR;
-
-pub const PIPE_NAME: &str = r"\\.\pipe\IdleTriggerPipe";
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
+fn pipe_name() -> Option<String> {
+    let mut session = 0;
+    unsafe {
+        windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(
+            std::process::id(),
+            &mut session,
+        )
+    }
+    .ok()?;
+    Some(format!(r"\\.\pipe\IdleTrigger-{session}"))
 }
 
-/// Spawns the pipe server thread in the primary instance.
+struct Request {
+    text: String,
+    deadline: Instant,
+    reply: mpsc::SyncSender<String>,
+}
+static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
+
+/// Window/configuration work belongs to the UI thread. A timed-out queued
+/// request is discarded before it can mutate anything.
+fn dispatch(request: String) -> String {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    REQUESTS.lock().unwrap().push(Request {
+        text: request,
+        deadline: Instant::now() + Duration::from_millis(1500),
+        reply: sender,
+    });
+    let posted = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(crate::hwnd(&crate::HIDDEN)),
+            crate::WM_IPC_REQUEST,
+            windows::Win32::Foundation::WPARAM(0),
+            windows::Win32::Foundation::LPARAM(0),
+        )
+    };
+    if posted.is_err() {
+        REQUESTS.lock().unwrap().clear();
+        return "err: UI is unavailable".into();
+    }
+    receiver
+        .recv_timeout(Duration::from_millis(1800))
+        .unwrap_or_else(|_| "err: command timed out; outcome unknown".into())
+}
+
+pub fn process_requests() {
+    let requests = std::mem::take(&mut *REQUESTS.lock().unwrap());
+    for request in requests {
+        let reply = if Instant::now() >= request.deadline {
+            "err: request expired".into()
+        } else {
+            handle_request(&request.text)
+        };
+        let _ = request.reply.send(reply);
+    }
+}
+
 pub fn spawn_server() {
     std::thread::Builder::new()
         .name("ipc-server".into())
         .spawn(|| {
-            loop {
-                if crate::EXITING.load(Ordering::SeqCst) {
+            let Some(name) = pipe_name() else {
+                crate::log_line("IPC session lookup failed");
+                return;
+            };
+            let pipe = match Pipe::listen(&name) {
+                Ok(pipe) => pipe,
+                Err(error) => {
+                    crate::log_line(&format!("IPC listener failed: {error}"));
                     return;
                 }
-                serve_one();
+            };
+            while !crate::EXITING.load(Ordering::SeqCst) {
+                if pipe.connect().is_err() {
+                    pipe.disconnect();
+                    continue;
+                }
+                if let Ok(request) = pipe.read() {
+                    let response = dispatch(request);
+                    if pipe.write(&response).is_ok() {
+                        pipe.finish();
+                    }
+                }
+                pipe.disconnect();
             }
         })
         .expect("spawn ipc server");
 }
-
-fn serve_one() {
-    let name = wide(PIPE_NAME);
-    unsafe {
-        let pipe = CreateNamedPipeW(
-            PCWSTR(name.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            1024,
-            1024,
-            0,
-            None,
-        );
-        if pipe.is_invalid() {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            return;
-        }
-        if ConnectNamedPipe(pipe, None).is_err() {
-            let _ = windows::Win32::Foundation::CloseHandle(pipe);
-            return;
-        }
-        let mut buffer = [0u8; 512];
-        let mut read = 0u32;
-        if ReadFile(pipe, Some(&mut buffer), Some(&mut read), None).is_ok() && read > 0 {
-            let request = String::from_utf8_lossy(&buffer[..read as usize]).to_string();
-            let response = handle_request(&request);
-            let _ = WriteFile(pipe, Some(response.as_bytes()), None, None);
-        }
-        let _ = DisconnectNamedPipe(pipe);
-        let _ = windows::Win32::Foundation::CloseHandle(pipe);
-    }
-}
-
 fn handle_request(request: &str) -> String {
     let request = request.trim();
     match request {
         "open" => {
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                    Some(crate::hwnd(&crate::HIDDEN)),
-                    crate::WM_REFRESH_UI,
-                    windows::Win32::Foundation::WPARAM(0),
-                    windows::Win32::Foundation::LPARAM(0),
-                );
-            }
-            show_panel_async();
+            crate::show_panel();
             "ok open".into()
         }
-        "nosleep:on" | "nosleep:off" | "nosleep:toggle" => {
-            let target = match request {
-                "nosleep:on" => true,
-                "nosleep:off" => false,
-                _ => !crate::cfg_map(|c| c.nosleep_enabled),
-            };
-            crate::cfg_edit(|c| {
+        "nosleep:on"
+        | "nosleep:off"
+        | "nosleep:toggle"
+        | "nosleep:on:screen"
+        | "nosleep:toggle:screen" => {
+            let mut target = false;
+            if let Err(err) = crate::edit_config(|c| {
+                target = match request {
+                    "nosleep:on" | "nosleep:on:screen" => true,
+                    "nosleep:off" => false,
+                    _ => !c.nosleep_enabled,
+                };
                 c.nosleep_enabled = target;
+                if request == "nosleep:on" {
+                    c.keep_screen_on = false;
+                }
+                if request.ends_with(":screen") {
+                    c.keep_screen_on = true;
+                }
                 if target {
                     c.idle_enabled = false;
                 }
-            });
-            crate::persist_config();
+            }) {
+                return format!("err: {err}");
+            }
             refresh_ui();
             format!("ok nosleep={target}")
         }
         "monitor:on" | "monitor:off" | "monitor:toggle" => {
-            let target = match request {
-                "monitor:on" => true,
-                "monitor:off" => false,
-                _ => !crate::cfg_map(|c| c.idle_enabled),
-            };
-            crate::cfg_edit(|c| {
+            let mut target = false;
+            if let Err(err) = crate::edit_config(|c| {
+                target = match request {
+                    "monitor:on" => true,
+                    "monitor:off" => false,
+                    _ => !c.idle_enabled,
+                };
                 c.idle_enabled = target;
                 if target {
                     c.nosleep_enabled = false;
                 }
-            });
-            crate::persist_config();
+            }) {
+                return format!("err: {err}");
+            }
             refresh_ui();
             format!("ok monitor={target}")
         }
-        "status" => {
+        "status" | "nosleep:status" | "monitor:status" => {
             let (nosleep, idle, automation) =
                 crate::cfg_map(|c| (c.nosleep_enabled, c.idle_enabled, c.automation_enabled));
             let seconds = crate::IDLE_MS.load(Ordering::SeqCst) / 1000;
+            let awake_running = crate::NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst);
+            let monitor_running = crate::idle_settings().enabled;
             format!(
-                "tray=running nosleep={nosleep} monitor={idle} automation={automation} idle_seconds={seconds}"
+                "tray=running nosleep={nosleep} monitor={idle} automation={automation} idle_seconds={seconds} nosleep_running={awake_running} monitor_running={monitor_running}"
             )
         }
-        "reload" => {
-            crate::automation::reload_rules();
-            refresh_ui();
-            "ok reload".into()
-        }
-        _ => format!("err unknown request: {request}"),
-    }
-}
-
-fn show_panel_async() {
-    unsafe {
-        // Show the panel via SW_SHOW; PostMessage is safe cross-thread.
-        let panel = crate::hwnd(&crate::PANEL);
-        let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
-            panel,
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
-        );
+        "reload" | "config:reload" => match crate::hot_reload_config() {
+            Ok(()) => "ok reload".into(),
+            Err(error) => format!("err: {error}"),
+        },
+        "ping" => "pong".into(),
+        _ => format!("err: unknown request: {request}"),
     }
 }
 
@@ -158,55 +182,20 @@ fn refresh_ui() {
 /// Sends one request to the running instance and prints the reply. Returns
 /// false when the pipe is unavailable (tray not running).
 pub fn send(request: &str) -> Option<String> {
-    let attempts = 20;
-    for _ in 0..attempts {
-        if let Some(reply) = try_send(request) {
-            return Some(reply);
+    let name = pipe_name()?;
+    for _ in 0..20 {
+        if let Ok(pipe) = Pipe::open(&name) {
+            // Once connected, any transmission failure is ambiguous. Never
+            // replay a command whose side effects might already have run.
+            return Some(match pipe.write(request).and_then(|_| pipe.read()) {
+                Ok(reply) if !reply.is_empty() => reply,
+                _ => "err: IPC response unavailable; command outcome unknown".into(),
+            });
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
     }
     None
 }
-
-fn try_send(request: &str) -> Option<String> {
-    let name = wide(PIPE_NAME);
-    unsafe {
-        let Ok(file) = windows::Win32::Storage::FileSystem::CreateFileW(
-            PCWSTR(name.as_ptr()),
-            windows::Win32::Storage::FileSystem::FILE_GENERIC_READ.0
-                | windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE.0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            Default::default(),
-            None,
-        ) else {
-            return None;
-        };
-        let mut written = 0u32;
-        let ok = WriteFile(file, Some(request.as_bytes()), Some(&mut written), None).is_ok()
-            && written as usize == request.len();
-        // Message pipes need the client to read the reply on the same handle;
-        // for simplicity the tray writes its reply before we read.
-        let mut buffer = [0u8; 512];
-        let mut read = 0u32;
-        let reply = if ok {
-            windows::Win32::Storage::FileSystem::ReadFile(
-                file,
-                Some(&mut buffer),
-                Some(&mut read),
-                None,
-            )
-            .ok()
-            .map(|_| String::from_utf8_lossy(&buffer[..read as usize]).to_string())
-        } else {
-            None
-        };
-        let _ = windows::Win32::Foundation::CloseHandle(file);
-        reply
-    }
-}
-
 // ---- CLI entry ------------------------------------------------------------
 
 /// Runs the CLI in the current process. Returns the process exit code.
@@ -216,6 +205,20 @@ pub fn run_cli(args: &[String]) -> i32 {
         return 0;
     };
     let rest = &args[1..];
+    let arguments_valid = match command.as_str() {
+        "nosleep" => {
+            rest.len() <= 1
+                || (rest.len() == 2
+                    && matches!(rest[0].as_str(), "on" | "toggle")
+                    && matches!(rest[1].as_str(), "--screen" | "-s"))
+        }
+        "monitor" | "autostart" => rest.len() <= 1,
+        _ => rest.is_empty(),
+    };
+    if !arguments_valid {
+        console_error(&crate::t_pub("cli_usage"));
+        return 1;
+    }
     match command.as_str() {
         "sleep" => direct_action("sleep"),
         "hibernate" => direct_action("hibernate"),
@@ -289,7 +292,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                 }
             }
         }
-        "config:reload" => pipe_or_error("reload"),
+        "config:reload" => pipe_or_error("config:reload"),
         "status" => pipe_or_error("status"),
         "version" | "--version" | "-V" => {
             console_println(crate::APP_VERSION);
@@ -334,24 +337,26 @@ fn direct_action(action: &str) -> i32 {
     if let Some(key) = progress_key {
         console_println(&crate::t_pub(key));
     }
-    crate::execute_system_action(action);
-    0
+    match crate::try_system_action(action) {
+        Ok(()) => 0,
+        Err(error) => {
+            console_error(&error);
+            1
+        }
+    }
 }
 
 /// Checks the power capabilities for sleep/hibernate (Go powerstate).
-fn suspend_available(hibernate: bool) -> bool {
-    use windows::Win32::System::Power::{GetPwrCapabilities, GetSystemPowerStatus};
+pub fn suspend_available(hibernate: bool) -> bool {
+    use windows::Win32::System::Power::GetPwrCapabilities;
     unsafe {
-        if hibernate {
-            let mut caps = windows::Win32::System::Power::SYSTEM_POWER_CAPABILITIES::default();
-            if GetPwrCapabilities(&mut caps) {
-                return caps.HiberFilePresent;
+        let mut caps = windows::Win32::System::Power::SYSTEM_POWER_CAPABILITIES::default();
+        GetPwrCapabilities(&mut caps)
+            && if hibernate {
+                caps.SystemS4 && caps.HiberFilePresent
+            } else {
+                caps.SystemS1 || caps.SystemS2 || caps.SystemS3 || caps.AoAc
             }
-            return false;
-        }
-        let mut status = windows::Win32::System::Power::SYSTEM_POWER_STATUS::default();
-        // Sleep is available unless the system reports no sleep states.
-        GetSystemPowerStatus(&mut status).is_ok()
     }
 }
 
@@ -360,7 +365,7 @@ fn pipe_or_error(request: &str) -> i32 {
         Some(reply) => {
             // Go protocol: "err:"-prefixed replies go to stderr with exit 1.
             if let Some(detail) = reply.strip_prefix("err:") {
-                console_error(&format!("{} {detail}", crate::t_pub("cli_error_detail")));
+                console_error(&crate::t_args("cli_error_detail", &[detail.trim()]));
                 1
             } else {
                 console_println(&reply);
@@ -443,6 +448,3 @@ fn write_console(handle: windows::Win32::Foundation::HANDLE, text: &str) {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _pin(_h: HANDLE) {}

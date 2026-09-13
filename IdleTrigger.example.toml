@@ -10,7 +10,7 @@ nosleep_enabled = false
 keep_screen_on = false
 # 电池供电时仍允许保持唤醒 / Allow Stay Awake while running on battery
 nosleep_on_battery = false
-# 电池电量低于此百分比时强制关闭保持唤醒 / Force-disable Stay Awake below this battery percentage
+# 电池电量低于此百分比时暂停保持唤醒，不改写手动开关 / Pause Stay Awake below this battery percentage without changing the manual toggle
 nosleep_battery_threshold = 20
 
 # -- 自动任务 / Automatic Tasks --
@@ -18,7 +18,7 @@ nosleep_battery_threshold = 20
 automation_enabled = true
 # 任务建议通过控制界面创建；列表按进程名匹配全部同名实例，也可浏览选择指定 EXE，PID 和说明不会写入规则 / Create tasks from the control UI; list choices match all same-name instances, or Browse can select a specific EXE; PIDs and descriptions are not stored in rules
 # 进程启动任务只在所选进程由无到有时触发；退出任务需所有同名实例退出并经过 5 秒宽限 / Process-start tasks fire only when selected processes change from none to any; exit tasks wait for all same-name instances plus a 5-second grace period
-# Windows 睡眠期间错过的计划时间不会补执行；短于 5 秒扫描周期的进程可能无法捕获 / Scheduled times missed during Windows sleep are not replayed; processes shorter than the 5-second scan interval may be missed
+# 计划在指定分钟及下一分钟内仍可触发，超过此窗口不补执行；短于 5 秒扫描周期的进程可能漏检 / Schedules remain due during the specified minute and the next minute; later occurrences are skipped, and processes shorter than the 5-second scan interval may be missed
 # 自动系统操作始终显示至少 10 秒的可取消倒计时 / Automatic system actions always show a cancellable countdown of at least 10 seconds
 
 # -- 空闲监测 / Idle Monitoring --

@@ -9,29 +9,25 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use idletrigger_core::automation as auto;
 
 /// Runtime state-action overrides layered on top of the manual config.
-pub struct Overrides {
-    pub nosleep_on: AtomicBool,
-    pub keep_screen: AtomicBool,
-    pub nosleep_paused: AtomicBool,
-    pub idle_on: AtomicBool,
-    pub idle_minutes: AtomicI32,
-    pub idle_paused: AtomicBool,
-}
+static OVERRIDES: Mutex<auto::EffectiveState> = Mutex::new(auto::EffectiveState {
+    stay_awake: false,
+    keep_screen_on: false,
+    pause_stay_awake: false,
+    enable_idle: false,
+    idle_minutes: auto::DEFAULT_IDLE_MINUTES,
+    pause_idle: false,
+});
+static ACTIVE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 
-pub static OVR: Overrides = Overrides {
-    nosleep_on: AtomicBool::new(false),
-    keep_screen: AtomicBool::new(false),
-    nosleep_paused: AtomicBool::new(false),
-    idle_on: AtomicBool::new(false),
-    idle_minutes: AtomicI32::new(30),
-    idle_paused: AtomicBool::new(false),
-};
+pub fn overrides() -> auto::EffectiveState {
+    OVERRIDES.lock().unwrap().clone()
+}
 
 pub static RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 
@@ -46,11 +42,29 @@ pub static RUNTIME_STATE: Mutex<auto::RuntimeState> = Mutex::new(auto::RuntimeSt
 /// An event action waiting for the countdown window.
 #[derive(Clone)]
 pub struct PendingAction {
+    pub rule: Option<auto::Rule>,
     pub action: String,
     pub seconds: i32,
     pub rule_id: String,
     /// Some(date) when the rule is `once`; cancel disables the rule.
     pub once_date: Option<String>,
+}
+
+impl PendingAction {
+    pub fn is_current(&self) -> bool {
+        #[cfg(feature = "devtools")]
+        if self.rule.is_none() && crate::devtools::preview_only() {
+            return true;
+        }
+        crate::cfg_map(|c| c.automation_enabled)
+            && self.rule.as_ref().is_some_and(|expected| {
+                RULES
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|rule| rule.enabled && rule == expected)
+            })
+    }
 }
 
 pub static PENDING_ACTION: Mutex<Option<PendingAction>> = Mutex::new(None);
@@ -145,30 +159,42 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 pub fn reload_rules() {
     // Parse the whole document and pull only the rules key: array-of-tables
     // items do not round-trip reliably through Item::to_string alone.
-    #[derive(serde::Deserialize)]
-    struct RulesDoc {
-        #[serde(default)]
-        automation_rules: Vec<auto::Rule>,
-    }
-    let full_text = {
+    let parsed = {
         let doc_guard = crate::CONFIG_DOC.lock().unwrap();
         let Some(doc) = doc_guard.as_ref() else {
             return;
         };
-        doc.to_string()
+        idletrigger_core::rule_document::read(doc)
     };
-    let parsed: RulesDoc = match toml_edit::de::from_str(&full_text) {
+    let (runtime, issues) = match parsed {
         Ok(parsed) => parsed,
         Err(err) => {
             crate::log_line(&format!("automation rules parse error: {err}"));
-            RulesDoc {
-                automation_rules: Vec::new(),
-            }
+            (
+                Vec::new(),
+                vec![auto::RuleIssue {
+                    index: 0,
+                    rule_id: String::new(),
+                    message: err,
+                }],
+            )
         }
     };
-    let (normalized, issues) = auto::prepare_rules(&parsed.automation_rules);
     *ISSUES.lock().unwrap() = issues.clone();
-    let runtime = auto::runtime_rules(normalized, &issues);
+    let enabled = crate::cfg_map(|c| c.automation_enabled);
+    let mut active = ACTIVE_RULES.lock().unwrap();
+    active.retain(|rule| {
+        enabled
+            && runtime
+                .iter()
+                .any(|current| current.enabled && current == rule)
+    });
+    publish_overrides(auto::aggregate_state(active.iter()));
+    drop(active);
+    if !enabled {
+        WAITING_EVENTS.lock().unwrap().clear();
+        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
+    }
     *RULES.lock().unwrap() = runtime;
     crate::log_line(&format!(
         "automation rules loaded: {} ({} issues)",
@@ -219,6 +245,9 @@ fn tick_with_snapshot(
     now: LocalNow,
     monotonic_now: std::time::Instant,
 ) -> Result<(), String> {
+    // Reload publishes config/rules under the same writer lock. A scan may
+    // not publish obsolete overrides or queue an event after a rule edit.
+    let _configuration = crate::CONFIG_WRITER.lock().unwrap();
     let enabled = crate::cfg_map(|c| c.automation_enabled);
     let rules = RULES.lock().unwrap().clone();
     if !enabled {
@@ -275,7 +304,7 @@ fn tick_with_snapshot(
             }
             auto::TRIGGER_ONCE | auto::TRIGGER_DAILY | auto::TRIGGER_WEEKLY => {
                 if first_tick || WAITING_EVENTS.lock().unwrap().contains_key(&rule.id) {
-                    continue; // never backfill missed schedules at startup
+                    continue; // Establish the first observation before scheduling events.
                 }
                 if day_matches(rule, &now) && schedule_due(&now, &rule.time) {
                     let occurrence = format!("{}T{}", now.date, rule.time);
@@ -321,6 +350,7 @@ fn tick_with_snapshot(
             _ => {}
         }
     }
+    *ACTIVE_RULES.lock().unwrap() = active.iter().map(|rule| (*rule).clone()).collect();
     publish_overrides(auto::aggregate_state(active));
     if snapshot.is_none() {
         Err("process snapshot failed".into())
@@ -330,19 +360,15 @@ fn tick_with_snapshot(
 }
 
 fn clear_overrides() {
+    ACTIVE_RULES.lock().unwrap().clear();
     publish_overrides(auto::EffectiveState::default());
 }
 
 fn publish_overrides(state: auto::EffectiveState) {
-    let changed = (OVR.nosleep_on.swap(state.stay_awake, Ordering::SeqCst) != state.stay_awake)
-        | (OVR
-            .nosleep_paused
-            .swap(state.pause_stay_awake, Ordering::SeqCst)
-            != state.pause_stay_awake)
-        | (OVR.keep_screen.swap(state.keep_screen_on, Ordering::SeqCst) != state.keep_screen_on)
-        | (OVR.idle_on.swap(state.enable_idle, Ordering::SeqCst) != state.enable_idle)
-        | (OVR.idle_paused.swap(state.pause_idle, Ordering::SeqCst) != state.pause_idle)
-        | (OVR.idle_minutes.swap(state.idle_minutes, Ordering::SeqCst) != state.idle_minutes);
+    let mut current = OVERRIDES.lock().unwrap();
+    let changed = *current != state;
+    *current = state;
+    drop(current);
     if changed {
         request_refresh();
     }
@@ -388,6 +414,7 @@ fn dispatch_event(rule: &auto::Rule, once_date: Option<String>, notify: impl FnO
     let seconds = rule.warning_seconds.max(auto::MIN_WARNING_SECONDS);
     let mut pending = PENDING_ACTION.lock().unwrap();
     *pending = Some(PendingAction {
+        rule: Some(rule.clone()),
         action: rule.action.clone(),
         seconds,
         rule_id: rule.id.clone(),
@@ -426,7 +453,8 @@ pub fn persist_state() {
 /// Cancelling a one-shot rule disables only that specific rule (identified
 /// by the rule_id carried in the pending action), not every once rule.
 pub fn disable_rule_after_cancel(rule_id: &str) {
-    let mut rules = RULES.lock().unwrap().clone();
+    let base = RULES.lock().unwrap().clone();
+    let mut rules = base.clone();
     let Some(rule) = rules
         .iter_mut()
         .find(|r| r.id == rule_id && r.trigger == auto::TRIGGER_ONCE && r.enabled)
@@ -434,13 +462,13 @@ pub fn disable_rule_after_cancel(rule_id: &str) {
         return;
     };
     rule.enabled = false;
-    if let Err(err) = crate::save_automation_rules(&rules) {
+    if let Err(err) = crate::save_automation_rules(&base, &rules) {
         crate::warn_dialog("", &err);
     }
 }
 /// A schedule is "due" when now is within the 2-minute grace past the
 /// scheduled minute. The occurrence key prevents refiring within the same
-/// day, so the grace only bridges sleep/resume gaps.
+/// day. This window also applies after startup or resume; older times are skipped.
 fn schedule_due(now: &LocalNow, scheduled: &str) -> bool {
     let parse = |s: &str| -> i32 {
         s.get(..2).and_then(|v| v.parse().ok()).unwrap_or(0) * 60
@@ -738,6 +766,19 @@ impl Snapshot {
         &self.pids_by_name
     }
 
+    pub fn count_target(&self, target: &auto::ProcessTarget) -> u32 {
+        self.pids_by_name
+            .iter()
+            .filter(|(name, pid)| {
+                *pid != std::process::id()
+                    && name.eq_ignore_ascii_case(&target.executable)
+                    && (target.kind != "path"
+                        || query_process_path(*pid)
+                            .is_some_and(|p| normalize(&p) == normalize(&target.path)))
+            })
+            .count() as u32
+    }
+
     fn matches_path(
         &self,
         target: &auto::ProcessTarget,
@@ -768,7 +809,7 @@ impl Snapshot {
 fn query_process_path(pid: u32) -> Option<String> {
     unsafe {
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buffer = [0u16; 1024];
+        let mut buffer = vec![0u16; 32768];
         let mut size = buffer.len() as u32;
         let ok = windows::Win32::System::Threading::QueryFullProcessImageNameW(
             handle,
@@ -817,6 +858,7 @@ mod runtime_tests {
     use super::*;
     #[test]
     fn scheduled_process_conditions_wait_and_expire_without_dispatch() {
+        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
         let previous_config = crate::CONFIG
             .lock()
             .unwrap()
@@ -880,6 +922,14 @@ executable = "missing.exe"
         assert!(PENDING_ACTION.lock().unwrap().is_none());
         dispatch_event(&rule, None, || true);
         assert!(ACTION_BUSY.load(Ordering::SeqCst));
+        let pending = PENDING_ACTION.lock().unwrap().clone().unwrap();
+        assert!(pending.is_current());
+        RULES.lock().unwrap()[0].name = "changed".into();
+        assert!(!pending.is_current());
+        RULES.lock().unwrap()[0] = rule.clone();
+        crate::cfg_edit(|c| c.automation_enabled = false);
+        assert!(!pending.is_current());
+        crate::cfg_edit(|c| c.automation_enabled = true);
         let mut second = rule;
         second.id = "second".into();
         dispatch_event(&second, None, || panic!("busy dispatch must not notify"));
@@ -898,7 +948,7 @@ executable = "missing.exe"
         second.end_time = "23:59".into();
         *RULES.lock().unwrap() = vec![second.clone()];
         assert!(tick_with_snapshot(false, None, now(), instant).is_err());
-        assert!(OVR.nosleep_on.load(Ordering::SeqCst));
+        assert!(overrides().stay_awake);
         second.action = auto::ACTION_LOCK.into();
         second.trigger = auto::TRIGGER_DAILY.into();
         second.time = "12:00".into();

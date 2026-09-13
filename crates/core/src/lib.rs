@@ -7,3 +7,4 @@
 pub mod automation;
 pub mod config;
 pub mod i18n;
+pub mod rule_document;

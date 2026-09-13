@@ -159,6 +159,8 @@ static PK_LIST_HWND: AtomicIsize = AtomicIsize::new(0);
 static EDIT_INDEX: AtomicI32 = AtomicI32::new(-1); // -1 = new
 static EDIT_ERROR: AtomicBool = AtomicBool::new(false);
 static EDIT_ORIG: Mutex<Option<auto::Rule>> = Mutex::new(None);
+static EDIT_BASE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
+static MGR_DISPLAYED_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 
 // Owner-draw checkboxes track state here (BS_OWNERDRAW absorbs the native
 // check bits); keyed by control id, exactly like Go's p.checks map.
@@ -182,6 +184,7 @@ fn edit_set_checked(ed: HWND, id: usize, value: bool) {
     unsafe {
         let control = get_dlg_item(ed, id);
         if !control.is_invalid() {
+            crate::accessibility::check(control, value);
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
         }
     }
@@ -281,7 +284,6 @@ const BN_CLICKED: u16 = 0;
 const WM_APP_PICKER_DESC: u32 = 0x8000 + 1;
 const EM_SETMARGINS_RAW: u32 = 0x00D3;
 const EM_SETSEL_RAW: u32 = 0x00B1;
-const EM_SETCUEBANNER_RAW: u32 = 0x1501;
 const EM_GETSEL_RAW: u32 = 0x00B0;
 
 const BUTTON_H: i32 = 36; // nativeform.ButtonHeight
@@ -338,7 +340,11 @@ fn center_on_parent(w: i32, h: i32) -> (i32, i32) {
         if GetWindowRect(parent, &mut wr).is_ok() {
             let pw = wr.right - wr.left;
             let ph = wr.bottom - wr.top;
-            return (wr.left + (pw - s(w)) / 2, wr.top + (ph - s(h)) / 2);
+            let work = crate::display::work_area_for(parent);
+            return (
+                (wr.left + (pw - w) / 2).clamp(work.left, (work.right - w).max(work.left)),
+                (wr.top + (ph - h) / 2).clamp(work.top, (work.bottom - h).max(work.top)),
+            );
         }
         (s(200), s(200))
     }
@@ -353,17 +359,7 @@ pub fn form_font_body() -> windows::Win32::Graphics::Gdi::HFONT {
 }
 
 fn font_cache(weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
-    #[derive(Clone, Copy)]
-    struct SendFont(windows::Win32::Graphics::Gdi::HFONT);
-    // Fonts are pointers into this process's GDI handle table; both values
-    // are process-wide constants created once on the UI thread.
-    unsafe impl Send for SendFont {}
-    unsafe impl Sync for SendFont {}
-    static BODY: std::sync::OnceLock<SendFont> = std::sync::OnceLock::new();
-    static SECTION: std::sync::OnceLock<SendFont> = std::sync::OnceLock::new();
-    let slot = if weight >= 600 { &SECTION } else { &BODY };
-    slot.get_or_init(|| SendFont(crate::make_font_pub(14, weight)))
-        .0
+    crate::make_font_pub(14, weight)
 }
 
 fn secondary_style() -> WINDOW_STYLE {
@@ -410,15 +406,7 @@ fn clean_single_line(value: &str) -> String {
 }
 
 fn fill_template(template: &str, values: &[&str]) -> String {
-    let mut out = template.to_string();
-    for value in values {
-        if let Some(pos) = out.find("%s") {
-            out.replace_range(pos..pos + 2, value);
-        } else if let Some(pos) = out.find("%d") {
-            out.replace_range(pos..pos + 2, value);
-        }
-    }
-    out
+    idletrigger_core::i18n::format(template, values)
 }
 
 // ===== Label / localization mapping (Go actionKey, triggerKey) =============
@@ -599,6 +587,7 @@ pub fn ensure_created() {
         )
         .expect("manager window");
         MGR_HWND.store(mgr.0 as isize, Ordering::SeqCst);
+        crate::dpi::install(mgr);
         theme::apply_to_window(mgr);
         crate::set_window_icons_pub(mgr);
 
@@ -705,6 +694,7 @@ pub fn ensure_created() {
             Some(LPARAM(1)),
         );
         MGR_LIST_HWND.store(list.0 as isize, Ordering::SeqCst);
+        crate::list_style::install(list);
 
         // Empty-state overlay centered in the list card.
         let empty_y = MGR_LIST_Y + (MGR_LIST_H - (2 * MGR_TEXT_H + 12)) / 2;
@@ -784,10 +774,12 @@ pub fn ensure_created() {
 static MGR_LIST_SURFACE_HWND: AtomicIsize = AtomicIsize::new(0);
 
 pub fn show() {
+    let _dpi = crate::dpi::Scope::window(crate::hwnd(&crate::PANEL));
     unsafe {
         ensure_created();
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         lower_surfaces(mgr);
+        refresh_tooltips();
         refresh_list();
         theme::retheme_children(mgr);
         present_control(HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _));
@@ -796,6 +788,9 @@ pub fn show() {
             false,
         );
         // Go BeginFirstFrame/Reveal: cloak, commit one full frame, uncloak.
+        if crate::viewport::metrics(mgr).is_none() {
+            crate::viewport::fit(mgr);
+        }
         crate::FirstFrameGate::begin(mgr).reveal();
         let _ = SetForegroundWindow(mgr);
         // Go focuses the list (or New when empty) after showing the manager.
@@ -823,6 +818,45 @@ fn hide() {
     }
 }
 
+pub fn default_button(window: HWND) -> Option<HWND> {
+    let id = if window.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
+        MGR_EDIT
+    } else if window.0 as isize == EDIT_HWND.load(Ordering::SeqCst) {
+        ED_SAVE
+    } else if window.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
+        PK_CONFIRM
+    } else {
+        return None;
+    };
+    Some(get_dlg_item(window, id))
+}
+
+pub fn weekday_key(window: HWND, key: usize) -> bool {
+    if window.0 as isize != EDIT_HWND.load(Ordering::SeqCst)
+        || !matches!(key, 0x25 | 0x27 | 0x24 | 0x23)
+    {
+        return false;
+    }
+    unsafe {
+        let id = GetDlgCtrlID(GetFocus()) as usize;
+        if !(ED_DAYS_MON..=ED_DAYS_SUN).contains(&id) {
+            return false;
+        }
+        let index = id - ED_DAYS_MON;
+        let next = match key {
+            0x25 => (index + 6) % 7,
+            0x27 => (index + 1) % 7,
+            0x24 => 0,
+            _ => 6,
+        };
+        crate::nativeform::keyboard_navigation();
+        let target = get_dlg_item(window, ED_DAYS_MON + next);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(target));
+        crate::viewport::reveal_control(window, target);
+        true
+    }
+}
+
 fn refresh_list() {
     unsafe {
         let list = HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _);
@@ -833,6 +867,14 @@ fn refresh_list() {
         let issues = crate::automation::ISSUES.lock().unwrap().clone();
 
         let had_selection = SendMessageW(list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        let selected_id = usize::try_from(had_selection).ok().and_then(|index| {
+            MGR_DISPLAYED_RULES
+                .lock()
+                .unwrap()
+                .get(index)
+                .map(|r| r.id.clone())
+        });
+        *MGR_DISPLAYED_RULES.lock().unwrap() = rules.clone();
         let top = SendMessageW(list, LB_GETTOPINDEX, Some(WPARAM(0)), Some(LPARAM(0))).0;
         let _ = SendMessageW(list, LB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
 
@@ -860,7 +902,7 @@ fn refresh_list() {
                 Some(WPARAM(0)),
                 Some(LPARAM(wide(&line).as_ptr() as isize)),
             );
-            if had_selection >= 0 && index as isize == had_selection {
+            if selected_id.as_ref() == Some(&rule.id) {
                 selected = index as isize;
             }
         }
@@ -1018,7 +1060,7 @@ fn selected_index() -> Option<usize> {
 
 fn edit_selected() {
     if let Some(idx) = selected_index() {
-        let rules = crate::automation::RULES.lock().unwrap();
+        let rules = MGR_DISPLAYED_RULES.lock().unwrap();
         if let Some(rule) = rules.get(idx) {
             *EDIT_PROCS.lock().unwrap() = rule.processes.clone();
             drop(rules);
@@ -1033,12 +1075,13 @@ fn toggle_selected(mgr: HWND) {
     let Some(idx) = selected_index() else {
         return;
     };
-    let mut rules = crate::automation::RULES.lock().unwrap().clone();
+    let base = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+    let mut rules = base.clone();
     if idx >= rules.len() {
         return;
     }
     rules[idx].enabled = !rules[idx].enabled;
-    if let Err(err) = save_rules_to_config(rules) {
+    if let Err(err) = save_rules_to_config(&base, rules) {
         crate::warn_dialog("", &err);
     }
     let _ = mgr;
@@ -1049,21 +1092,21 @@ fn delete_selected(mgr: HWND) {
     let Some(idx) = selected_index() else {
         return;
     };
-    let rules = crate::automation::RULES.lock().unwrap();
+    let base = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+    let rules = &base;
     let Some(rule) = rules.get(idx).cloned() else {
         return;
     };
-    drop(rules);
 
     let body = t_pub("automation_delete_confirm").replace("%s", &rule.name);
     if !confirm_dialog(mgr, &t_pub("automation_delete_title"), &body) {
         return;
     }
-    let mut rules = crate::automation::RULES.lock().unwrap().clone();
+    let mut rules = base.clone();
     if idx < rules.len() {
         rules.remove(idx);
     }
-    if let Err(err) = save_rules_to_config(rules) {
+    if let Err(err) = save_rules_to_config(&base, rules) {
         crate::warn_dialog("", &err);
         return;
     }
@@ -1093,8 +1136,7 @@ unsafe extern "system" fn mgr_proc(
                     MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(hwnd),
                     MGR_LIST if hi == LBN_DBLCLK => edit_selected(),
                     MGR_LIST if hi == LBN_SELCHANGE => {
-                        // Go updates the action row on every selection change.
-                        let rules = crate::automation::RULES.lock().unwrap().clone();
+                        let rules = MGR_DISPLAYED_RULES.lock().unwrap().clone();
                         let sel = selected_index().map(|s| s as isize).unwrap_or(-1);
                         update_manager_actions(hwnd, &rules, sel);
                     }
@@ -1161,7 +1203,15 @@ unsafe extern "system" fn mgr_proc(
                 let pair = if theme::is_dark() { dark } else { light };
                 LRESULT(pair.0.0 as isize)
             }
-            WM_DESTROY => LRESULT(0),
+            WM_DESTROY => {
+                MGR_HWND.store(0, Ordering::SeqCst);
+                MGR_LIST_HWND.store(0, Ordering::SeqCst);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                    crate::hwnd(&crate::PANEL),
+                    true,
+                );
+                LRESULT(0)
+            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
@@ -1221,47 +1271,21 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
 
 // ===== Time edit subclass (Go time_edit.go) ================================
 
-/// Original wndprocs for the subclassed time edits, keyed by hwnd.
-static TIME_EDIT_PROCS: Mutex<Option<HashMap<isize, isize>>> = Mutex::new(None);
-
-/// Installs the time-grammar subclass on a start/end time edit (Go
-/// timeEdit): digits and one separator only, auto-inserted colon, hour pad
-/// on blur.
+const TIME_EDIT_SUBCLASS: usize = 0x49545445;
 fn install_time_edit(edit: HWND) {
     unsafe {
-        // WNDPROC roundtrip through GWLP_WNDPROC is the documented contract
-        // (same pattern as nativeform::track).
-        #[cfg(target_arch = "x86")]
-        #[allow(renamed_and_removed_lints, function_casts_as_integer)]
-        let old = SetWindowLongPtrW(edit, GWLP_WNDPROC, time_edit_proc as usize as i32) as isize;
-        #[cfg(not(target_arch = "x86"))]
-        #[allow(renamed_and_removed_lints, function_casts_as_integer)]
-        let old = SetWindowLongPtrW(edit, GWLP_WNDPROC, time_edit_proc as usize as isize);
-        if old == 0 {
-            return;
-        }
-        TIME_EDIT_PROCS
-            .lock()
-            .unwrap()
-            .get_or_insert_with(Default::default)
-            .insert(edit.0 as isize, old);
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+            edit,
+            Some(time_edit_proc),
+            TIME_EDIT_SUBCLASS,
+            0,
+        );
     }
 }
 
 fn call_time_edit_old(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let old = TIME_EDIT_PROCS
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|m| m.get(&(hwnd.0 as isize)).copied())
-        .unwrap_or(0);
-    type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
-    unsafe {
-        let proc: WndProc = std::mem::transmute(old);
-        CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam)
-    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
-
 /// Go normalizeTimeEditRune: ASCII/full-width digits and colons map to the
 /// small editing grammar; everything else is rejected.
 fn time_edit_rune(unit: u32) -> Option<char> {
@@ -1352,8 +1376,20 @@ unsafe extern "system" fn time_edit_proc(
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+    _id: usize,
+    _data: usize,
 ) -> LRESULT {
     match msg {
+        WM_NCDESTROY => {
+            unsafe {
+                let _ = windows::Win32::UI::Shell::RemoveWindowSubclass(
+                    hwnd,
+                    Some(time_edit_proc),
+                    TIME_EDIT_SUBCLASS,
+                );
+            }
+            call_time_edit_old(hwnd, msg, wparam, lparam)
+        }
         0x0102 if wparam.0 >= 0x20 => {
             // WM_CHAR: block anything outside the time grammar.
             if time_edit_rune(wparam.0 as u32).is_none() {
@@ -1380,19 +1416,21 @@ unsafe extern "system" fn time_edit_proc(
 
 // ===== Rules persistence ====================================================
 
-fn save_rules_to_config(rules: Vec<auto::Rule>) -> Result<(), String> {
-    crate::save_automation_rules(&rules)?;
+fn save_rules_to_config(base: &[auto::Rule], rules: Vec<auto::Rule>) -> Result<(), String> {
+    crate::save_automation_rules(base, &rules)?;
     refresh_list();
     Ok(())
 }
 // ===== Editor ===============================================================
 
 fn show_editor() {
+    let _dpi = crate::dpi::Scope::window(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _));
     unsafe {
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         if HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _).0 as usize == 0 {
             create_editor();
         }
+        refresh_tooltips();
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         populate_editor();
         theme::retheme_children(ed);
@@ -1457,6 +1495,7 @@ fn create_editor() {
         )
         .expect("editor window");
         EDIT_HWND.store(ed.0 as isize, Ordering::SeqCst);
+        crate::dpi::install(ed);
         theme::apply_to_window(ed);
         crate::set_window_icons_pub(ed);
 
@@ -1602,13 +1641,7 @@ fn create_editor() {
 
         // Fields (Go: date/time edits, numeric edits).
         let name_edit = mk_edit(ED_NAME, false);
-        let placeholder = wide(&t_pub("automation_name_placeholder"));
-        let _ = SendMessageW(
-            name_edit,
-            EM_SETCUEBANNER_RAW,
-            Some(WPARAM(1)), // show even when focused (Go cue behavior)
-            Some(LPARAM(placeholder.as_ptr() as isize)),
-        );
+        crate::nativeform::cue_banner(name_edit, "automation_name_placeholder");
         install_time_edit(mk_edit(ED_TIME, false));
         install_time_edit(mk_edit(ED_END_TIME, false));
         mk_edit(ED_DATE, false);
@@ -1650,7 +1683,11 @@ fn create_editor() {
         mk_button(ED_DAYS_WORKDAYS, &t_pub("automation_days_workdays"), 24);
         mk_button(ED_DAYS_EVERYDAY, &t_pub("automation_days_everyday"), 24);
         mk_button(ED_KEEP_SCREEN, &t_pub("automation_keep_screen"), ED_CHECK_H);
-        mk_button(ED_PROC_INFO, "i", ED_SUMMARY_H);
+        mk_button(
+            ED_PROC_INFO,
+            &t_pub("automation_process_info_accessible"),
+            ED_SUMMARY_H,
+        );
 
         for (id, key) in [
             (ED_DAYS_MON, "automation_day_mon"),
@@ -1728,13 +1765,17 @@ fn populate_editor() {
     unsafe {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let idx = EDIT_INDEX.load(Ordering::SeqCst);
-        let rules = crate::automation::RULES.lock().unwrap();
+        let rules = if idx >= 0 {
+            MGR_DISPLAYED_RULES.lock().unwrap().clone()
+        } else {
+            crate::automation::RULES.lock().unwrap().clone()
+        };
+        *EDIT_BASE_RULES.lock().unwrap() = rules.clone();
         let rule = if idx >= 0 && (idx as usize) < rules.len() {
             Some(rules[idx as usize].clone())
         } else {
             None
         };
-        drop(rules);
         let rule = rule.unwrap_or_else(default_rule);
         *EDIT_ORIG.lock().unwrap() = Some(rule.clone());
 
@@ -1895,45 +1936,11 @@ fn validate_draft(ed: HWND, draft: &auto::Rule) -> Option<(usize, String)> {
 }
 
 fn parse_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    fn num(bytes: &[u8], mut range: std::ops::Range<usize>) -> bool {
-        range.all(|i| bytes[i].is_ascii_digit())
-    }
-    let (y, m, d) = (
-        value[..4].parse::<u32>().unwrap_or(0),
-        value[5..7].parse::<u32>().unwrap_or(0),
-        value[8..10].parse::<u32>().unwrap_or(0),
-    );
-    if !(num(bytes, 0..4) && num(bytes, 5..7) && num(bytes, 8..10)) || y == 0 {
-        return false;
-    }
-    // Go time.Parse rejects impossible dates (e.g. 2026-02-31).
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let max_day = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => 0,
-    };
-    (1..=12).contains(&m) && (1..=max_day).contains(&d) && y > 0
+    auto::valid_date(value)
 }
 
 fn parse_time(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 5 || bytes[2] != b':' {
-        return false;
-    }
-    let all_digits =
-        (0..2).all(|i| bytes[i].is_ascii_digit()) && (3..5).all(|i| bytes[i].is_ascii_digit());
-    let (h, m) = (
-        value[..2].parse::<u32>().unwrap_or(99),
-        value[3..5].parse::<u32>().unwrap_or(99),
-    );
-    all_digits && h < 24 && m < 60
+    auto::valid_hhmm(value)
 }
 
 /// Go setEditorError: show the message in the validation row and focus the field.
@@ -1944,6 +1951,7 @@ fn set_editor_error(ed: HWND, id: usize, message: &str) {
     if !control.is_invalid() {
         unsafe {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(control));
+            crate::viewport::reveal_control(ed, control);
         }
     }
 }
@@ -1978,22 +1986,22 @@ fn save_rule(ed: HWND) {
         draft.name = rule_summary(&draft);
     }
 
+    let (mut normalized, issues) = auto::prepare_rules(std::slice::from_ref(&draft));
+    if let Some(issue) = issues.first() {
+        set_editor_error(ed, ED_SAVE, &issue.message);
+        return;
+    }
+    let draft = normalized.remove(0);
+
     let idx = EDIT_INDEX.load(Ordering::SeqCst);
-    let mut candidate = crate::automation::RULES.lock().unwrap().clone();
+    let base = EDIT_BASE_RULES.lock().unwrap().clone();
+    let mut candidate = base.clone();
     if idx >= 0 && (idx as usize) < candidate.len() {
         candidate[idx as usize] = draft.clone();
     } else {
         candidate.push(draft.clone());
     }
-    let (_, issues) = auto::prepare_rules(&candidate);
-    if !issues.is_empty() {
-        set_editor_error(ed, ED_SAVE, &issues[0].message);
-        return;
-    }
-
-    // Go saves PrepareRules' normalized output, not the raw candidate.
-    let (normalized, _) = auto::prepare_rules(&candidate);
-    if let Err(err) = save_rules_to_config(normalized) {
+    if let Err(err) = save_rules_to_config(&base, candidate) {
         set_editor_error(ed, ED_SAVE, &err);
         return;
     }
@@ -2021,6 +2029,12 @@ fn cancel_editor(ed: HWND) {
 /// (identity/action/trigger/schedule/days/process targets) differs, so
 /// tweaking runtime-only options never nags.
 fn editor_needs_discard_confirm(current: &auto::Rule, orig: &auto::Rule) -> bool {
+    let mut current = current.clone();
+    let mut orig = orig.clone();
+    current.days = auto::normalize_days(&current.days);
+    orig.days = auto::normalize_days(&orig.days);
+    current.processes = auto::normalize_targets(current.processes);
+    orig.processes = auto::normalize_targets(orig.processes);
     if current == orig {
         return false;
     }
@@ -2040,7 +2054,7 @@ fn editor_needs_discard_confirm(current: &auto::Rule, orig: &auto::Rule) -> bool
             r.processes.clone(),
         )
     };
-    intent(current) != intent(orig)
+    intent(&current) != intent(&orig)
 }
 
 /// Repositions and shows/hides editor controls per the current trigger and
@@ -2051,6 +2065,8 @@ pub fn layout_editor() {
         if ed.is_invalid() {
             return;
         }
+        let _dpi = crate::dpi::Scope::window(ed);
+        crate::viewport::begin_layout(ed);
         lower_surfaces(ed);
         let content_w = ED_W - 2 * ED_PAD;
         let column_w = (content_w - ED_GAP) / 2;
@@ -2349,6 +2365,7 @@ pub fn layout_editor() {
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
+        crate::viewport::fit(ed);
         // Native EDIT fields can keep a validated region after the hide/
         // place/show cycle; present each visible one (Go PresentFrame over
         // frameControls at the end of a layout pass).
@@ -2508,7 +2525,7 @@ fn process_details() -> String {
     let targets = EDIT_PROCS.lock().unwrap().clone();
     let mut lines = Vec::new();
     for target in &targets {
-        let mut name = target.executable.clone();
+        let name = described_target(target);
         if !target.path.is_empty() && target.kind == "path" {
             lines.push(fill_template(
                 &t_pub("automation_process_detail_path"),
@@ -2516,10 +2533,9 @@ fn process_details() -> String {
             ));
             continue;
         }
-        let _ = &mut name;
         lines.push(fill_template(
             &t_pub("automation_process_detail_name"),
-            &[&target.executable],
+            &[&name],
         ));
     }
     lines.join("\n")
@@ -2696,7 +2712,14 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let pair = if theme::is_dark() { dark } else { light };
                 LRESULT(pair.0.0 as isize)
             }
-            WM_DESTROY => LRESULT(0),
+            WM_DESTROY => {
+                EDIT_HWND.store(0, Ordering::SeqCst);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                    HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
+                    true,
+                );
+                LRESULT(0)
+            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
@@ -2810,7 +2833,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 dc,
                 bounds,
                 font,
-                &label,
+                "i",
                 p,
                 p.window_bg,
                 state,
@@ -2903,6 +2926,7 @@ fn show_picker(owner: HWND) {
         }
         let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
         lower_surfaces(pk);
+        refresh_tooltips();
 
         // Seed the selection from the editor draft (Go Show Selected).
         *PK_SELECTED.lock().unwrap() = EDIT_PROCS.lock().unwrap().clone();
@@ -2915,6 +2939,9 @@ fn show_picker(owner: HWND) {
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(owner, false);
         // The snapshot, rows, preview and status commit as one visible
         // frame (Go picker firstFrame.Reveal).
+        if crate::viewport::metrics(pk).is_none() {
+            crate::viewport::fit(pk);
+        }
         crate::FirstFrameGate::begin(pk).reveal();
         // The uncloak can leave freshly-filled native controls with a
         // validated region; force their first on-screen paint explicitly.
@@ -2930,6 +2957,8 @@ fn show_picker(owner: HWND) {
 }
 
 fn hide_picker() {
+    PK_GENERATION.fetch_add(1, Ordering::SeqCst);
+    PK_LOADING.store(false, Ordering::SeqCst);
     unsafe {
         let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
@@ -2977,6 +3006,7 @@ fn create_picker(owner: HWND) {
         )
         .expect("picker window");
         PICKER_HWND.store(pk.0 as isize, Ordering::SeqCst);
+        crate::dpi::install(pk);
         theme::apply_to_window(pk);
         crate::set_window_icons_pub(pk);
 
@@ -3082,13 +3112,7 @@ fn create_picker(owner: HWND) {
             Some(LPARAM(1)),
         );
         // Cue banner hint (Go NewCueBanner).
-        let hint = wide(&t_pub("process_picker_search_hint"));
-        let _ = SendMessageW(
-            search,
-            EM_SETCUEBANNER_RAW,
-            Some(WPARAM(1)),
-            Some(LPARAM(hint.as_ptr() as isize)),
-        );
+        crate::nativeform::cue_banner(search, "process_picker_search_hint");
 
         // Refresh + Browse buttons (Go 132 / 146 wide).
         for (id, key, x, w) in [
@@ -3203,6 +3227,7 @@ fn create_picker(owner: HWND) {
             )),
         );
         picker_create_columns(list);
+        dpi_changed(pk);
         apply_list_theme(list);
         apply_state_images(list);
         crate::list_style::install(list);
@@ -3283,6 +3308,7 @@ fn create_picker(owner: HWND) {
             None,
         )
         .expect("picker preview");
+        crate::list_style::install(preview);
         let _ = SendMessageW(
             preview,
             WM_SETFONT,
@@ -3500,130 +3526,169 @@ unsafe fn apply_state_images(list: HWND) {
     }
 }
 
-/// One process snapshot pass, grouped into picker rows (Go startLoad →
-/// finishLoad → buildItems). Descriptions fill in asynchronously.
-fn picker_load() {
-    let snapshot = crate::automation::Snapshot::take();
-    let self_pid = std::process::id();
-    let selected = PK_SELECTED.lock().unwrap().clone();
+// Each refresh owns its result. Workers never mutate the visible model.
+static PK_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+type PickerResult = (usize, bool, Result<Vec<PickItem>, String>);
+static PK_RESULT: Mutex<Option<PickerResult>> = Mutex::new(None);
+static PK_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PK_ENRICHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PK_UPDATED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static DESCRIPTIONS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-    // Description paths come from this single snapshot; the worker only
-    // reads version resources afterwards (Go reuses its scan result too).
-    let mut desc_paths: Vec<String> = Vec::new();
-    let mut items: Vec<PickItem> = Vec::new();
-    if let Some(snapshot) = snapshot {
-        let mut counts: HashMap<String, u32> = HashMap::new();
-        for (name, pid) in snapshot.pid_names() {
-            if *pid == self_pid {
-                continue;
-            }
-            *counts.entry(name.clone()).or_insert(0) += 1;
-        }
-        let mut names: Vec<String> = counts.keys().cloned().collect();
-        names.sort();
-        for name in &names {
-            if let Some(path) = snapshot.path_of(name) {
-                desc_paths.push(path);
-            }
-        }
-        for name in names {
-            let count = counts[&name];
-            let target = auto::ProcessTarget {
-                kind: "name".into(),
-                executable: name.clone(),
-                path: String::new(),
-            };
-            let search = name.to_lowercase();
-            items.push(PickItem {
-                target,
-                name: name.clone(),
-                description: String::new(),
-                count,
-                search,
-            });
-        }
+fn described_target(target: &auto::ProcessTarget) -> String {
+    let descriptions = DESCRIPTIONS.lock().unwrap();
+    match descriptions
+        .get(&target.key())
+        .filter(|value| !value.is_empty())
+    {
+        Some(description) => format!("{} ({description})", target.executable),
+        None => target.executable.clone(),
     }
-
-    // Selected name targets that are not running stay visible (Go
-    // process_picker_not_running).
-    let mut missing: Vec<auto::ProcessTarget> = selected
-        .iter()
-        .filter(|t| t.kind != "path" && !items.iter().any(|i| i.target.key() == t.key()))
-        .cloned()
-        .collect();
-    missing.sort_by_key(|t| t.executable.to_lowercase());
-    for target in missing {
-        let description = t_pub("process_picker_not_running");
-        let search = format!("{} {}", target.executable, description).to_lowercase();
-        items.push(PickItem {
-            name: target.executable.clone(),
-            description,
-            count: 0,
-            search,
-            target,
-        });
-    }
-
-    *PK_ITEMS.lock().unwrap() = items;
-    spawn_description_load(desc_paths);
 }
 
-/// Resolves executable descriptions off the UI thread, then posts a message
-/// so the picker repaints the description column (Go enrich worker).
-fn spawn_description_load(paths: Vec<String>) {
-    let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
-    if pk.is_invalid() || paths.is_empty() {
+fn publish_picker(
+    pk: isize,
+    generation: usize,
+    complete: bool,
+    result: Result<Vec<PickItem>, String>,
+) {
+    let mut slot = PK_RESULT.lock().unwrap();
+    if PK_GENERATION.load(Ordering::SeqCst) == generation {
+        *slot = Some((generation, complete, result));
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(pk as *mut _)),
+                WM_APP_PICKER_DESC,
+                WPARAM(generation),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
+fn picker_load() {
+    let generation = PK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    PK_LOADING.store(true, Ordering::SeqCst);
+    PK_ENRICHING.store(false, Ordering::SeqCst);
+    let selected = PK_SELECTED.lock().unwrap().clone();
+    let pk = PICKER_HWND.load(Ordering::SeqCst);
+    let spawn = std::thread::Builder::new()
+        .name("picker-load".into())
+        .spawn(move || {
+            let result = (|| {
+                let snapshot = crate::automation::Snapshot::take()
+                    .ok_or_else(|| "snapshot unavailable".to_string())?;
+                let mut targets: Vec<auto::ProcessTarget> = snapshot
+                    .names()
+                    .iter()
+                    .filter(|name| {
+                        snapshot
+                            .pid_names()
+                            .iter()
+                            .any(|(n, pid)| n == *name && *pid != std::process::id())
+                    })
+                    .map(|name| auto::ProcessTarget {
+                        kind: "name".into(),
+                        executable: name.clone(),
+                        path: String::new(),
+                    })
+                    .collect();
+                for target in selected {
+                    if !targets.iter().any(|t| t.key() == target.key()) {
+                        targets.push(target);
+                    }
+                }
+                let mut items = Vec::new();
+                for target in targets {
+                    if PK_GENERATION.load(Ordering::SeqCst) != generation {
+                        return Ok(items);
+                    }
+                    let count = snapshot.count_target(&target);
+                    let description = DESCRIPTIONS
+                        .lock()
+                        .unwrap()
+                        .get(&target.key())
+                        .cloned()
+                        .unwrap_or_default();
+                    let name = if target.kind == "path" {
+                        target.path.clone()
+                    } else {
+                        target.executable.clone()
+                    };
+                    let search = format!("{name} {description}").to_lowercase();
+                    items.push(PickItem {
+                        target,
+                        name,
+                        description,
+                        count,
+                        search,
+                    });
+                }
+                publish_picker(pk, generation, false, Ok(items.clone()));
+                for item in &mut items {
+                    if PK_GENERATION.load(Ordering::SeqCst) != generation {
+                        return Ok(items);
+                    }
+                    let path = if item.target.kind == "path" {
+                        Some(item.target.path.clone())
+                    } else {
+                        snapshot.path_of(&item.target.executable.to_lowercase())
+                    };
+                    item.description = path
+                        .as_deref()
+                        .and_then(file_description)
+                        .unwrap_or_default();
+                    item.search = format!("{} {}", item.name, item.description).to_lowercase();
+                }
+                Ok(items)
+            })();
+            publish_picker(pk, generation, true, result);
+        });
+    if let Err(error) = spawn {
+        PK_LOADING.store(false, Ordering::SeqCst);
+        update_selection_status(HWND(pk as *mut _));
+        set_text(
+            get_dlg_item(HWND(pk as *mut _), PK_STATUS),
+            &fill_template(&t_pub("process_picker_error"), &[&error.to_string()]),
+        );
+    }
+}
+
+fn finish_picker_load(pk: HWND) {
+    let result = PK_RESULT.lock().unwrap().take();
+    let Some((generation, complete, result)) = result else {
+        return;
+    };
+    if generation != PK_GENERATION.load(Ordering::SeqCst) {
         return;
     }
-    std::thread::Builder::new()
-        .name("picker-desc".into())
-        .spawn(move || {
-            let mut found: HashMap<String, String> = HashMap::new();
-            for path in paths {
-                if let Some(description) = file_description(&path) {
-                    found.insert(path, description);
+    PK_LOADING.store(false, Ordering::SeqCst);
+    PK_ENRICHING.store(!complete, Ordering::SeqCst);
+    match result {
+        Ok(items) => {
+            if complete {
+                *PK_UPDATED.lock().unwrap() = Some(std::time::Instant::now());
+                let mut descriptions = DESCRIPTIONS.lock().unwrap();
+                if descriptions.len() > 2048 {
+                    descriptions.clear();
+                }
+                for item in &items {
+                    descriptions.insert(item.target.key(), item.description.clone());
                 }
             }
-            if found.is_empty() {
-                return;
-            }
-            {
-                // Map path → executable name for the item rows.
-                let mut items = PK_ITEMS.lock().unwrap();
-                for item in items.iter_mut() {
-                    if !item.description.is_empty() {
-                        continue;
-                    }
-                    // Match by file stem against the executable name.
-                    let stem = std::path::Path::new(&item.name)
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    for (path, description) in &found {
-                        let path_stem = std::path::Path::new(path)
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().to_lowercase())
-                            .unwrap_or_default();
-                        if path_stem == stem {
-                            item.description = description.clone();
-                            item.search = format!("{} {}", item.name, description).to_lowercase();
-                            break;
-                        }
-                    }
-                }
-            }
-            unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _)),
-                    WM_APP_PICKER_DESC,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
-        })
-        .ok();
+            *PK_ITEMS.lock().unwrap() = items;
+            apply_filter();
+        }
+        Err(error) => {
+            update_selection_status(pk);
+            set_text(
+                get_dlg_item(pk, PK_STATUS),
+                &fill_template(&t_pub("process_picker_error"), &[&error]),
+            );
+        }
+    }
 }
-
 /// Reads the FileDescription string from a PE version resource.
 fn file_description(path: &str) -> Option<String> {
     use windows::core::PCWSTR;
@@ -3633,7 +3698,7 @@ fn file_description(path: &str) -> Option<String> {
             PCWSTR(wide_path.as_ptr()),
             None,
         );
-        if size == 0 {
+        if size == 0 || size > 16 * 1024 * 1024 {
             return None;
         }
         let mut data = vec![0u8; size as usize];
@@ -3662,8 +3727,16 @@ fn file_description(path: &str) -> Option<String> {
         {
             return None;
         }
-        let lang = *(block as *const u16);
-        let code_page = *((block as *const u16).add(1));
+        let start = data.as_ptr() as usize;
+        let end = start + data.len();
+        if block.is_null()
+            || (block as usize) < start
+            || (block as usize).checked_add(4).is_none_or(|p| p > end)
+        {
+            return None;
+        }
+        let lang = (block as *const u16).read_unaligned();
+        let code_page = (block as *const u16).add(1).read_unaligned();
         let sub = format!(
             "\\StringFileInfo\\{:04x}{:04x}\\FileDescription",
             lang, code_page
@@ -3681,7 +3754,16 @@ fn file_description(path: &str) -> Option<String> {
         {
             return None;
         }
-        let chars = std::slice::from_raw_parts(text as *const u16, len as usize);
+        if (text as usize) < start
+            || (text as usize)
+                .checked_add(len as usize * 2)
+                .is_none_or(|p| p > end)
+        {
+            return None;
+        }
+        let chars: Vec<u16> = (0..len as usize)
+            .map(|i| (text as *const u16).add(i).read_unaligned())
+            .collect();
         let end = chars.iter().position(|c| *c == 0).unwrap_or(chars.len());
         Some(String::from_utf16_lossy(&chars[..end]))
     }
@@ -3695,8 +3777,46 @@ fn apply_filter() {
         let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
         let filter = get_text(get_dlg_item(pk, PK_SEARCH)).trim().to_lowercase();
         let (column, ascending) = *PK_SORT.lock().unwrap();
+        let old_visible = PK_VISIBLE.lock().unwrap().clone();
+        let old_top = SendMessageW(
+            list,
+            windows::Win32::UI::Controls::LVM_GETTOPINDEX,
+            None,
+            None,
+        )
+        .0;
+        let old_focus = SendMessageW(
+            list,
+            windows::Win32::UI::Controls::LVM_GETNEXTITEM,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(windows::Win32::UI::Controls::LVNI_FOCUSED as isize)),
+        )
+        .0;
+        let key_at = |index: isize| {
+            old_visible
+                .get(index as usize)
+                .map(|item| item.target.key())
+        };
+        let top_key = key_at(old_top);
+        let focus_key = key_at(old_focus);
 
         let mut items = PK_ITEMS.lock().unwrap().clone();
+        for target in PK_SELECTED.lock().unwrap().iter() {
+            if !items.iter().any(|item| item.target.key() == target.key()) {
+                let name = if target.kind == "path" {
+                    target.path.clone()
+                } else {
+                    target.executable.clone()
+                };
+                items.push(PickItem {
+                    target: target.clone(),
+                    search: name.to_lowercase(),
+                    name,
+                    description: String::new(),
+                    count: 0,
+                });
+            }
+        }
         items.retain(|i| filter.is_empty() || i.search.contains(&filter));
         items.sort_by(|a, b| {
             let key = |item: &PickItem| match column {
@@ -3704,10 +3824,25 @@ fn apply_filter() {
                 2 => format!("{:08}", item.count),
                 _ => item.name.to_lowercase(),
             };
-            if ascending {
-                key(a).cmp(&key(b))
+            let group = a
+                .target
+                .executable
+                .to_lowercase()
+                .cmp(&b.target.executable.to_lowercase());
+            let ordering = if column == 0 {
+                group
+                    .then_with(|| a.target.kind.cmp(&b.target.kind))
+                    .then_with(|| a.target.key().cmp(&b.target.key()))
             } else {
-                key(b).cmp(&key(a))
+                key(a)
+                    .cmp(&key(b))
+                    .then(group)
+                    .then_with(|| a.target.key().cmp(&b.target.key()))
+            };
+            if ascending {
+                ordering
+            } else {
+                ordering.reverse()
             }
         });
         *PK_VISIBLE.lock().unwrap() = items.clone();
@@ -3718,13 +3853,54 @@ fn apply_filter() {
         for (index, item) in items.iter().enumerate() {
             lv_insert(list, index, item);
         }
+        if let Some(index) = items
+            .iter()
+            .position(|item| focus_key.as_ref() == Some(&item.target.key()))
+        {
+            use windows::Win32::UI::Controls::{
+                LIST_VIEW_ITEM_STATE_FLAGS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
+            };
+            let state = LVITEMW {
+                state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_FOCUSED.0 | LVIS_SELECTED.0),
+                stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_FOCUSED.0 | LVIS_SELECTED.0),
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_SETITEMSTATE,
+                Some(WPARAM(index)),
+                Some(LPARAM(&state as *const _ as isize)),
+            );
+        }
+        if let Some(index) = items
+            .iter()
+            .position(|item| top_key.as_ref() == Some(&item.target.key()))
+        {
+            let mut bounds = RECT::default();
+            SendMessageW(
+                list,
+                windows::Win32::UI::Controls::LVM_GETITEMRECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(&mut bounds as *mut _ as isize)),
+            );
+            SendMessageW(
+                list,
+                windows::Win32::UI::Controls::LVM_SCROLL,
+                Some(WPARAM(0)),
+                Some(LPARAM(
+                    index as isize * (bounds.bottom - bounds.top).max(1) as isize,
+                )),
+            );
+        }
         PK_POPULATING.store(false, Ordering::SeqCst);
         let _ = SendMessageW(list, WM_SETREDRAW, Some(WPARAM(1)), Some(LPARAM(0)));
         present_control(list);
 
         // Empty overlay + status row.
         let empty = items.is_empty();
-        let message = if !filter.is_empty() {
+        let message = if PK_LOADING.load(Ordering::SeqCst) {
+            t_pub("process_picker_loading")
+        } else if !filter.is_empty() {
             t_pub("process_picker_no_results")
         } else {
             t_pub("process_picker_empty")
@@ -3830,7 +4006,8 @@ unsafe fn capture_selection() {
                 selected.push(item.target.clone());
             }
         }
-        *PK_SELECTED.lock().unwrap() = selected;
+        *PK_SELECTED.lock().unwrap() = auto::normalize_targets(selected);
+        sync_check_states();
     }
 }
 
@@ -3838,11 +4015,22 @@ fn selected_count() -> usize {
     PK_SELECTED.lock().unwrap().len()
 }
 
+fn picker_requires_process() -> bool {
+    matches!(
+        choice_value(HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _), ED_TRIGGER).as_str(),
+        "process_running" | "process_started" | "process_exited"
+    )
+}
+
 /// Go updateSelectionStatus: limit warning or "shown N · selected M".
 fn update_selection_status(pk: HWND) {
     let visible = PK_VISIBLE.lock().unwrap().len();
     let selected = selected_count();
-    let status = if selected > auto::MAX_PROCESSES_PER_RULE {
+    let status = if PK_LOADING.load(Ordering::SeqCst) {
+        t_pub("process_picker_loading")
+    } else if PK_ENRICHING.load(Ordering::SeqCst) {
+        t_pub("process_picker_loading_descriptions")
+    } else if selected > auto::MAX_PROCESSES_PER_RULE {
         fill_template(
             &t_pub("process_picker_limit"),
             &[&auto::MAX_PROCESSES_PER_RULE.to_string()],
@@ -3856,8 +4044,13 @@ fn update_selection_status(pk: HWND) {
     set_text(get_dlg_item(pk, PK_STATUS), &status);
     enable_control(
         pk,
+        PK_REFRESH,
+        !PK_LOADING.load(Ordering::SeqCst) && !PK_ENRICHING.load(Ordering::SeqCst),
+    );
+    enable_control(
+        pk,
         PK_CONFIRM,
-        selected > 0 && selected <= auto::MAX_PROCESSES_PER_RULE,
+        (selected > 0 || !picker_requires_process()) && selected <= auto::MAX_PROCESSES_PER_RULE,
     );
 }
 
@@ -3877,7 +4070,7 @@ fn update_preview(pk: HWND) {
             );
         } else {
             for target in &selected {
-                let name = &target.executable;
+                let name = &described_target(target);
                 let label = if target.kind == "path" {
                     fill_template(&t_pub("process_picker_preview_path"), &[name, &target.path])
                 } else {
@@ -3940,7 +4133,9 @@ fn picker_confirm() {
     unsafe {
         capture_selection();
         let selected = PK_SELECTED.lock().unwrap().clone();
-        if selected.len() > auto::MAX_PROCESSES_PER_RULE {
+        if selected.len() > auto::MAX_PROCESSES_PER_RULE
+            || (selected.is_empty() && picker_requires_process())
+        {
             let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
             update_selection_status(pk);
             return;
@@ -4051,29 +4246,8 @@ fn browse_executable(pk: HWND) {
         selected.retain(|t| t.key() != target.key());
         selected.push(target);
         *PK_SELECTED.lock().unwrap() = selected;
-        sync_check_states();
-        update_preview(pk);
-        update_selection_status(pk);
-
-        // Resolve the description off-thread (Go browse worker).
-        let pk_addr = pk.0 as isize;
-        std::thread::Builder::new()
-            .name("picker-browse".into())
-            .spawn(move || {
-                let description = file_description(&path);
-                if let Some(description) = description {
-                    // Preview shows the raw executable; nothing to merge into
-                    // items for a path target beyond the preview itself.
-                    let _ = description;
-                }
-                let _ = PostMessageW(
-                    Some(HWND(pk_addr as *mut _)),
-                    WM_APP_PICKER_DESC,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            })
-            .ok();
+        picker_load();
+        apply_filter();
     }
 }
 
@@ -4100,6 +4274,19 @@ unsafe extern "system" fn picker_proc(
 ) -> LRESULT {
     unsafe {
         match msg {
+            WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
+                if !PK_LOADING.load(Ordering::SeqCst)
+                    && !PK_ENRICHING.load(Ordering::SeqCst)
+                    && PK_UPDATED
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|last| last.elapsed() >= std::time::Duration::from_secs(30))
+                {
+                    picker_load();
+                    update_selection_status(hwnd);
+                }
+                LRESULT(0)
+            }
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
                 let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
@@ -4126,8 +4313,7 @@ unsafe extern "system" fn picker_proc(
                 LRESULT(0)
             }
             WM_APP_PICKER_DESC => {
-                // Description worker finished: refresh rows and status.
-                apply_filter();
+                finish_picker_load(hwnd);
                 LRESULT(0)
             }
             WM_DRAWITEM => {
@@ -4188,7 +4374,16 @@ unsafe extern "system" fn picker_proc(
                 let pair = if theme::is_dark() { dark } else { light };
                 LRESULT(pair.0.0 as isize)
             }
-            WM_DESTROY => LRESULT(0),
+            WM_DESTROY => {
+                PK_GENERATION.fetch_add(1, Ordering::SeqCst);
+                PICKER_HWND.store(0, Ordering::SeqCst);
+                PK_LIST_HWND.store(0, Ordering::SeqCst);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                    HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
+                    true,
+                );
+                LRESULT(0)
+            }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
@@ -4330,6 +4525,7 @@ unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
 // ===== Devtools + theme hooks ===============================================
 
 pub fn refresh_theme() {
+    refresh_tooltips();
     let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
     if !list.is_invalid() && unsafe { IsWindow(Some(list)) }.as_bool() {
         unsafe {
@@ -4337,6 +4533,122 @@ pub fn refresh_theme() {
             apply_state_images(list);
         }
         present_control(list);
+    }
+}
+
+fn refresh_tooltips() {
+    for (window, bindings) in [
+        (
+            HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
+            &[
+                (MGR_LIST, "tip_automation_list"),
+                (MGR_NEW, "tip_automation_new"),
+                (MGR_EDIT, "tip_automation_edit"),
+                (MGR_TOGGLE, "tip_automation_toggle"),
+                (MGR_DELETE, "tip_automation_delete"),
+            ][..],
+        ),
+        (
+            HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
+            &[
+                (ED_NAME, "tip_automation_name"),
+                (ED_ACTION, "tip_automation_action"),
+                (ED_TRIGGER, "tip_automation_trigger"),
+                (ED_TIME, "tip_automation_time"),
+                (ED_DATE, "tip_automation_date"),
+                (ED_END_TIME, "tip_automation_end_time"),
+                (ED_LOGIC, "tip_process_logic"),
+                (ED_WARNING, "tip_warning_seconds"),
+                (ED_IDLE_MIN, "tip_idle_minutes"),
+                (ED_MAX_WAIT, "tip_max_wait"),
+                (ED_KEEP_SCREEN, "tip_keep_screen"),
+                (ED_BLOCKED, "tip_blocked_policy"),
+                (ED_CHOOSE, "tip_choose_processes"),
+                (ED_PROC_INFO, "automation_process_info_accessible"),
+                (ED_DAYS_MON, "tip_automation_days"),
+                (ED_DAYS_TUE, "tip_automation_days"),
+                (ED_DAYS_WED, "tip_automation_days"),
+                (ED_DAYS_THU, "tip_automation_days"),
+                (ED_DAYS_FRI, "tip_automation_days"),
+                (ED_DAYS_SAT, "tip_automation_days"),
+                (ED_DAYS_SUN, "tip_automation_days"),
+                (ED_DAYS_WORKDAYS, "tip_automation_days_workdays"),
+                (ED_DAYS_EVERYDAY, "tip_automation_days_everyday"),
+                (ED_SAVE, "tip_automation_save"),
+                (ED_CANCEL, "tip_automation_cancel"),
+            ][..],
+        ),
+        (
+            HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _),
+            &[
+                (PK_SEARCH, "tip_process_search"),
+                (PK_REFRESH, "tip_process_refresh"),
+                (PK_BROWSE, "tip_process_browse"),
+                (PK_CONFIRM, "tip_process_confirm"),
+                (PK_CANCEL, "tip_process_cancel"),
+            ][..],
+        ),
+    ] {
+        if !window.is_invalid() {
+            let _dpi = crate::dpi::Scope::window(window);
+            crate::nativeform::form_tooltips(window, bindings);
+        }
+    }
+}
+
+pub fn dpi_changed(hwnd: HWND) {
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    if hwnd.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
+        unsafe {
+            let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
+            let mut client = RECT::default();
+            let _ = GetClientRect(list, &mut client);
+            // Native ListView still reserves its system scrollbar extent while
+            // processing row updates, even though our client bar replaces it.
+            let native_bar = windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(
+                SM_CXVSCROLL,
+                windows::Win32::UI::HiDpi::GetDpiForWindow(list),
+            );
+            let available = (client.right - client.left - s(14) - native_bar).max(3);
+            let mut count_width = s(82);
+            let dc = windows::Win32::Graphics::Gdi::GetDC(Some(list));
+            if !dc.is_invalid() {
+                use windows::Win32::Graphics::Gdi::*;
+                let old = SelectObject(dc, HGDIOBJ(form_font_body().0));
+                let mut label: Vec<u16> = t_pub("process_picker_column_instances")
+                    .encode_utf16()
+                    .collect();
+                let mut measured = RECT::default();
+                DrawTextW(
+                    dc,
+                    &mut label,
+                    &mut measured,
+                    DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                SelectObject(dc, old);
+                ReleaseDC(Some(list), dc);
+                // Both label margins plus the independent sort arrow and gap.
+                count_width = count_width.max(measured.right + s(36));
+            }
+            let count_width = count_width.min(available / 3);
+            let name_width = (available - count_width) * 250 / 560;
+            for (column, width) in [
+                name_width,
+                available - count_width - name_width,
+                count_width,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                SendMessageW(
+                    list,
+                    windows::Win32::UI::Controls::LVM_SETCOLUMNWIDTH,
+                    Some(WPARAM(column)),
+                    Some(LPARAM(width as isize)),
+                );
+            }
+            apply_state_images(list);
+        }
     }
 }
 
@@ -4431,6 +4743,107 @@ pub fn theme_hwnds() -> [HWND; 3] {
         HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
         HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _),
     ]
+}
+
+/// Relabel existing forms without repopulating edits or changing their save baseline.
+pub fn refresh_language() {
+    refresh_tooltips();
+    let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
+    if !mgr.is_invalid() {
+        set_text(mgr, &t_pub("automation_title"));
+        for (id, key) in [
+            (MGR_TITLE, "automation_rules_title"),
+            (MGR_EMPTY_TITLE, "automation_empty_title"),
+            (MGR_EMPTY_BODY, "automation_empty_body"),
+            (MGR_NEW, "automation_new"),
+            (MGR_EDIT, "automation_edit"),
+            (MGR_DELETE, "automation_delete"),
+        ] {
+            set_text(get_dlg_item(mgr, id), &t_pub(key));
+        }
+        refresh_list();
+    }
+    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    if !ed.is_invalid() {
+        let _dpi = crate::dpi::Scope::window(ed);
+        crate::nativeform::cue_banner(get_dlg_item(ed, ED_NAME), "automation_name_placeholder");
+        set_text(
+            ed,
+            &t_pub(if EDIT_INDEX.load(Ordering::SeqCst) >= 0 {
+                "automation_edit_title"
+            } else {
+                "automation_new_title"
+            }),
+        );
+        for (id, key) in [
+            (ED_BASICS_TITLE, "automation_basics"),
+            (ED_TRIGGER_TITLE, "automation_trigger_conditions"),
+            (ED_OPTIONS_TITLE, "automation_action_options"),
+            (ED_NAME_LBL, "automation_name"),
+            (ED_ACTION_LBL, "automation_action"),
+            (ED_TRIGGER_LBL, "automation_trigger"),
+            (ED_TIME_LBL, "automation_time"),
+            (ED_DATE_LBL, "automation_date"),
+            (ED_END_LBL, "automation_end_time"),
+            (ED_LOGIC_LBL, "automation_process_logic"),
+            (ED_WARN_LBL, "automation_warning_seconds"),
+            (ED_IDLE_LBL, "automation_idle_minutes"),
+            (ED_MAX_LBL, "automation_max_wait"),
+            (ED_DAYS_LBL, "automation_days"),
+            (ED_BLOCKED_LBL, "automation_blocked_policy"),
+            (ED_NAME_HINT, "automation_name_hint"),
+            (ED_NO_OPTIONS, "automation_no_action_options"),
+            (ED_CHOOSE, "automation_choose_processes"),
+            (ED_PROC_INFO, "automation_process_info_accessible"),
+            (ED_DAYS_WORKDAYS, "automation_days_workdays"),
+            (ED_DAYS_EVERYDAY, "automation_days_everyday"),
+            (ED_KEEP_SCREEN, "automation_keep_screen"),
+            (ED_SAVE, "automation_save"),
+            (ED_CANCEL, "automation_cancel"),
+            (ED_DAYS_MON, "automation_day_mon"),
+            (ED_DAYS_TUE, "automation_day_tue"),
+            (ED_DAYS_WED, "automation_day_wed"),
+            (ED_DAYS_THU, "automation_day_thu"),
+            (ED_DAYS_FRI, "automation_day_fri"),
+            (ED_DAYS_SAT, "automation_day_sat"),
+            (ED_DAYS_SUN, "automation_day_sun"),
+        ] {
+            set_text(get_dlg_item(ed, id), &t_pub(key));
+        }
+        let action = choice_value(ed, ED_ACTION);
+        let trigger = choice_value(ed, ED_TRIGGER);
+        let logic = choice_value(ed, ED_LOGIC);
+        let blocked = choice_value(ed, ED_BLOCKED);
+        fill_action_choice(ed);
+        choice_select(ed, ED_ACTION, &action);
+        fill_trigger_choice(ed, &action, &trigger);
+        fill_logic_choice(ed);
+        choice_select(ed, ED_LOGIC, &logic);
+        fill_blocked_choice(ed);
+        choice_select(ed, ED_BLOCKED, &blocked);
+        update_proc_summary();
+        layout_editor();
+    }
+    let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
+    if !pk.is_invalid() {
+        set_text(pk, &t_pub("process_picker_title"));
+        crate::nativeform::cue_banner(get_dlg_item(pk, PK_SEARCH), "process_picker_search_hint");
+        for (id, key) in [
+            (PK_HEADING, "process_picker_heading"),
+            (PK_HELPER, "process_picker_helper"),
+            (PK_PRIVACY, "process_picker_privacy"),
+            (PK_REFRESH, "process_picker_refresh"),
+            (PK_BROWSE, "process_picker_browse"),
+            (PK_CONFIRM, "process_picker_confirm"),
+            (PK_CANCEL, "common_cancel"),
+        ] {
+            set_text(get_dlg_item(pk, id), &t_pub(key));
+        }
+        update_header_captions(pk);
+        dpi_changed(pk);
+        update_selection_status(pk);
+        update_preview(pk);
+    }
 }
 
 #[cfg(test)]

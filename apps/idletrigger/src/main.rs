@@ -1,4 +1,4 @@
-//! IdleTrigger — native Windows power automation tray utility (Rust rewrite).
+//! IdleTrigger — native Windows power automation tray utility.
 //!
 //! Vertical slice: single-instance tray app with a control panel for Stay
 //! Awake and Idle Monitoring (lock/sleep/hibernate/shutdown/restart actions
@@ -16,7 +16,7 @@ use idletrigger_core::config;
 use idletrigger_core::i18n::I18n;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Globalization::GetUserDefaultUILanguage;
-use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, HDC, HFONT};
+use windows::Win32::Graphics::Gdi::{HDC, HFONT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{
     ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE, GetSystemPowerStatus,
@@ -36,20 +36,19 @@ use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetSystemMetrics,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IsWindowVisible,
-    KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SendMessageW, SetTimer, SetWindowTextW, ShowWindow, SystemParametersInfoW,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DRAWITEM,
-    WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW,
+    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
+    SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
 const APP_VERSION: &str = match option_env!("IDLETRIGGER_VERSION") {
     Some(v) => v,
-    None => concat!("rust-", env!("CARGO_PKG_VERSION"), "+build.unknown"),
+    None => env!("CARGO_PKG_VERSION"),
 };
 
 // Control identifiers.
@@ -74,9 +73,6 @@ const STATIC_SECTION_BASE: usize = 201;
 const STATIC_SUBTITLE_BASE: usize = 211;
 
 // Fonts retained for WM_DRAWITEM painting (Go keeps them on the panel).
-static PANEL_FONT_BODY: AtomicIsize = AtomicIsize::new(0);
-static PANEL_FONT_SECTION: AtomicIsize = AtomicIsize::new(0);
-static PANEL_FONT_SUBTITLE: AtomicIsize = AtomicIsize::new(0);
 
 /// Go panel.create: "IdleTrigger" or "IdleTrigger v{version}".
 fn panel_title_text() -> String {
@@ -88,15 +84,15 @@ fn panel_title_text() -> String {
 }
 
 fn panel_font_body() -> HFONT {
-    HFONT(PANEL_FONT_BODY.load(Ordering::SeqCst) as *mut _)
+    make_font(14, 400)
 }
 
 fn panel_font_section() -> HFONT {
-    HFONT(PANEL_FONT_SECTION.load(Ordering::SeqCst) as *mut _)
+    make_font(14, 700)
 }
 
 fn panel_font_subtitle() -> HFONT {
-    HFONT(PANEL_FONT_SUBTITLE.load(Ordering::SeqCst) as *mut _)
+    make_font(12, 600)
 }
 
 // Layout tokens, identical to the Go control panel (96-DPI logical pixels):
@@ -120,7 +116,9 @@ const WM_REFRESH_UI: u32 = 0x8004;
 const WM_ACTION_SHOW: u32 = 0x8005;
 const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
+const WM_IPC_REQUEST: u32 = 0x8008;
 
+mod accessibility;
 mod automation;
 mod automation_ui;
 mod capture;
@@ -128,20 +126,27 @@ mod choice;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod display;
+mod dpi;
 mod gpu_activity;
+mod idle_monitor;
 mod ipc;
 mod iplocate;
 mod list_style;
 mod nativeform;
 mod paint;
+mod pipe;
 mod popups;
 mod settings_ui;
 mod single_instance;
 mod system;
 mod theme;
+mod theme_com;
+mod theme_contrast;
 mod theme_engine;
+mod theme_recovery;
 mod theme_repair;
 mod tooltips;
+mod viewport;
 
 const PANEL_TIMER: usize = 1;
 const WARN_TIMER: usize = 2;
@@ -153,6 +158,11 @@ const BATTERY_POLL_TICKS: u32 = 120; // 250ms * 120 = 30s
 static I18N: std::sync::RwLock<Option<I18n>> = std::sync::RwLock::new(None);
 static CONFIG: Mutex<Option<config::Config>> = Mutex::new(None);
 static CONFIG_DOC: Mutex<Option<toml_edit::DocumentMut>> = Mutex::new(None);
+static CONFIG_WRITER: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
+static CONFIG_SOURCE: Mutex<Option<String>> = Mutex::new(None);
+static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
 static CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
@@ -182,7 +192,10 @@ static MENU_EXIT_ID: Mutex<Option<tray_icon::menu::MenuId>> = Mutex::new(None);
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
 static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WARN_SECONDS_LEFT: AtomicI32 = AtomicI32::new(0);
-static WAITING_INPUT_RESET: AtomicBool = AtomicBool::new(false);
+static IDLE_CLOCK: std::sync::LazyLock<Mutex<idle_monitor::Clock>> =
+    std::sync::LazyLock::new(|| Mutex::new(idle_monitor::Clock::default()));
+static WARNING_PREVIEW_SESSION: AtomicBool = AtomicBool::new(false);
+static WARN_ACTION: Mutex<String> = Mutex::new(String::new());
 static ON_AC: AtomicBool = AtomicBool::new(true);
 static BATTERY_PERCENT: AtomicI32 = AtomicI32::new(100);
 static BATTERY_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -207,6 +220,7 @@ fn t(key: &str) -> String {
 
 /// Resolves and hot-swaps the active locale; all future `t()` calls use it.
 fn apply_language(lang: &str) {
+    let previous = t("settings_title");
     let resolved = match lang {
         "en" => "en".to_string(),
         "zh-CN" => "zh-CN".to_string(),
@@ -222,6 +236,70 @@ fn apply_language(lang: &str) {
     if let Ok(mut guard) = I18N.write() {
         *guard = Some(I18n::load(&resolved));
     }
+    if previous != t("settings_title") && !hwnd(&PANEL).is_invalid() {
+        refresh_language();
+    }
+}
+
+fn refresh_language() {
+    let panel = hwnd(&PANEL);
+    let _dpi = dpi::Scope::window(panel);
+    set_control_text(panel, &panel_title_text());
+    for (id, key) in [
+        (STATIC_SECTION_BASE, "menu_power_management"),
+        (STATIC_SECTION_BASE + 1, "menu_automation_section"),
+        (STATIC_SECTION_BASE + 2, "menu_theme_switch"),
+        (IDC_NOSLEEP, "menu_nosleep_enable"),
+        (IDC_IDLE, "menu_idle_enable"),
+        (IDC_AUTOMATION, "automation_master"),
+        (IDC_MANAGE_BUTTON, "menu_automation_manage"),
+        (IDC_THEME_ENABLE, "menu_theme_enable"),
+        (IDC_THEME_SWITCH, "menu_theme_switch_now"),
+        (IDC_THEME_REPAIR, "menu_theme_repair"),
+        (IDC_SYSTEM_BUTTON, "menu_system_controls"),
+        (IDC_SETTINGS_BUTTON, "settings_open"),
+        (IDC_EXIT_BUTTON, "menu_exit_panel"),
+    ] {
+        let control = unsafe { GetDlgItem(Some(panel), id as i32).unwrap_or_default() };
+        set_control_text(control, &t(key));
+        if matches!(id, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
+            unsafe {
+                let mut rect = RECT::default();
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(control, &mut rect);
+                let font = HFONT(
+                    SendMessageW(
+                        control,
+                        windows::Win32::UI::WindowsAndMessaging::WM_GETFONT,
+                        None,
+                        None,
+                    )
+                    .0 as *mut _,
+                );
+                let width = checkbox_hit_width(panel, font, &t(key))
+                    .min(split_row(PANEL_CLIENT_WIDTH - 2 * PAD, 2));
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                    control,
+                    None,
+                    0,
+                    0,
+                    scale(width),
+                    rect.bottom,
+                    windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+                );
+            }
+        }
+    }
+    let tray = TRAY_PTR.load(Ordering::SeqCst);
+    if tray != 0 {
+        unsafe {
+            (&*(tray as *const tray_icon::TrayIcon)).set_menu(Some(Box::new(tray_menu())));
+        }
+    }
+    settings_ui::refresh_language();
+    automation_ui::refresh_language();
+    tooltips::refresh_all(panel);
+    refresh_status();
 }
 
 fn hwnd(slot: &AtomicIsize) -> HWND {
@@ -229,7 +307,7 @@ fn hwnd(slot: &AtomicIsize) -> HWND {
 }
 
 fn scale(v: i32) -> i32 {
-    v * DPI_SCALE.load(Ordering::SeqCst) / 96
+    dpi::scale(v)
 }
 
 fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
@@ -245,6 +323,7 @@ fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
     f(guard.as_ref().expect("config initialized"))
 }
 
+#[cfg(test)]
 fn cfg_edit<T>(f: impl FnOnce(&mut config::Config) -> T) -> T {
     let mut guard = CONFIG.lock().unwrap();
     f(guard.as_mut().expect("config initialized"))
@@ -255,6 +334,21 @@ fn log_line(msg: &str) {
     let Ok(mut guard) = LOG_FILE.lock() else {
         return;
     };
+    if guard
+        .as_ref()
+        .and_then(|file| file.metadata().ok())
+        .is_some_and(|meta| meta.len() >= 5 * 1024 * 1024)
+    {
+        guard.take();
+        if let Some(path) = CONFIG_PATH
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|path| path.parent())
+        {
+            *guard = open_log(&path.join("IdleTrigger.log")).ok();
+        }
+    }
     if let Some(file) = guard.as_mut() {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -299,6 +393,16 @@ fn main() {
         }
     }
     if !cli_args.is_empty() {
+        let language = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.parent()
+                    .map(|dir| config::load(&dir.join("IdleTrigger.toml")).config.language)
+            })
+            .unwrap_or_else(|| "auto".into());
+        apply_language(&language);
+        #[cfg(feature = "devtools")]
+        let _ = devtools::load();
         // CLI mode: attach to the parent console and exit.
         ipc::attach_console();
         std::process::exit(ipc::run_cli(&cli_args));
@@ -317,24 +421,10 @@ fn main() {
 
     *CONFIG.lock().unwrap() = Some(effective_config.clone());
     *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
+    *CONFIG_SOURCE.lock().unwrap() = loaded.source_text;
+    CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
     *CONFIG_PATH.lock().unwrap() = Some(config_path.clone());
     apply_language(&effective_config.language);
-
-    // Runtime diagnostic reads never mutate the persisted configuration.
-    if cfg_map(|c| c.logging_enabled) {
-        init_log(&exe_dir);
-    }
-    log_line("IdleTrigger starting");
-    if let Some(err) = &loaded.load_error {
-        log_line(&format!("config load failed, defaults used: {err}"));
-        let body = format!(
-            "{}\n{}\n\n{}",
-            t_pub("warning_config_defaults"),
-            t_pub("warning_config_recovery"),
-            err
-        );
-        warn_dialog("", &body);
-    }
 
     let _instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
@@ -348,6 +438,33 @@ fn main() {
             return;
         }
     };
+
+    // Runtime diagnostic reads never mutate the persisted configuration.
+    if cfg_map(|c| c.logging_enabled) {
+        init_log(&exe_dir);
+    }
+    log_line("IdleTrigger starting");
+    #[cfg(feature = "devtools")]
+    let diagnostics = devtools::ENABLED.load(Ordering::SeqCst);
+    #[cfg(not(feature = "devtools"))]
+    let diagnostics = false;
+    if !diagnostics && let Err(error) = system::autostart_ensure_current() {
+        log_line(&format!("autostart registration repair failed: {error}"));
+    }
+    if let Some(err) = &loaded.load_error {
+        log_line(&format!("config load failed, defaults used: {err}"));
+        let body = format!(
+            "{}\n{}\n\n{}",
+            t_pub("warning_config_defaults"),
+            t_pub("warning_config_recovery"),
+            err
+        );
+        warn_dialog("", &body);
+    }
+
+    if startup_delay > 0 {
+        std::thread::sleep(Duration::from_secs(startup_delay));
+    }
 
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
@@ -387,7 +504,10 @@ fn main() {
     // Menu theming must precede native menu creation (muda HMENU).
     theme::set_process_menu_theme(theme::is_dark());
     let _tray_guard = tray_init();
-    TRAY_ALIVE.store(true, Ordering::SeqCst);
+    TRAY_ALIVE.store(_tray_guard.is_some(), Ordering::SeqCst);
+    if _tray_guard.is_none() {
+        log_line("tray creation failed; keeping the control panel visible");
+    }
 
     if crate::cfg_map(|c| c.hotkeys_enabled) {
         let failed = system::register_all();
@@ -403,6 +523,7 @@ fn main() {
     automation::reload_rules();
     automation::spawn(exe_dir.clone());
     theme::apply_to_all();
+    refresh_battery();
     theme_engine::spawn();
     spawn_config_watcher();
     #[cfg(feature = "devtools")]
@@ -417,10 +538,7 @@ fn main() {
     refresh_status();
     spawn_idle_thread();
 
-    if startup_delay > 0 {
-        std::thread::sleep(Duration::from_secs(startup_delay));
-    }
-    if !start_minimized {
+    if !start_minimized || _tray_guard.is_none() {
         // Atomic first presentation: no light flash in dark mode.
         FirstFrameGate::begin(hwnd(&PANEL)).reveal();
     }
@@ -432,8 +550,10 @@ fn main() {
             break;
         }
         unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            if !pre_translate_dialog(&msg) {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
         let mut exit = false;
         while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
@@ -469,6 +589,7 @@ fn main() {
 
     EXITING.store(true, Ordering::SeqCst);
     system::unregister_all();
+    TRAY_PTR.store(0, Ordering::SeqCst);
     drop(_tray_guard);
     TRAY_ALIVE.store(false, Ordering::SeqCst);
     unsafe {
@@ -484,6 +605,9 @@ fn msg_default() -> windows::Win32::UI::WindowsAndMessaging::MSG {
 // ---- Single instance -----------------------------------------------------
 
 fn request_show_from_second_instance() {
+    if ipc::send("open").is_some_and(|reply| !reply.starts_with("err:")) {
+        return;
+    }
     unsafe {
         let name: Vec<u16> = "IdleTriggerShowPanel".encode_utf16().chain([0]).collect();
         let message = RegisterWindowMessageW(PCWSTR(name.as_ptr()));
@@ -511,13 +635,34 @@ fn request_show_from_second_instance() {
 fn init_log(exe_dir: &std::path::Path) {
     use std::io::Write;
     let path = exe_dir.join("IdleTrigger.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut current = LOG_FILE.lock().unwrap();
+    if current.is_some() {
+        return;
+    }
+    if let Ok(mut file) = open_log(&path) {
+        let _ = writeln!(file, "---- session {} ----", std::process::id());
+        *current = Some(file);
+    }
+}
+
+fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() >= 5 * 1024 * 1024) {
+        std::fs::rename(path, path.with_extension("log.1"))?;
+    }
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-    {
-        let _ = writeln!(file, "---- session {} ----", std::process::id());
-        *LOG_FILE.lock().unwrap() = Some(file);
+}
+
+fn sync_logging() {
+    if cfg_map(|c| c.logging_enabled) {
+        let path = CONFIG_PATH.lock().unwrap().clone();
+        if let Some(dir) = path.as_ref().and_then(|path| path.parent()) {
+            init_log(dir);
+        }
+    } else {
+        LOG_FILE.lock().unwrap().take();
     }
 }
 
@@ -550,10 +695,22 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_IDLE_CANCEL => {
-                cancel_warning("input");
+                let cancelled = IDLE_CLOCK
+                    .lock()
+                    .unwrap()
+                    .countdown(std::time::Instant::now())
+                    .is_none();
+                if cancelled && !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
+                    hide_warning("session changed");
+                }
+                LRESULT(0)
+            }
+            WM_IPC_REQUEST => {
+                ipc::process_requests();
                 LRESULT(0)
             }
             WM_REFRESH_UI => {
+                theme_engine::finish_repair();
                 apply_stay_awake();
                 refresh_checkboxes();
                 refresh_status();
@@ -576,6 +733,7 @@ unsafe extern "system" fn hidden_proc(
                     log_line("power resume detected");
                     refresh_battery();
                     apply_stay_awake();
+                    theme_recovery::environment_changed(false, true);
                     crate::theme::refresh_from_registry();
                     crate::theme::apply_to_all();
                 }
@@ -590,10 +748,23 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_EXTERNAL_RELOAD => {
-                hot_reload_config();
+                let _ = hot_reload_config();
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE => {
+                theme_recovery::environment_changed(true, false);
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_TIMECHANGE => {
+                theme_engine::wake();
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {
+                dpi::refresh_text_scale();
+                if theme_contrast::refresh() {
+                    theme::apply_to_all();
+                    tooltips::retheme();
+                }
                 if theme::is_color_set_change(lparam.0) && theme::refresh_from_registry() {
                     theme::apply_to_all();
                     // Title-bar marks follow the theme (Go WindowIcons.Apply
@@ -636,16 +807,7 @@ unsafe extern "system" fn hidden_proc(
                     }
                     12 => {
                         log_line("hotkey: toggle stay awake");
-                        cfg_edit(|c| {
-                            c.nosleep_enabled = !c.nosleep_enabled;
-                            if c.nosleep_enabled {
-                                c.idle_enabled = false;
-                            }
-                        });
-                        persist_config();
-                        apply_stay_awake();
-                        refresh_checkboxes();
-                        refresh_status();
+                        on_toggle(IDC_NOSLEEP);
                     }
                     _ => {}
                 }
@@ -705,7 +867,7 @@ fn draw_panel_item(item: &nativeform::DrawItem) {
 
 fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
     let p = theme::palette();
-    let scale = DPI_SCALE.load(Ordering::SeqCst);
+    let scale = scale(96);
     let id = item.control_id as usize;
     let label = window_text(item.control);
     unsafe {
@@ -719,6 +881,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
         ) {
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
+            accessibility::check(item.control, state.active);
             paint::draw_checkbox(
                 dc,
                 bounds,
@@ -954,11 +1117,7 @@ unsafe extern "system" fn panel_proc(
                 paint_static(wparam, lparam);
                 LRESULT(theme::bg_brush().0 as isize)
             }
-            windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
-                let dpi = ((wparam.0 >> 16) & 0xFFFF) as u32;
-                recreate_ui_for_dpi(dpi, hwnd_);
-                LRESULT(0)
-            }
+
             WM_DESTROY => {
                 // UI reconstruction is not application shutdown.
                 LRESULT(0)
@@ -987,35 +1146,6 @@ unsafe fn paint_static(wparam: WPARAM, lparam: LPARAM) {
     }
 }
 
-/// Rebuilds every visible window after a per-monitor DPI change. The hidden
-/// window and registered classes survive.
-unsafe fn recreate_ui_for_dpi(dpi: u32, old_panel: HWND) {
-    unsafe {
-        let was_visible = IsWindowVisible(old_panel).as_bool();
-        let mut rect = RECT::default();
-        let _ = GetWindowRect(old_panel, &mut rect);
-        DPI_SCALE.store(dpi as i32, Ordering::SeqCst);
-        let _ = DestroyWindow(old_panel);
-        let _ = DestroyWindow(hwnd(&WARNING));
-        let _ = DestroyWindow(hwnd(&ACTION_WARN_HWND));
-        let _ = DestroyWindow(hwnd(&LOCK_NOTIFY_HWND));
-        // A destroyed action-warning window never sends its close callback;
-        // clear the busy flag so future countdowns are not silently skipped.
-        let _ = automation::ACTION_BUSY.swap(false, Ordering::SeqCst);
-        PANEL.store(0, Ordering::SeqCst);
-        WARNING.store(0, Ordering::SeqCst);
-        ACTION_WARN_HWND.store(0, Ordering::SeqCst);
-        LOCK_NOTIFY_HWND.store(0, Ordering::SeqCst);
-        create_windows();
-        refresh_checkboxes();
-        refresh_status();
-        if was_visible {
-            let _ = ShowWindow(hwnd(&PANEL), SW_SHOW);
-        }
-        log_line(&format!("ui rebuilt for dpi={dpi}"));
-    }
-}
-
 unsafe extern "system" fn warning_proc(
     hwnd_: HWND,
     msg: u32,
@@ -1036,6 +1166,7 @@ unsafe extern "system" fn warning_proc(
                 tick_warning();
                 LRESULT(0)
             }
+            WM_DRAWITEM => popups::draw_warning_button(lparam),
             windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
                 let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
                 let mut client = RECT::default();
@@ -1055,18 +1186,68 @@ unsafe extern "system" fn warning_proc(
     }
 }
 
+fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    if msg.message != WM_KEYDOWN || !choice::open_popup().is_invalid() {
+        return false;
+    }
+    unsafe {
+        let root = GetAncestor(msg.hwnd, GA_ROOT);
+        if root.is_invalid() {
+            return false;
+        }
+        let default = automation_ui::default_button(root)
+            .or_else(|| (root == settings_ui::theme_hwnd()).then(settings_ui::default_button))
+            .or_else(|| {
+                (root == hwnd(&WARNING))
+                    .then(|| GetDlgItem(Some(root), IDC_WARN_CANCEL as i32).ok())
+                    .flatten()
+            })
+            .or_else(|| popups::default_button(root));
+        if default.is_none() && root != hwnd(&PANEL) {
+            return false;
+        }
+        match msg.wParam.0 {
+            0x09 => {
+                nativeform::keyboard_navigation();
+                let handled = IsDialogMessageW(root, msg).as_bool();
+                viewport::reveal_control(root, GetFocus());
+                handled
+            }
+            0x1b => {
+                SendMessageW(root, WM_CLOSE, None, None);
+                true
+            }
+            0x0d => {
+                let focus = GetFocus();
+                let mut class = [0u16; 32];
+                let len = GetClassNameW(focus, &mut class);
+                let button = if String::from_utf16_lossy(&class[..len.max(0) as usize])
+                    .eq_ignore_ascii_case("BUTTON")
+                {
+                    Some(focus)
+                } else {
+                    default
+                };
+                if let Some(button) = button
+                    && IsWindowEnabled(button).as_bool()
+                {
+                    SendMessageW(button, BM_CLICK, None, None);
+                }
+                true
+            }
+            _ => automation_ui::weekday_key(root, msg.wParam.0),
+        }
+    }
+}
+
 static CLASSES_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// Creates the hidden window (once) plus every visible window; repeatable
-/// after a DPI change destroys them.
+/// Creates the application windows; DPI changes preserve these handles.
 fn create_windows() {
     unsafe {
         let instance = GetModuleHandleW(None).expect("module handle");
-        // Go font tokens: body 14/400, section 14/700, subtitle 12/600.
-        let font = make_font(14, 400);
-        let section_font = make_font(14, 700);
-        let subtitle_font = make_font(12, 600);
-
         if !CLASSES_REGISTERED.swap(true, Ordering::SeqCst) {
             register_class(instance, w!("IdleTriggerHiddenWindow"), hidden_proc);
             register_class(instance, w!("IdleTriggerPanel"), panel_proc);
@@ -1103,13 +1284,11 @@ fn create_windows() {
         let (create_x, create_y) = cursor_work_area()
             .map(|work| (work.right - 1, work.bottom - 1))
             .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        let title: Vec<u16> = panel_title_text().encode_utf16().chain([0]).collect();
         let panel = CreateWindowExW(
             panel_ex_style,
             w!("IdleTriggerPanel"),
-            PCWSTR({
-                let t: Vec<u16> = panel_title_text().encode_utf16().chain([0]).collect();
-                t.leak().as_ptr()
-            }),
+            PCWSTR(title.as_ptr()),
             panel_style,
             create_x,
             create_y,
@@ -1122,12 +1301,17 @@ fn create_windows() {
         )
         .expect("panel window");
         PANEL.store(panel.0 as isize, Ordering::SeqCst);
+        dpi::install(panel);
         // Per-monitor DPI beats the system-wide guess now that the window
         // exists on its destination monitor.
         let window_dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(panel);
         if window_dpi > 0 {
             DPI_SCALE.store(window_dpi as i32, Ordering::SeqCst);
         }
+        let _dpi = dpi::Scope::window(panel);
+        let font = make_font(14, 400);
+        let section_font = make_font(14, 700);
+        let subtitle_font = make_font(12, 600);
         let mut frame = RECT {
             left: 0,
             top: 0,
@@ -1158,10 +1342,6 @@ fn create_windows() {
         let two_w = split_row(row_width, 2); // 221
         let three_w = split_row(row_width, 3); // 144
         let mut y = PAD;
-
-        PANEL_FONT_BODY.store(font.0 as isize, Ordering::SeqCst);
-        PANEL_FONT_SECTION.store(section_font.0 as isize, Ordering::SeqCst);
-        PANEL_FONT_SUBTITLE.store(subtitle_font.0 as isize, Ordering::SeqCst);
 
         section_header(
             panel,
@@ -1430,6 +1610,7 @@ fn create_windows() {
 
         // Tooltips for every panel control (Go tooltips.go parity).
         tooltips::create_for_panel(panel);
+        viewport::fit(panel);
         // Control visual styles follow the active light/dark mode from the
         // start (Go ApplyControl at creation).
         theme::retheme_children(panel);
@@ -1466,6 +1647,7 @@ fn create_windows() {
         )
         .expect("warning window");
         WARNING.store(warning.0 as isize, Ordering::SeqCst);
+        dpi::install(warning);
 
         let warn_text = static_text(&ControlSpec {
             parent: warning,
@@ -1478,12 +1660,27 @@ fn create_windows() {
             font,
         });
         WARN_TEXT.store(warn_text.0 as isize, Ordering::SeqCst);
+        let _ = SetWindowPos(
+            warn_text,
+            None,
+            0,
+            0,
+            scale(390),
+            scale(84),
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
 
         let warn_cancel = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
-            w!("取消 / Cancel"),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
+            PCWSTR(
+                t("common_cancel")
+                    .encode_utf16()
+                    .chain([0])
+                    .collect::<Vec<_>>()
+                    .as_ptr(),
+            ),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
             scale(160),
             scale(116),
             scale(120),
@@ -1495,6 +1692,7 @@ fn create_windows() {
         )
         .expect("warning cancel button");
         let _ = set_control_font(warn_cancel, font);
+        nativeform::track(warn_cancel);
 
         popups::create();
         popups::lock_create();
@@ -1535,8 +1733,7 @@ fn register_class(
     }
 }
 
-/// Explicit small+big icons via WM_SETICON, extracted from our own EXE file
-/// with LR_LOADFROMFILE — immune to how the resource compiler names entries.
+/// Shared resource icons are cached by Windows for each theme and size.
 pub fn set_window_icons(hwnd_: HWND, _instance: windows::Win32::Foundation::HMODULE) {
     use windows::Win32::UI::WindowsAndMessaging::{LR_DEFAULTCOLOR, LoadImageW};
     // Go WindowIcons parity: the title bar uses the theme-specific tray icon
@@ -1550,7 +1747,7 @@ pub fn set_window_icons(hwnd_: HWND, _instance: windows::Win32::Foundation::HMOD
                 windows::Win32::UI::WindowsAndMessaging::IMAGE_ICON,
                 scale(size),
                 scale(size),
-                LR_DEFAULTCOLOR,
+                LR_DEFAULTCOLOR | windows::Win32::UI::WindowsAndMessaging::LR_SHARED,
             ) {
                 let _ = SendMessageW(
                     hwnd_,
@@ -1734,7 +1931,7 @@ fn checkbox_hit_width(parent: HWND, font: HFONT, label: &str) -> i32 {
         if height == 0 || bounds.right <= bounds.left {
             return 0;
         }
-        let dpi = DPI_SCALE.load(Ordering::SeqCst).max(96);
+        let dpi = scale(96).max(96);
         let logical = (bounds.right - bounds.left) * 96 / dpi;
         // 2 before the glyph, 16 glyph, 8 before label, 2 focus inset.
         2 + 16 + 8 + logical + 2
@@ -1759,53 +1956,19 @@ fn set_control_font(control: HWND, font: HFONT) -> bool {
 
 /// Builds a scaled UI font from the message font family (Go makeFont).
 fn make_font(size_px: i32, weight: i32) -> HFONT {
-    // Go font.NewForLayout: YaHei UI has Regular/Light/Bold, not Semibold.
-    // Weight 600 renders as synthetic semibold; convert to true Bold(700).
-    let weight = if weight == 600 && i18n_is_chinese() {
-        700
-    } else {
-        weight
-    };
-    unsafe {
-        let mut metrics = windows::Win32::UI::WindowsAndMessaging::NONCLIENTMETRICSW {
-            cbSize: std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::NONCLIENTMETRICSW>(
-            ) as u32,
-            ..Default::default()
-        };
-        if SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
-            metrics.cbSize,
-            Some(&mut metrics as *mut _ as *mut core::ffi::c_void),
-            Default::default(),
-        )
-        .is_ok()
-        {
-            metrics.lfMessageFont.lfHeight = -scale(size_px);
-            metrics.lfMessageFont.lfWeight = weight;
-            return CreateFontIndirectW(&metrics.lfMessageFont);
-        }
-        HFONT::default()
-    }
+    dpi::font(size_px, weight, false)
 }
 
 // ---- Tray ----------------------------------------------------------------
 
-fn tray_init() -> Option<tray_icon::TrayIcon> {
+fn tray_init() -> Option<Box<tray_icon::TrayIcon>> {
     use tray_icon::TrayIconBuilder;
-    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     // Extract from our own EXE so it works on any machine, not just the
     // build host with its source tree; dark/light variant follows the theme.
     let icon = tray_icon_for_theme()?;
 
-    let menu = Menu::new();
-    let open = MenuItem::new(t("menu_open_panel"), true, None);
-    let _ = menu.append(&open);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let exit = MenuItem::new(t("menu_exit"), true, None);
-    let _ = menu.append(&exit);
-    *MENU_OPEN_ID.lock().unwrap() = Some(open.id().clone());
-    *MENU_EXIT_ID.lock().unwrap() = Some(exit.id().clone());
+    let menu = tray_menu();
 
     let tray = TrayIconBuilder::new()
         .with_icon(icon)
@@ -1814,47 +1977,50 @@ fn tray_init() -> Option<tray_icon::TrayIcon> {
         .with_menu_on_left_click(false) // Go: left toggles panel, right opens menu
         .build()
         .ok()?;
-    // TrayIcon is not Send; keep a main-thread-only pointer so the status
-    // refresh can update the tooltip. The leaked box owns the same object the
-    // main loop drops at exit, so ownership stays single.
-    let leaked = Box::into_raw(Box::new(tray));
-    TRAY_PTR.store(leaked as isize, Ordering::SeqCst);
-    // SAFETY: reconstruct the owned handle from the leaked pointer; the
-    // leaked allocation is intentionally never freed before process exit.
-    let tray = unsafe { std::ptr::read(leaked) };
+    // The main-thread guard owns the stable allocation. Clear the borrowed
+    // pointer before dropping it after the message loop.
+    let tray = Box::new(tray);
+    TRAY_PTR.store(
+        (&*tray as *const tray_icon::TrayIcon) as isize,
+        Ordering::SeqCst,
+    );
     Some(tray)
 }
 
-/// Extracts an icon from this EXE's embedded resources via
-/// `PrivateExtractIconsW` — the only reliable extraction API that works
-/// from a running module's own file on all Windows builds tested.
-/// `resource_id` selects a numeric icon-group resource (Go resourceid);
-/// None extracts the first icon group.
+fn tray_menu() -> tray_icon::menu::Menu {
+    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let menu = Menu::new();
+    let open = MenuItem::new(t("menu_open_panel"), true, None);
+    let exit = MenuItem::new(t("menu_exit"), true, None);
+    let _ = menu.append(&open);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&exit);
+    *MENU_OPEN_ID.lock().unwrap() = Some(open.id().clone());
+    *MENU_EXIT_ID.lock().unwrap() = Some(exit.id().clone());
+    menu
+}
+
+/// Loads an embedded icon from the running module, independent of path length.
 fn exe_embedded_icon_by(resource_id: Option<i32>) -> Option<tray_icon::Icon> {
-    use windows::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW;
-    let exe = std::env::current_exe().ok()?;
-    // PrivateExtractIconsW wants a fixed 260-wchar path buffer.
-    let mut path_buf = [0u16; 260];
-    let path_str = exe.as_os_str().to_string_lossy();
-    let path_chars: Vec<u16> = path_str.encode_utf16().collect();
-    if path_chars.len() >= 260 {
-        return None;
-    }
-    path_buf[..path_chars.len()].copy_from_slice(&path_chars);
-    // Negative index = ordinal resource identifier (documented contract).
-    let index = resource_id.map_or(0, |id| -id);
+    use windows::Win32::UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
     unsafe {
-        let mut icons: [windows::Win32::UI::WindowsAndMessaging::HICON; 1] = Default::default();
-        let n = PrivateExtractIconsW(&path_buf, index, 32, 32, Some(&mut icons), None, 0);
-        let icon = icons[0];
-        if n == 0 || icon.is_invalid() {
-            log_line("tray icon extraction from EXE failed");
-            return None;
-        }
+        let module = GetModuleHandleW(None).ok()?;
+        let icon = HICON(
+            LoadImageW(
+                Some(module.into()),
+                PCWSTR(resource_id.unwrap_or(1) as usize as *const u16),
+                IMAGE_ICON,
+                32,
+                32,
+                LR_DEFAULTCOLOR,
+            )
+            .ok()?
+            .0,
+        );
         // Convert HICON to RGBA for tray-icon's Icon type.
-        let rgba = hicon_to_rgba(icon)?;
+        let rgba = hicon_to_rgba(icon);
         let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
-        tray_icon::Icon::from_rgba(rgba, 32, 32).ok()
+        tray_icon::Icon::from_rgba(rgba?, 32, 32).ok()
     }
 }
 
@@ -1964,11 +2130,8 @@ unsafe fn hicon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) ->
 /// Go buildTooltip parity: title + 保持唤醒/空闲监测/主题/自动任务 lines,
 /// "%s：%s" per line, joined by newlines, capped at 120 UTF-16 units.
 fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
-    let line = |key: &str, value: String| {
-        t("status_line")
-            .replace("%s", &t(key))
-            .replace("%s", &value)
-    };
+    let line = |key: &str, value: String| t_args("status_line", &[&t(key), &value]);
+    let overrides = automation::overrides();
 
     let mut lines = vec![if APP_VERSION.is_empty() || APP_VERSION == "dev" {
         "IdleTrigger".to_string()
@@ -1979,7 +2142,13 @@ fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
     // Stay awake: effective state, paused wording under battery block.
     let stay_awake = if effective_nosleep {
         t("status_short_on")
-    } else if cfg_map(|c| c.nosleep_enabled) && BATTERY_BLOCKED.load(Ordering::SeqCst) {
+    } else if cfg_map(|c| {
+        (c.nosleep_enabled || overrides.stay_awake)
+            && (overrides.pause_stay_awake
+                || (!ON_AC.load(Ordering::SeqCst)
+                    && (!c.nosleep_on_battery
+                        || BATTERY_PERCENT.load(Ordering::SeqCst) < c.nosleep_battery_threshold)))
+    }) {
         t("status_paused")
     } else {
         t("status_short_off")
@@ -1988,14 +2157,25 @@ fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
 
     // Idle monitor: paused by stay-awake, or "Nm 动作" when running.
     if idle_running {
-        let (minutes, action) = cfg_map(|c| (c.idle_timeout_minutes, c.idle_action.clone()));
+        let (minutes, action) = cfg_map(|c| {
+            (
+                if overrides.enable_idle {
+                    overrides.idle_minutes
+                } else {
+                    c.idle_timeout_minutes
+                },
+                c.idle_action.clone(),
+            )
+        });
         let unit = if crate::i18n_is_chinese() { "分" } else { "m" };
         let action_label = t(&format!("menu_action_{action}"));
         lines.push(line(
             "tooltip_idle",
             format!("{minutes}{unit} {action_label}"),
         ));
-    } else if effective_nosleep {
+    } else if (cfg_map(|c| c.idle_enabled) || overrides.enable_idle)
+        && (effective_nosleep || overrides.pause_idle)
+    {
         lines.push(line("tooltip_idle", t("status_paused")));
     } else {
         lines.push(line("tooltip_idle", t("status_short_off")));
@@ -2034,7 +2214,7 @@ fn theme_tooltip_value_short() -> String {
 /// Short theme schedule for the tooltip (Go formatThemeSchedule short=true):
 /// 浅7:00/深19:00, 日出6:33/日落18:34, with the fixed-fallback suffix.
 fn theme_schedule_text_short() -> String {
-    let (mode, light, dark, ip_enabled) = cfg_map(|c| {
+    let (mode, light, dark, _ip_enabled) = cfg_map(|c| {
         (
             c.theme_mode.clone(),
             c.theme_light_time.clone(),
@@ -2050,12 +2230,7 @@ fn theme_schedule_text_short() -> String {
         }
     };
     if mode == "sunrise" {
-        let (lat, lon) = if ip_enabled {
-            crate::iplocate::cached().unwrap_or((39.9042, 116.4074))
-        } else {
-            (39.9042, 116.4074)
-        };
-        match theme_engine::solar_times(lat, lon, theme_engine::day_of_year_today()) {
+        match theme_engine::solar_window(_ip_enabled) {
             Some((rise, set)) => t("theme_schedule_sunrise_short_format")
                 .replacen("%s", &format!("{:02}:{:02}", rise / 60, rise % 60), 1)
                 .replacen("%s", &format!("{:02}:{:02}", set / 60, set % 60), 1),
@@ -2168,11 +2343,30 @@ impl FirstFrameGate {
 
 fn show_panel() {
     unsafe {
-        let _ = ShowWindow(hwnd(&PANEL), SW_SHOW);
+        let target = active_modal_window().unwrap_or_else(|| hwnd(&PANEL));
+        let command = if windows::Win32::UI::WindowsAndMessaging::IsIconic(target).as_bool() {
+            windows::Win32::UI::WindowsAndMessaging::SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        let _ = ShowWindow(target, command);
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(target);
     }
 }
 
+fn active_modal_window() -> Option<HWND> {
+    automation_ui::theme_hwnds()
+        .into_iter()
+        .rev()
+        .chain([settings_ui::theme_hwnd()])
+        .find(|window| !window.is_invalid() && unsafe { IsWindowVisible(*window).as_bool() })
+}
+
 fn toggle_panel() {
+    if active_modal_window().is_some() {
+        show_panel();
+        return;
+    }
     unsafe {
         if IsWindowVisible(hwnd(&PANEL)).as_bool() {
             let _ = ShowWindow(hwnd(&PANEL), SW_HIDE);
@@ -2183,38 +2377,32 @@ fn toggle_panel() {
 }
 
 fn on_toggle(code: usize) {
-    // Owner-draw toggles carry no native check state: a click means "invert
-    // the current config value".
-    let changed = match code {
-        IDC_NOSLEEP => Some(cfg_edit(|c| {
+    if !matches!(code, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
+        return;
+    }
+    if let Err(err) = edit_config(|c| match code {
+        IDC_NOSLEEP => {
             c.nosleep_enabled = !c.nosleep_enabled;
             if c.nosleep_enabled {
                 c.idle_enabled = false;
             }
-            "nosleep_enabled"
-        })),
-        IDC_IDLE => Some(cfg_edit(|c| {
+        }
+        IDC_IDLE => {
             c.idle_enabled = !c.idle_enabled;
             if c.idle_enabled {
                 c.nosleep_enabled = false;
             }
-            "idle_enabled"
-        })),
-        IDC_AUTOMATION => Some(cfg_edit(|c| {
-            c.automation_enabled = !c.automation_enabled;
-            "automation_enabled"
-        })),
-        _ => None,
-    };
-    if let Some(key) = changed {
-        log_line(&format!("setting changed: {key}"));
-        persist_config();
-        apply_stay_awake();
-        refresh_checkboxes();
-        refresh_status();
+        }
+        IDC_AUTOMATION => c.automation_enabled = !c.automation_enabled,
+        _ => unreachable!(),
+    }) {
+        warn_dialog("", &err);
+        return;
     }
+    apply_stay_awake();
+    refresh_checkboxes();
+    refresh_status();
 }
-
 /// Go dialog.Warn: simple warning box owned by the desktop (NULL parent),
 /// titled with the app name.
 fn warn_dialog(heading: &str, body: &str) {
@@ -2236,99 +2424,105 @@ fn warn_dialog(heading: &str, body: &str) {
     }
 }
 
-fn persist_config() {
-    let Some(path) = CONFIG_PATH.lock().unwrap().clone() else {
-        return;
-    };
-    let cfgv = CONFIG.lock().unwrap().clone().expect("config");
-    let mut doc_guard = CONFIG_DOC.lock().unwrap();
-    let Some(doc) = doc_guard.as_mut() else {
-        return;
-    };
-    if let Err(err) = config::save(&path, doc, &cfgv) {
-        drop(doc_guard);
-        log_line(&format!("config save failed: {err}"));
-        warn_dialog(
-            "",
-            &t_pub("msg_config_save_failed").replace("%s", &err.to_string()),
-        );
-        return;
-    } else {
-        log_line("config saved");
-        // Remember our own write's mtime so the config watcher doesn't
-        // treat it as an external edit (Go selfConfigWrite guard).
-        if let Ok(meta) = std::fs::metadata(&path)
-            && let Ok(modified) = meta.modified()
-            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            *SELF_CONFIG_MTIME.lock().unwrap() = Some(dur.as_secs_f64());
-        }
+/// Serialize application writers; publish config and rules only after saving.
+fn commit_config(
+    edit: impl FnOnce(&mut config::Config, &mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
+    let writer = CONFIG_WRITER.lock().unwrap();
+    if CONFIG_LOAD_FAILED.load(Ordering::SeqCst) {
+        return Err(t_pub("warning_config_recovery"));
     }
-    drop(doc_guard);
-    automation::reload_rules();
-}
-
-/// Commit rule edits only after the candidate document has reached disk.
-fn save_automation_rules(rules: &[idletrigger_core::automation::Rule]) -> Result<(), String> {
-    let save = || -> Result<(), String> {
-        let path = CONFIG_PATH
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("configuration path unavailable")?;
-        let config = CONFIG
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("configuration unavailable")?;
-        let mut guard = CONFIG_DOC.lock().unwrap();
-        let mut candidate = guard
-            .as_ref()
-            .ok_or("configuration document unavailable")?
-            .clone();
-        idletrigger_core::automation::replace_rules(&mut candidate, rules)
-            .map_err(|e| e.to_string())?;
-        config::save(&path, &mut candidate, &config).map_err(|e| e.to_string())?;
-        *guard = Some(candidate);
-        if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified())
-            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
-        {
-            *SELF_CONFIG_MTIME.lock().unwrap() = Some(dur.as_secs_f64());
-        }
-        Ok(())
+    let path = CONFIG_PATH
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("configuration path unavailable")?;
+    let source = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.to_string()),
     };
-    save().map_err(|err| t_pub("msg_config_save_failed").replacen("%s", &err, 1))?;
+    if source != *CONFIG_SOURCE.lock().unwrap() {
+        return Err(t_pub("settings_save_conflict"));
+    }
+    let mut candidate = CONFIG
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("configuration unavailable")?;
+    let mut doc = CONFIG_DOC
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("configuration document unavailable")?;
+    edit(&mut candidate, &mut doc)?;
+    config::save(&path, &mut doc, &candidate)
+        .map_err(|e| t_pub("msg_config_save_failed").replacen("%s", &e.to_string(), 1))?;
+    *CONFIG_SOURCE.lock().unwrap() = Some(doc.to_string());
+    *CONFIG.lock().unwrap() = Some(candidate);
+    *CONFIG_DOC.lock().unwrap() = Some(doc);
+    // Rule publication is inside the writer boundary, preventing a later
+    // reload from being overwritten by an older save's publication.
     automation::reload_rules();
+    drop(writer);
+    theme_engine::wake();
+    sync_logging();
+    log_line("configuration saved");
     Ok(())
 }
 
-/// Last mtime (seconds) written by this process; external watcher skips it.
-static SELF_CONFIG_MTIME: Mutex<Option<f64>> = Mutex::new(None);
-/// Last mtime seen by the config watcher.
-static LAST_SEEN_MTIME: Mutex<Option<f64>> = Mutex::new(None);
+fn edit_config(edit: impl FnOnce(&mut config::Config)) -> Result<(), String> {
+    commit_config(|config, _| {
+        edit(config);
+        Ok(())
+    })
+}
 
-/// Restarts all feature threads and hot-applies every setting after an
-/// external config change (Go reloadConfig).
-fn hot_reload_config() {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let config_path = exe_dir.join("IdleTrigger.toml");
+fn save_automation_rules(
+    base: &[idletrigger_core::automation::Rule],
+    rules: &[idletrigger_core::automation::Rule],
+) -> Result<(), String> {
+    commit_config(|_, doc| {
+        idletrigger_core::rule_document::update(doc, base, rules).map_err(|err| {
+            if err == "automation_changed_external" {
+                t_pub(&err)
+            } else {
+                err
+            }
+        })
+    })
+}
+/// Publish a valid external configuration and apply its UI/platform settings.
+fn hot_reload_config() -> Result<(), String> {
+    let writer = CONFIG_WRITER.lock().unwrap();
+    let config_path = CONFIG_PATH
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("configuration path unavailable")?;
     let loaded = config::load(&config_path);
+    if loaded.created_from_template {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "configuration file is missing",
+        )
+        .to_string());
+    }
     if let Some(err) = loaded.load_error.as_ref() {
         log_line(&format!(
             "config reload rejected; retaining last valid configuration: {err}"
         ));
-        return;
+        return Err(err.clone());
     }
     *CONFIG.lock().unwrap() = Some(loaded.config.clone());
     *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
-    apply_language(&loaded.config.language);
-    if loaded.config.logging_enabled && LOG_FILE.lock().unwrap().is_none() {
-        init_log(&exe_dir);
-    }
+    *CONFIG_SOURCE.lock().unwrap() = loaded.source_text;
+    CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
     automation::reload_rules();
+    drop(writer);
+    apply_language(&loaded.config.language);
+    theme_engine::wake();
+    sync_logging();
     system::unregister_all();
     if loaded.config.hotkeys_enabled {
         let failed = system::register_all();
@@ -2342,67 +2536,48 @@ fn hot_reload_config() {
     refresh_status();
     theme::apply_to_all();
     log_line("config reloaded from external change");
+    Ok(())
 }
 
-/// Spawns the config watcher: 3-second mtime poll, skipping our own writes
-/// (Go config_watch.go decision logic).
+/// Poll exact file contents so atomic replacements and edits with preserved
+/// timestamps are detected; our own saved document is skipped automatically.
 fn spawn_config_watcher() {
-    let config_path = CONFIG_PATH.lock().unwrap().clone();
-    let Some(config_path) = config_path else {
+    let Some(path) = CONFIG_PATH.lock().unwrap().clone() else {
         return;
     };
-    // Seed the last-seen mtime from the current file.
-    if let Ok(meta) = std::fs::metadata(&config_path)
-        && let Ok(modified) = meta.modified()
-        && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
-    {
-        *LAST_SEEN_MTIME.lock().unwrap() = Some(dur.as_secs_f64());
-    }
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || {
-            loop {
-                if EXITING.load(Ordering::SeqCst) {
-                    return;
-                }
+            let mut observed = CONFIG_SOURCE.lock().unwrap().clone();
+            while !EXITING.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(3));
-                let Ok(meta) = std::fs::metadata(&config_path) else {
+                let Ok(text) = std::fs::read_to_string(&path) else {
                     continue;
                 };
-                let Ok(modified) = meta.modified() else {
-                    continue;
-                };
-                let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) else {
-                    continue;
-                };
-                let mtime = dur.as_secs_f64();
-                let mut last_seen = LAST_SEEN_MTIME.lock().unwrap();
-                if mtime <= last_seen.unwrap_or(0.0) {
+                if observed.as_ref() == Some(&text) {
                     continue;
                 }
-                let self_write = SELF_CONFIG_MTIME
-                    .lock()
-                    .unwrap()
-                    .is_some_and(|own| (mtime - own).abs() < 0.05);
-                *last_seen = Some(mtime);
-                if self_write {
-                    continue;
+                if CONFIG_SOURCE.lock().unwrap().as_ref() != Some(&text) {
+                    let posted = unsafe {
+                        PostMessageW(
+                            Some(hwnd(&HIDDEN)),
+                            WM_EXTERNAL_RELOAD,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                    };
+                    if posted.is_err() {
+                        continue;
+                    }
                 }
-                drop(last_seen);
-                unsafe {
-                    let _ = PostMessageW(
-                        Some(hwnd(&HIDDEN)),
-                        WM_EXTERNAL_RELOAD,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
+                observed = Some(text);
             }
         })
         .expect("spawn config watcher");
 }
 
-fn set_checkbox(slot: &AtomicIsize, _checked: bool) {
+fn set_checkbox(slot: &AtomicIsize, checked: bool) {
+    accessibility::check(hwnd(slot), checked);
     // Owner-draw buttons repaint from config via WM_DRAWITEM.
     unsafe {
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd(slot)), None, false);
@@ -2413,45 +2588,60 @@ fn refresh_checkboxes() {
     set_checkbox(&CHK_NOSLEEP, cfg_map(|c| c.nosleep_enabled));
     set_checkbox(&CHK_IDLE, cfg_map(|c| c.idle_enabled));
     set_checkbox(&CHK_AUTOMATION, cfg_map(|c| c.automation_enabled));
+    accessibility::check(
+        unsafe { GetDlgItem(Some(hwnd(&PANEL)), IDC_THEME_ENABLE as i32).unwrap_or_default() },
+        cfg_map(|c| c.theme_switch_enabled),
+    );
     invalidate_control(IDC_THEME_ENABLE);
 }
 
-fn refresh_status() {
-    // Read both flags in one closure pass: cfg_map nests would deadlock on
-    // the non-reentrant CONFIG mutex.
-    let (nosleep_on, _idle_on, keep_screen_on) =
-        cfg_map(|c| (c.nosleep_enabled, c.idle_enabled, c.keep_screen_on));
-    // Go noSleepStatusText: automation pause > battery pause > keep-screen >
-    // enabled > disabled.
-    let nosleep_status = if automation::OVR.nosleep_paused.load(Ordering::SeqCst) {
-        t("status_paused_by_automation")
-    } else if nosleep_on && BATTERY_BLOCKED.load(Ordering::SeqCst) {
-        t("status_paused_by_battery")
-    } else if !nosleep_on {
-        t("status_disabled")
-    } else if keep_screen_on {
-        t("status_enabled_keep_screen")
+fn power_status() -> (String, String) {
+    let overrides = automation::overrides();
+    let config = cfg_map(Clone::clone);
+    let requested = config.nosleep_enabled || overrides.stay_awake;
+    let battery_allowed = ON_AC.load(Ordering::SeqCst)
+        || (config.nosleep_on_battery
+            && BATTERY_PERCENT.load(Ordering::SeqCst) >= config.nosleep_battery_threshold);
+    let awake = requested && !overrides.pause_stay_awake && battery_allowed;
+    let screen = (config.nosleep_enabled && config.keep_screen_on)
+        || (overrides.stay_awake && overrides.keep_screen_on);
+    let awake_status = t(if !requested {
+        "status_disabled"
+    } else if overrides.pause_stay_awake {
+        "status_paused_by_automation"
+    } else if !battery_allowed {
+        "status_paused_by_battery"
+    } else if screen {
+        "status_enabled_keep_screen"
     } else {
-        t("status_enabled")
-    };
-    // Go monitorStatusText: active "N 分钟 → 动作"; suspended by stay-awake
-    // or automation; otherwise disabled.
-    let idle_summary_running = cfg_map(|c| c.idle_enabled)
-        && !automation::OVR.idle_paused.load(Ordering::SeqCst)
-        && !nosleep_on;
-    let idle_status = if idle_summary_running {
-        let (minutes, action) = cfg_map(|c| (c.idle_timeout_minutes, c.idle_action.clone()));
-        let action_label = t(&format!("menu_action_{action}"));
-        t("status_monitor_active")
-            .replace("%d", &minutes.to_string())
-            .replace("%s", &action_label)
-    } else if cfg_map(|c| c.idle_enabled) && nosleep_on {
+        "status_enabled"
+    });
+    let idle_status = if !(config.idle_enabled || overrides.enable_idle) {
+        t("status_disabled")
+    } else if awake {
         t("status_paused_by_nosleep")
-    } else if cfg_map(|c| c.idle_enabled) && automation::OVR.idle_paused.load(Ordering::SeqCst) {
+    } else if overrides.pause_idle {
         t("status_paused_by_automation")
     } else {
-        t("status_disabled")
+        let minutes = if overrides.enable_idle {
+            overrides.idle_minutes
+        } else {
+            config.idle_timeout_minutes
+        };
+        t_args(
+            "status_monitor_active",
+            &[
+                &minutes.to_string(),
+                &t(&format!("menu_action_{}", config.idle_action)),
+            ],
+        )
     };
+    (awake_status, idle_status)
+}
+
+fn refresh_status() {
+    let overrides = automation::overrides();
+    let (nosleep_status, idle_status) = power_status();
     let overview = format!(
         "{}{}{}{}",
         t("power_overview_prefix"),
@@ -2490,9 +2680,8 @@ fn refresh_status() {
 
     // Tray tooltip mirrors the effective power-management state.
     let effective_nosleep = NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst);
-    let idle_running = (cfg_map(|c| c.idle_enabled)
-        || automation::OVR.idle_on.load(Ordering::SeqCst))
-        && !automation::OVR.idle_paused.load(Ordering::SeqCst)
+    let idle_running = (cfg_map(|c| c.idle_enabled) || overrides.enable_idle)
+        && !overrides.pause_idle
         && !effective_nosleep;
     tray_update_tooltip(&build_tray_tooltip(effective_nosleep, idle_running));
     tray_refresh_theme_icon();
@@ -2510,7 +2699,7 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 /// showSource = true). Fixed mode lists both times; sunrise mode lists the
 /// solved solar times plus the location source.
 fn theme_schedule_text() -> String {
-    let (mode, light, dark, ip_enabled) = cfg_map(|c| {
+    let (mode, light, dark, _ip_enabled) = cfg_map(|c| {
         (
             c.theme_mode.clone(),
             c.theme_light_time.clone(),
@@ -2525,67 +2714,48 @@ fn theme_schedule_text() -> String {
             "--:--".to_string()
         }
     };
-    if mode == "sunrise" {
-        let (lat, lon) = if ip_enabled {
-            crate::iplocate::cached().unwrap_or((39.9042, 116.4074))
-        } else {
-            (39.9042, 116.4074)
-        };
-        let (rise, set) = theme_engine::solar_times(lat, lon, theme_engine::day_of_year_today())
-            .unwrap_or((0, 0));
+    if mode == "sunrise"
+        && let Some((rise, set)) = theme_engine::solar_window(_ip_enabled)
+    {
         let schedule = t("theme_schedule_sunrise_format")
             .replacen("%s", &format!("{:02}:{:02}", rise / 60, rise % 60), 1)
             .replacen("%s", &format!("{:02}:{:02}", set / 60, set % 60), 1);
-        let source = if ip_enabled && crate::iplocate::cached().is_some() {
-            t("theme_location_ip")
-        } else {
-            t("theme_location_default")
-        };
+        let source = t(theme_engine::location(_ip_enabled).2);
         t("theme_schedule_source_format")
             .replacen("%s", &schedule, 1)
             .replacen("%s", &source, 1)
     } else {
-        t("theme_schedule_format")
+        let fixed = t("theme_schedule_format")
             .replacen("%s", &hhmm(&light), 1)
-            .replacen("%s", &hhmm(&dark), 1)
+            .replacen("%s", &hhmm(&dark), 1);
+        if mode == "sunrise" {
+            t_args("theme_schedule_fallback_format", &[&fixed])
+        } else {
+            fixed
+        }
     }
 }
 
 // ---- Stay awake ----------------------------------------------------------
 
 fn apply_stay_awake() {
+    let overrides = automation::overrides();
     // Low battery is a runtime pause, not a config rewrite: the manual
     // toggle survives and resumes when AC returns (Go battery.go contract).
-    let manual = cfg_map(|c| {
-        if !c.nosleep_enabled || BATTERY_BLOCKED.load(Ordering::SeqCst) {
-            return false;
-        }
-        if !ON_AC.load(Ordering::SeqCst) && !c.nosleep_on_battery {
-            return false;
-        }
-        true
-    });
+    let manual = cfg_map(|c| c.nosleep_enabled);
     // Runtime overrides from automatic tasks layer on top of the manual
     // toggles without rewriting them.
-    let auto_on = automation::OVR.nosleep_on.load(Ordering::SeqCst);
-    let auto_keep_screen = automation::OVR.keep_screen.load(Ordering::SeqCst);
-    let paused = automation::OVR.nosleep_paused.load(Ordering::SeqCst);
+    let auto_on = overrides.stay_awake;
+    let auto_keep_screen = overrides.keep_screen_on;
+    let paused = overrides.pause_stay_awake;
     let battery_allowed = ON_AC.load(Ordering::SeqCst)
         || cfg_map(|c| {
             c.nosleep_on_battery
                 && BATTERY_PERCENT.load(Ordering::SeqCst) >= c.nosleep_battery_threshold
         });
     let effective = (manual || auto_on) && !paused && battery_allowed;
-    let keep_screen = if auto_on {
-        auto_keep_screen
-    } else {
-        cfg_map(|c| c.keep_screen_on)
-    };
+    let keep_screen = (manual && cfg_map(|c| c.keep_screen_on)) || (auto_on && auto_keep_screen);
 
-    let previous = NOSLEEP_EXECUTION_ON.swap(effective, Ordering::SeqCst);
-    if previous != effective {
-        log_line(&format!("stay awake effective={effective}"));
-    }
     unsafe {
         let mut flags = ES_CONTINUOUS.0;
         if effective {
@@ -2594,189 +2764,139 @@ fn apply_stay_awake() {
                 flags |= ES_DISPLAY_REQUIRED.0;
             }
         }
-        let _ = SetThreadExecutionState(EXECUTION_STATE(flags));
+        if SetThreadExecutionState(EXECUTION_STATE(flags)).0 == 0 {
+            log_line("SetThreadExecutionState failed; retaining previous execution status");
+            return;
+        }
+    }
+    let previous = NOSLEEP_EXECUTION_ON.swap(effective, Ordering::SeqCst);
+    if previous != effective {
+        log_line(&format!("stay awake effective={effective}"));
     }
 }
 
 // ---- Idle monitor --------------------------------------------------------
 
-fn spawn_idle_thread() {
-    std::thread::Builder::new()
-        .name("idle-monitor".into())
-        .spawn(|| {
-            let mut last_idle = 0i64;
-            let mut tick: u32 = 0;
-            let started_at = std::time::Instant::now();
-            // Startup clamp: if the machine was already idle before launch,
-            // don't fire an instant warning/action (Go StartWindowClamped).
-            let startup_clamp_until = std::time::Instant::now() + Duration::from_secs(5);
-            // Enhanced-mode periodic-input filter state (Go classifyInputReset):
-            // tracks consecutive near-equal input gaps inside the 20s–2min
-            // window to ignore injected periodic ticks.
-            let mut periodic_count: u32 = 0;
-            let mut periodic_baseline: i64 = 0;
-            let mut last_input_at: Option<std::time::Instant> = None;
-            let mut lock_states: [(i32, i16); 3] = [
-                (popups::VK_CAPITAL, 0),
-                (popups::VK_NUMLOCK, 0),
-                (popups::VK_SCROLL, 0),
-            ];
-            // Seed lock-key states so startup doesn't fire notices.
-            for (vk, last) in lock_states.iter_mut() {
-                *last = popups::poll_state(*vk);
-            }
-            loop {
-                if EXITING.load(Ordering::SeqCst) {
-                    return;
-                }
-                let idle_ms = last_input_idle_ms();
-                IDLE_MS.store(idle_ms, Ordering::SeqCst);
-
-                // A falling idle value means fresh keyboard/mouse input.
-                if idle_ms < last_idle {
-                    let enhanced = cfg_map(|c| c.idle_enhanced_monitor);
-                    let mut accept = true;
-                    if enhanced {
-                        // Classify the gap between observed resets: gaps in
-                        // the 20s–2min window that repeat 3× within ±5s of a
-                        // rolling baseline are injected periodic ticks, not
-                        // human input (Go ignored_as_periodic_input).
-                        if let Some(prev) = last_input_at {
-                            let gap = prev.elapsed().as_millis() as i64;
-                            if (20_000..=120_000).contains(&gap) {
-                                if periodic_count == 0 || (gap - periodic_baseline).abs() <= 5_000 {
-                                    periodic_baseline = if periodic_count == 0 {
-                                        gap
-                                    } else {
-                                        (periodic_baseline + gap) / 2
-                                    };
-                                    periodic_count += 1;
-                                    if periodic_count >= 3 {
-                                        accept = false; // ignored as periodic
-                                    }
-                                } else {
-                                    periodic_count = 1;
-                                    periodic_baseline = gap;
-                                }
-                            } else {
-                                periodic_count = 0;
-                                periodic_baseline = 0;
-                            }
-                        }
-                    }
-                    if accept {
-                        periodic_count = 0;
-                        WAITING_INPUT_RESET.store(false, Ordering::SeqCst);
-                        if WARNING_ACTIVE.load(Ordering::SeqCst) {
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(hwnd(&HIDDEN)),
-                                    WM_IDLE_CANCEL,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                );
-                            }
-                        }
-                    }
-                    last_input_at = Some(std::time::Instant::now());
-                }
-                last_idle = idle_ms;
-
-                popups::poll(&mut lock_states);
-
-                tick += 1;
-                if tick.is_multiple_of(BATTERY_POLL_TICKS) {
-                    refresh_battery();
-                }
-
-                let (manual_idle, manual_minutes, warn_seconds) = cfg_map(|c| {
-                    (
-                        c.idle_enabled,
-                        c.idle_timeout_minutes,
-                        c.idle_warning_seconds,
-                    )
-                });
-                let auto_idle = automation::OVR.idle_on.load(Ordering::SeqCst);
-                let idle_paused = automation::OVR.idle_paused.load(Ordering::SeqCst);
-                let threshold_ms = (if auto_idle {
-                    automation::OVR.idle_minutes.load(Ordering::SeqCst) as i64
-                } else {
-                    manual_minutes as i64
-                }) * 60_000;
-                let warn_ms = warn_seconds as i64 * 1000;
-                #[cfg(feature = "devtools")]
-                let threshold_ms = if devtools::IDLE_MONITOR_TEST.load(Ordering::SeqCst) {
-                    i64::from(devtools::IDLE_TEST_SECONDS.load(Ordering::SeqCst)) * 1000
-                } else {
-                    threshold_ms
-                };
-                let armed = (manual_idle || auto_idle)
-                    && !idle_paused
-                    && !NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst)
-                    && !WAITING_INPUT_RESET.load(Ordering::SeqCst);
-
-                if armed
-                    && !WARNING_ACTIVE.load(Ordering::SeqCst)
-                    && std::time::Instant::now() >= startup_clamp_until
-                    && threshold_ms - warn_ms > 0
-                    && idle_ms >= threshold_ms - warn_ms
-                    // Second clamp leg: the *process* must have run a while
-                    // AND the machine idle must predate the process start —
-                    // i.e. don't fire within the first threshold of runtime.
-                    && idle_ms + (started_at.elapsed().as_millis() as i64) >= threshold_ms
-                {
-                    WARNING_ACTIVE.store(true, Ordering::SeqCst);
-                    WARN_SECONDS_LEFT.store(warn_seconds, Ordering::SeqCst);
-                    unsafe {
-                        let _ =
-                            PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_WARN, WPARAM(0), LPARAM(0));
-                    }
-                }
-
-                std::thread::sleep(Duration::from_millis(250));
-            }
-        })
-        .expect("spawn idle monitor");
+fn idle_settings() -> idle_monitor::Settings {
+    let overrides = automation::overrides();
+    cfg_map(|c| {
+        let battery_allowed = ON_AC.load(Ordering::SeqCst)
+            || (c.nosleep_on_battery
+                && BATTERY_PERCENT.load(Ordering::SeqCst) >= c.nosleep_battery_threshold);
+        let awake = (c.nosleep_enabled || overrides.stay_awake)
+            && !overrides.pause_stay_awake
+            && battery_allowed;
+        let minutes = if overrides.enable_idle {
+            overrides.idle_minutes
+        } else {
+            c.idle_timeout_minutes
+        };
+        let threshold = Duration::from_secs(minutes as u64 * 60);
+        #[cfg(feature = "devtools")]
+        let threshold = if devtools::IDLE_MONITOR_TEST.load(Ordering::SeqCst) {
+            Duration::from_secs(devtools::IDLE_TEST_SECONDS.load(Ordering::SeqCst) as u64)
+        } else {
+            threshold
+        };
+        idle_monitor::Settings {
+            enabled: (c.idle_enabled || overrides.enable_idle) && !overrides.pause_idle && !awake,
+            threshold,
+            warning: Duration::from_secs(c.idle_warning_seconds as u64),
+            action: c.idle_action.clone(),
+            enhanced: c.idle_enhanced_monitor,
+        }
+    })
 }
 
-fn last_input_idle_ms() -> i64 {
+fn input_sample() -> Option<(u32, Duration)> {
     unsafe {
         let mut info = LASTINPUTINFO {
             cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
             dwTime: 0,
         };
-        if GetLastInputInfo(&mut info).as_bool() {
-            let delta = GetTickCount().wrapping_sub(info.dwTime) as i64;
-            // Another process can inject input with a future timestamp,
-            // making the delta wrap to ~4.29e9. Treat that as fresh activity
-            // (Go elapsedSinceLastInput clamps negatives to 0).
-            if delta < 0 || delta > i32::MAX as i64 {
-                0
-            } else {
-                delta
-            }
-        } else {
-            0
+        if !GetLastInputInfo(&mut info).as_bool() {
+            return None;
         }
+        let delta = GetTickCount().wrapping_sub(info.dwTime);
+        let delta = if delta > i32::MAX as u32 { 0 } else { delta };
+        Some((info.dwTime, Duration::from_millis(u64::from(delta))))
     }
 }
 
+fn sample_idle_clock() -> idle_monitor::Update {
+    let settings = idle_settings();
+    let input = input_sample();
+    #[cfg(feature = "devtools")]
+    devtools::trace_idle_sample(input.map(|(tick, _)| tick));
+    IDLE_MS.store(
+        input.map_or(0, |(_, idle)| idle.as_millis() as i64),
+        Ordering::SeqCst,
+    );
+    IDLE_CLOCK
+        .lock()
+        .unwrap()
+        .sample(std::time::Instant::now(), input, settings)
+}
+
+fn spawn_idle_thread() {
+    std::thread::Builder::new()
+        .name("idle-monitor".into())
+        .spawn(|| {
+            let mut tick: u32 = 0;
+            let mut lock_states = [
+                (popups::VK_CAPITAL, 0),
+                (popups::VK_NUMLOCK, 0),
+                (popups::VK_SCROLL, 0),
+            ];
+            for (vk, last) in &mut lock_states {
+                *last = popups::poll_state(*vk);
+            }
+            while !EXITING.load(Ordering::SeqCst) {
+                let update = sample_idle_clock();
+                unsafe {
+                    if update.cancel {
+                        let _ =
+                            PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_CANCEL, WPARAM(0), LPARAM(0));
+                    }
+                    if update.show
+                        && PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_WARN, WPARAM(0), LPARAM(0))
+                            .is_err()
+                    {
+                        IDLE_CLOCK
+                            .lock()
+                            .unwrap()
+                            .restart(std::time::Instant::now());
+                    }
+                }
+                popups::poll(&mut lock_states);
+                tick = tick.wrapping_add(1);
+                if tick.is_multiple_of(BATTERY_POLL_TICKS) {
+                    refresh_battery();
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+        .expect("spawn idle monitor");
+}
 fn refresh_battery() {
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         if GetSystemPowerStatus(&mut status).is_ok() {
-            ON_AC.store(status.ACLineStatus == 1, Ordering::SeqCst);
+            let old_ac = ON_AC.swap(status.ACLineStatus != 0, Ordering::SeqCst);
+            if old_ac != (status.ACLineStatus != 0) {
+                theme_engine::wake();
+            }
             let percent = if status.BatteryLifePercent <= 100 {
                 status.BatteryLifePercent as i32
             } else {
                 100
             };
-            BATTERY_PERCENT.store(percent, Ordering::SeqCst);
+            let old_percent = BATTERY_PERCENT.swap(percent, Ordering::SeqCst);
             // Go contract: low battery *pauses* Stay Awake at runtime and
             // restores it when AC returns — the user's manual toggle is
             // never rewritten.
             let was_blocked = BATTERY_BLOCKED.load(Ordering::SeqCst);
-            let blocked = status.ACLineStatus != 1
+            let blocked = status.ACLineStatus == 0
                 && cfg_map(|c| c.nosleep_enabled)
                 && percent < cfg_map(|c| c.nosleep_battery_threshold);
             if blocked != was_blocked {
@@ -2785,6 +2905,11 @@ fn refresh_battery() {
                     "stay awake {} by low battery (runtime pause)",
                     if blocked { "paused" } else { "resumed" }
                 ));
+            }
+            if blocked != was_blocked
+                || old_ac != (status.ACLineStatus != 0)
+                || old_percent != percent
+            {
                 let _ = PostMessageW(Some(hwnd(&HIDDEN)), WM_REFRESH_UI, WPARAM(0), LPARAM(0));
             }
         }
@@ -2794,10 +2919,32 @@ fn refresh_battery() {
 // ---- Idle warning overlay -------------------------------------------------
 
 fn show_warning() {
+    if !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
+        sample_idle_clock();
+        let countdown = IDLE_CLOCK
+            .lock()
+            .unwrap()
+            .countdown(std::time::Instant::now());
+        let Some((seconds, action)) = countdown else {
+            return;
+        };
+        WARN_SECONDS_LEFT.store(seconds as i32, Ordering::SeqCst);
+        *WARN_ACTION.lock().unwrap() = action;
+    }
+    WARNING_ACTIVE.store(true, Ordering::SeqCst);
+    if WARN_SECONDS_LEFT.load(Ordering::SeqCst) == 0 {
+        tick_warning();
+        return;
+    }
     update_warning_text(WARN_SECONDS_LEFT.load(Ordering::SeqCst));
     unsafe {
         let warning = hwnd(&WARNING);
+        if let Ok(cancel) = GetDlgItem(Some(warning), IDC_WARN_CANCEL as i32) {
+            set_control_text(cancel, &t("common_cancel"));
+        }
+        popups::layout_warning(warning, hwnd(&WARN_TEXT), &[IDC_WARN_CANCEL]);
         center_on_screen(warning);
+        viewport::fit(warning);
         let _ = ShowWindow(warning, SW_SHOWNOACTIVATE);
         let _ = SetTimer(Some(warning), WARN_TIMER, 1000, None);
     }
@@ -2807,7 +2954,7 @@ fn show_warning() {
 fn update_warning_text(seconds: i32) {
     let action = t(&format!(
         "menu_action_{}",
-        cfg_map(|c| c.idle_action.clone())
+        WARN_ACTION.lock().unwrap().clone()
     ));
     let text = t("msg_idle_warning")
         .replace("%s", &action)
@@ -2823,8 +2970,8 @@ fn center_on_screen(hwnd_: HWND) {
         }
         let width = wr.right - wr.left;
         let height = wr.bottom - wr.top;
-        let x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+        let anchor = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        let (x, y) = display::centered_on(anchor, width, height);
         let _ = MoveWindow(hwnd_, x, y, width, height, false);
     }
 }
@@ -2833,28 +2980,44 @@ fn tick_warning() {
     if !WARNING_ACTIVE.load(Ordering::SeqCst) {
         return;
     }
-    #[cfg(feature = "devtools")]
-    let preview = devtools::preview_only();
-    #[cfg(not(feature = "devtools"))]
-    let preview = false;
-    if !preview
-        && (!(cfg_map(|c| c.idle_enabled) || automation::OVR.idle_on.load(Ordering::SeqCst))
-            || automation::OVR.idle_paused.load(Ordering::SeqCst)
-            || NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst))
-    {
-        cancel_warning("monitor no longer active");
-        return;
-    }
-    let left = WARN_SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1;
+    let (left, action) = if WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
+        (
+            WARN_SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1,
+            WARN_ACTION.lock().unwrap().clone(),
+        )
+    } else {
+        sample_idle_clock();
+        let countdown = IDLE_CLOCK
+            .lock()
+            .unwrap()
+            .countdown(std::time::Instant::now());
+        let Some((seconds, action)) = countdown else {
+            hide_warning("session no longer active");
+            return;
+        };
+        (seconds as i32, action)
+    };
     if left <= 0 {
         cancel_warning("timeout");
-        execute_idle_action();
+        log_line("idle action executing");
+        execute_system_action(&action);
     } else {
+        WARN_SECONDS_LEFT.store(left, Ordering::SeqCst);
+        *WARN_ACTION.lock().unwrap() = action;
         update_warning_text(left);
     }
 }
 
 fn cancel_warning(reason: &str) {
+    IDLE_CLOCK
+        .lock()
+        .unwrap()
+        .restart(std::time::Instant::now());
+    WARNING_PREVIEW_SESSION.store(false, Ordering::SeqCst);
+    hide_warning(reason);
+}
+
+fn hide_warning(reason: &str) {
     if !WARNING_ACTIVE.swap(false, Ordering::SeqCst) {
         return;
     }
@@ -2865,67 +3028,66 @@ fn cancel_warning(reason: &str) {
     }
     log_line(&format!("idle warning closed ({reason})"));
 }
-
-fn execute_idle_action() {
-    log_line("idle action executing");
-    let action = cfg_map(|c| c.idle_action.clone());
-    execute_system_action(&action);
-    // The idle clock only re-arms after real input resets the idle time.
-    WAITING_INPUT_RESET.store(true, Ordering::SeqCst);
-}
-
 /// Executes one built-in system action by its config name. Shared by the
 /// idle monitor, automatic tasks, the system-controls menu, and hotkeys.
 pub fn execute_system_action(action: &str) {
+    if let Err(error) = try_system_action(action) {
+        log_line(&format!("{action} failed: {error}"));
+        warn_dialog(
+            "",
+            &t_args(
+                "msg_action_failed",
+                &[&t(&format!("menu_action_{action}")), &error],
+            ),
+        );
+    }
+}
+
+fn try_system_action(action: &str) -> Result<(), String> {
+    if !matches!(
+        action,
+        "lock" | "sleep" | "hibernate" | "shutdown" | "restart"
+    ) {
+        return Err(format!("unsupported system action: {action}"));
+    }
     #[cfg(feature = "devtools")]
     if devtools::preview_only() {
         log_line(&format!("preview: suppressed system action {action}"));
-        return;
+        return Ok(());
     }
     unsafe {
         match action {
-            "lock" => {
-                let _ = LockWorkStation();
+            "lock" => LockWorkStation().map_err(|error| error.to_string()),
+            "sleep" | "hibernate" => {
+                if !ipc::suspend_available(action == "hibernate") {
+                    return Err(t_pub(if action == "hibernate" {
+                        "cli_error_hibernate_unavailable"
+                    } else {
+                        "cli_error_sleep_unavailable"
+                    }));
+                }
+                if SetSuspendState(action == "hibernate", false, false) {
+                    Ok(())
+                } else {
+                    Err(windows::core::Error::from_thread().to_string())
+                }
             }
-            "sleep" => {
-                let _ = SetSuspendState(false, false, false);
-            }
-            "hibernate" => {
-                let _ = SetSuspendState(true, false, false);
-            }
-            "shutdown" | "restart" => {
-                enable_shutdown_privilege();
+            _ => {
+                enable_shutdown_privilege()?;
                 let flags = if action == "shutdown" {
                     EWX_POWEROFF | EWX_FORCEIFHUNG
                 } else {
                     EWX_REBOOT | EWX_FORCEIFHUNG
                 };
-                let result = ExitWindowsEx(flags, Default::default());
-                if let Err(err) = result {
-                    log_line(&format!("{action} failed (privilege or policy denied)"));
-                    let action_name = match action {
-                        "shutdown" => t_pub("menu_shutdown"),
-                        _ => t_pub("menu_restart"),
-                    };
-                    warn_dialog(
-                        "",
-                        &t_pub("msg_action_failed")
-                            .replace("%s", &action_name)
-                            .replace("%s", &err.to_string()),
-                    );
-                }
-            }
-            _ => {
-                let _ = LockWorkStation();
+                ExitWindowsEx(flags, Default::default()).map_err(|error| error.to_string())
             }
         }
     }
 }
-
 /// Enables SeShutdownPrivilege in the current process token so
 /// `ExitWindowsEx` can actually power off or reboot. Mirrors Go's
 /// `systemaction.go` LookupPrivilegeValue + AdjustTokenPrivileges flow.
-unsafe fn enable_shutdown_privilege() {
+unsafe fn enable_shutdown_privilege() -> Result<(), String> {
     use windows::Win32::Foundation::LUID;
     use windows::Win32::Security::{
         AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
@@ -2942,13 +3104,14 @@ unsafe fn enable_shutdown_privilege() {
         )
         .is_err()
         {
-            return;
+            return Err(windows::core::Error::from_thread().to_string());
         }
         let name: Vec<u16> = "SeShutdownPrivilege".encode_utf16().chain([0]).collect();
         let mut luid = LUID::default();
         if LookupPrivilegeValueW(None, PCWSTR(name.as_ptr()), &mut luid).is_err() {
+            let error = windows::core::Error::from_thread().to_string();
             let _ = windows::Win32::Foundation::CloseHandle(token);
-            return;
+            return Err(error);
         }
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
@@ -2957,8 +3120,14 @@ unsafe fn enable_shutdown_privilege() {
                 Attributes: SE_PRIVILEGE_ENABLED,
             }],
         };
-        let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+        let result = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+        let last_error = windows::Win32::Foundation::GetLastError();
         let _ = windows::Win32::Foundation::CloseHandle(token);
+        result.map_err(|error| error.to_string())?;
+        if last_error == windows::Win32::Foundation::ERROR_NOT_ALL_ASSIGNED {
+            return Err(last_error.to_hresult().message().to_string());
+        }
+        Ok(())
     }
 }
 
@@ -2995,8 +3164,14 @@ pub fn t_pub(key: &str) -> String {
     t(key)
 }
 
+pub fn t_args(key: &str, arguments: &[&str]) -> String {
+    idletrigger_core::i18n::format(&t(key), arguments)
+}
+
 /// Devtools warning preview entry (feature-gated call site).
 pub fn popups_show_warning_preview() {
+    WARNING_PREVIEW_SESSION.store(true, Ordering::SeqCst);
+    *WARN_ACTION.lock().unwrap() = cfg_map(|c| c.idle_action.clone());
     WARNING_ACTIVE.store(true, Ordering::SeqCst);
     WARN_SECONDS_LEFT.store(10, Ordering::SeqCst);
     show_warning();
@@ -3024,4 +3199,77 @@ pub fn make_font_pub(size_px: i32, weight: i32) -> windows::Win32::Graphics::Gdi
 
 pub fn set_control_font_pub(control: HWND, font: windows::Win32::Graphics::Gdi::HFONT) -> bool {
     set_control_font(control, font)
+}
+
+#[cfg(test)]
+mod config_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn failed_or_stale_saves_leave_runtime_and_document_unchanged() {
+        let _test = CONFIG_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "idletrigger-transaction-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let old_config = CONFIG.lock().unwrap().replace(config::Config::default());
+        let old_doc = CONFIG_DOC
+            .lock()
+            .unwrap()
+            .replace("custom = 42\n".parse().unwrap());
+        let old_path = CONFIG_PATH.lock().unwrap().replace(path.clone());
+        let old_source = CONFIG_SOURCE.lock().unwrap().take();
+        let old_failed = CONFIG_LOAD_FAILED.swap(false, Ordering::SeqCst);
+        edit_config(|c| c.nosleep_enabled = true).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(cfg_map(|c| c.nosleep_enabled));
+        assert_eq!(
+            CONFIG_DOC.lock().unwrap().as_ref().unwrap()["custom"].as_integer(),
+            Some(42)
+        );
+
+        std::fs::write(&path, format!("{saved}# external edit\n")).unwrap();
+        assert!(edit_config(|c| c.nosleep_enabled = false).is_err());
+        assert!(cfg_map(|c| c.nosleep_enabled));
+        assert_eq!(
+            CONFIG_DOC.lock().unwrap().as_ref().unwrap().to_string(),
+            saved
+        );
+        std::fs::write(&path, &saved).unwrap();
+
+        // A read-only destination makes the atomic replacement fail, after
+        // candidate construction. Neither in-memory view may change.
+        let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let result = edit_config(|c| c.nosleep_enabled = false);
+        std::fs::set_permissions(&path, original_permissions).unwrap();
+        assert!(result.is_err());
+        assert!(cfg_map(|c| c.nosleep_enabled));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        assert_eq!(
+            CONFIG_DOC.lock().unwrap().as_ref().unwrap().to_string(),
+            saved
+        );
+
+        CONFIG_LOAD_FAILED.store(true, Ordering::SeqCst);
+        assert!(edit_config(|c| c.nosleep_enabled = false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        std::fs::remove_file(&path).unwrap();
+        assert!(hot_reload_config().is_err());
+        assert!(cfg_map(|c| c.nosleep_enabled));
+        *CONFIG.lock().unwrap() = old_config;
+        *CONFIG_DOC.lock().unwrap() = old_doc;
+        *CONFIG_PATH.lock().unwrap() = old_path;
+        *CONFIG_SOURCE.lock().unwrap() = old_source;
+        CONFIG_LOAD_FAILED.store(old_failed, Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

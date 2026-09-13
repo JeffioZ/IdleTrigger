@@ -61,7 +61,7 @@ pub fn create_for_panel(panel: HWND) {
         let _ = SendMessageW(
             tip,
             0x0030, // WM_SETFONT
-            Some(WPARAM(crate::make_font_pub(14, 400).0 as usize)),
+            Some(WPARAM(crate::panel_font_body().0 as usize)),
             Some(LPARAM(0)),
         );
         // Keep the tip above other windows so it isn't hidden by the panel.
@@ -222,8 +222,9 @@ fn state_power_tip(nosleep: bool) -> String {
         "tip_state_disabled"
     };
     let body = crate::t_pub(if nosleep { "tip_nosleep" } else { "tip_idle" });
+    let (awake_status, idle_status) = crate::power_status();
     let (runtime, full_body) = if nosleep {
-        (crate::t_pub("tip_state_disabled"), body)
+        (awake_status, body)
     } else {
         // Idle: append the manual plan line (Go idleTooltipBody).
         let (minutes, action, warning) = crate::cfg_map(|c| {
@@ -234,19 +235,16 @@ fn state_power_tip(nosleep: bool) -> String {
             )
         });
         let action_label = crate::t_pub(&format!("menu_action_{action}"));
-        let plan = crate::t_pub("tip_idle_manual_plan_warning")
-            .replacen("%d", &minutes.to_string(), 1)
-            .replacen("%s", &action_label, 1)
-            .replacen("%d", &warning.to_string(), 1);
-        (
-            crate::t_pub("tip_state_disabled"),
-            format!("{body}\\n{plan}"),
-        )
+        let plan = crate::t_args(
+            "tip_idle_manual_plan_warning",
+            &[&minutes.to_string(), &action_label, &warning.to_string()],
+        );
+        (idle_status, format!("{body}\n{plan}"))
     };
-    crate::t_pub("tip_power_setting_status")
-        .replacen("%s", &crate::t_pub(manual_key), 1)
-        .replacen("%s", &runtime, 1)
-        .replacen("%s", &full_body, 1)
+    crate::t_args(
+        "tip_power_setting_status",
+        &[&crate::t_pub(manual_key), &runtime, &full_body],
+    )
 }
 
 /// Go withStateTooltip: state line then description for toggle controls.
@@ -257,9 +255,10 @@ fn toggle_state_tip(id: usize, body_key: &str) -> String {
     } else {
         "tip_state_disabled"
     };
-    crate::t_pub("tip_toggle_state")
-        .replacen("%s", &crate::t_pub(state_key), 1)
-        .replacen("%s", &crate::t_pub(body_key), 1)
+    crate::t_args(
+        "tip_toggle_state",
+        &[&crate::t_pub(state_key), &crate::t_pub(body_key)],
+    )
 }
 
 unsafe fn get_panel_child(panel: HWND, id: usize) -> HWND {

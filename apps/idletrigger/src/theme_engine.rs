@@ -1,10 +1,9 @@
 //! Day/Night theme engine: scheduled light/dark switching (fixed times or
 //! sunrise/sunset), Windows Personalize registry writes, and battery-based
-//! dark preference. The IP-location and fullscreen-pause refinements are
-//! follow-ups; the fixed/sunrise-by-offset core matches the Go contract.
+//! dark preference, asynchronous location lookup, and fullscreen pause.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, LPARAM, WPARAM};
@@ -12,25 +11,23 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, RegCloseKey, RegOpenKeyExW,
     RegSetValueExW,
 };
-use windows::Win32::System::StationsAndDesktops::{
-    BSF_POSTMESSAGE, BSM_APPLICATIONS, BroadcastSystemMessageW,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 use windows::core::PCWSTR;
 
 static THEME_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
-/// Current computed mode: true = dark.
-static IS_DARK_NOW: AtomicBool = AtomicBool::new(false);
-/// Manual override until the next scheduled transition (Go contract).
-static MANUAL_OVERRIDE: Mutex<Option<bool>> = Mutex::new(None);
-/// When the manual override expires (the next scheduled transition moment);
-/// None = no override active.
-static MANUAL_UNTIL: Mutex<Option<i32>> = Mutex::new(None);
-/// Cached sunrise/sunset in minutes-from-midnight, tagged with the day-of-year
-/// they were solved for (re-solved after midnight).
-static SUN_TIMES: Mutex<Option<(i32, i32, i32)>> = Mutex::new(None); // (rise, set, doy)
+static THEME_OPERATION: Mutex<()> = Mutex::new(());
+static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// Coalesces configuration, power, and location changes without doing work on the UI thread.
+pub fn wake() {
+    crate::theme_recovery::changed();
+    *WAKE.0.lock().unwrap() = true;
+    WAKE.1.notify_one();
+}
+/// Manual mode and its absolute local-time expiration minute.
+static MANUAL_OVERRIDE: Mutex<Option<(bool, i64)>> = Mutex::new(None);
 
 const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const BREED: &str = "SystemUsesLightTheme";
@@ -43,13 +40,18 @@ fn wide(text: &str) -> Vec<u16> {
 /// Local time snapshot (minutes + weekday).
 pub struct LocalTime {
     pub minutes: i32,
+    pub absolute_minutes: i64,
 }
 
 fn local_time() -> LocalTime {
     unsafe {
         let st = windows::Win32::System::SystemInformation::GetLocalTime();
+        let mut ft = windows::Win32::Foundation::FILETIME::default();
+        let _ = windows::Win32::System::Time::SystemTimeToFileTime(&st, &mut ft);
         LocalTime {
             minutes: st.wHour as i32 * 60 + st.wMinute as i32,
+            absolute_minutes: (((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64) as i64
+                / 600_000_000,
         }
     }
 }
@@ -58,7 +60,12 @@ fn local_time() -> LocalTime {
 /// Inputs: latitude/longitude degrees, day-of-year. Returns (sunrise, sunset).
 /// Accuracy is ±5 minutes — adequate for theme switching.
 pub fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
-    if lat.abs() > 90.0 {
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || lat.abs() > 90.0
+        || lon.abs() > 180.0
+        || !(1..=366).contains(&day_of_year)
+    {
         return None;
     }
     let gamma = 2.0 * std::f64::consts::PI / 365.0 * (day_of_year as f64 - 1.0 + 0.5);
@@ -87,22 +94,13 @@ pub fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
     let solar_noon_utc = 720.0 - 4.0 * lon - eq_time;
     let offset = local_utc_offset_minutes() as f64;
     let solar_noon = solar_noon_utc + offset;
-    let mut sunrise = solar_noon - day_len_min;
-    let mut sunset = solar_noon + day_len_min;
+    let sunrise = solar_noon - day_len_min;
+    let sunset = solar_noon + day_len_min;
     // Clamp into the day (Go wrap loops).
-    while sunrise < 0.0 {
-        sunrise += 1440.0;
-    }
-    while sunset < 0.0 {
-        sunset += 1440.0;
-    }
-    while sunrise >= 1440.0 {
-        sunrise -= 1440.0;
-    }
-    while sunset >= 1440.0 {
-        sunset -= 1440.0;
-    }
-    Some((sunrise.round() as i32, sunset.round() as i32))
+    Some((
+        (sunrise.round() as i32).rem_euclid(1440),
+        (sunset.round() as i32).rem_euclid(1440),
+    ))
 }
 
 /// Local-zone UTC offset in minutes, DST included (Go time.Time.Zone()).
@@ -115,23 +113,77 @@ fn local_utc_offset_minutes() -> i32 {
         let bias = tzi.Bias
             + if state == TIME_ZONE_ID_DAYLIGHT {
                 tzi.DaylightBias
-            } else {
+            } else if state == 1 {
                 tzi.StandardBias
+            } else {
+                0
             };
         -bias
     }
 }
 
-/// Fallback location resolution per the Go contract: fixed defaults when no
-/// IP location is configured (IP lookup is a follow-up refinement).
-fn location_fallback() -> (f64, f64) {
-    // Beijing-ish defaults; the Go fallback order ends at a default location.
-    (39.9042, 116.4074)
+/// Nonblocking location resolution: cached IP, timezone, UTC offset, default.
+pub fn location(ip_enabled: bool) -> (f64, f64, &'static str) {
+    if ip_enabled && let Some((lat, lon)) = crate::iplocate::request() {
+        return (lat, lon, "theme_location_ip");
+    }
+    unsafe {
+        let mut zone = windows::Win32::System::Time::DYNAMIC_TIME_ZONE_INFORMATION::default();
+        let state = windows::Win32::System::Time::GetDynamicTimeZoneInformation(&mut zone);
+        let len = zone
+            .TimeZoneKeyName
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(zone.TimeZoneKeyName.len());
+        let key = String::from_utf16_lossy(&zone.TimeZoneKeyName[..len]);
+        let coordinates = match key.as_str() {
+            "China Standard Time" => Some((39.9, 116.4)),
+            "Taipei Standard Time" => Some((25.0, 121.5)),
+            "Tokyo Standard Time" => Some((35.7, 139.7)),
+            "Korea Standard Time" => Some((37.6, 127.0)),
+            "Singapore Standard Time" => Some((1.35, 103.8)),
+            "India Standard Time" => Some((28.6, 77.2)),
+            "W. Europe Standard Time" => Some((52.5, 13.4)),
+            "GMT Standard Time" => Some((51.5, -0.1)),
+            "Central Europe Standard Time" => Some((48.2, 16.4)),
+            "E. Europe Standard Time" => Some((50.4, 30.5)),
+            "Russian Standard Time" => Some((55.8, 37.6)),
+            "Eastern Standard Time" => Some((40.7, -74.0)),
+            "Central Standard Time" => Some((41.9, -87.6)),
+            "Mountain Standard Time" => Some((33.4, -112.0)),
+            "Pacific Standard Time" => Some((34.0, -118.2)),
+            "Alaskan Standard Time" => Some((61.2, -149.9)),
+            "Hawaiian Standard Time" => Some((21.3, -157.8)),
+            "E. South America Standard Time" => Some((-23.5, -46.6)),
+            "Atlantic Standard Time" => Some((-34.6, -58.4)),
+            "AUS Eastern Standard Time" => Some((-33.9, 151.2)),
+            "AUS Central Standard Time" => Some((-34.9, 138.6)),
+            "New Zealand Standard Time" => Some((-36.8, 174.8)),
+            _ => None,
+        };
+        if let Some((lat, lon)) = coordinates {
+            return (lat, lon, "theme_location_timezone");
+        }
+        if state <= 2 {
+            return (
+                35.0,
+                (local_utc_offset_minutes() as f64 / 4.0).clamp(-180.0, 180.0),
+                "theme_location_utc_offset",
+            );
+        }
+        (39.9, 116.4, "theme_location_default")
+    }
 }
 
-/// Today's day-of-year for callers outside the scheduler (panel subtitle).
-pub fn day_of_year_today() -> i32 {
-    day_of_year_now()
+fn next_transition(absolute: i64, minutes: i32, window: Option<(i32, i32)>) -> i64 {
+    let Some((light, dark)) = window else {
+        return absolute + (1440 - minutes) as i64;
+    };
+    let delay = |boundary: i32| {
+        let delta = (boundary - minutes).rem_euclid(1440);
+        if delta == 0 { 1440 } else { delta }
+    };
+    absolute + delay(light).min(delay(dark)) as i64
 }
 
 fn day_of_year_now() -> i32 {
@@ -161,7 +213,12 @@ fn day_of_year_now() -> i32 {
 
 /// Computes the light window in minutes (start, end). Returns None when the
 /// schedule cannot be determined.
-fn light_window() -> Option<(i32, i32)> {
+pub fn solar_window(ip_enabled: bool) -> Option<(i32, i32)> {
+    let (lat, lon, _) = location(ip_enabled);
+    solar_times(lat, lon, day_of_year_now())
+}
+
+pub fn light_window() -> Option<(i32, i32)> {
     let (mode, light_str, dark_str, ip_enabled) = crate::cfg_map(|c| {
         (
             c.theme_mode.clone(),
@@ -178,27 +235,17 @@ fn light_window() -> Option<(i32, i32)> {
         };
         return Some((parse(&light_str)?, parse(&dark_str)?));
     }
-    // Sunrise mode: solve solar times, cached per day-of-year (re-solved
-    // after midnight like the Go scheduler, which recomputes every tick).
-    let doy = day_of_year_now();
-    if let Some((rise, set, cached_doy)) = *SUN_TIMES.lock().unwrap()
-        && cached_doy == doy
-    {
-        return Some((rise, set));
-    }
-    // Go resolution order: optional IP location first, then fallback.
-    let (lat, lon) = if ip_enabled {
-        crate::iplocate::resolve().unwrap_or_else(location_fallback)
-    } else {
-        location_fallback()
-    };
-    let times = solar_times(lat, lon, doy);
-    if let Some((rise, set)) = times {
-        *SUN_TIMES.lock().unwrap() = Some((rise, set, doy));
-    }
-    times
+    solar_window(ip_enabled).or_else(|| {
+        let parse = |v: &str| {
+            v.get(..2)?
+                .parse::<i32>()
+                .ok()
+                .zip(v.get(3..5)?.parse::<i32>().ok())
+                .map(|(h, m)| h * 60 + m)
+        };
+        Some((parse(&light_str)?, parse(&dark_str)?))
+    })
 }
-
 /// Whether the schedule says dark right now.
 fn scheduled_dark() -> Option<bool> {
     let light = light_window()?;
@@ -213,52 +260,65 @@ fn scheduled_dark() -> Option<bool> {
 }
 
 /// Writes both Personalize values and notifies the shell.
-fn apply_windows_theme(dark: bool) {
+fn apply_windows_theme(dark: bool) -> Result<(), String> {
     unsafe {
         let key = wide(PERSONALIZE_KEY);
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
+        let opened = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             PCWSTR(key.as_ptr()),
             None,
             KEY_READ | KEY_WRITE,
             &mut hkey,
-        ) != ERROR_SUCCESS
-        {
-            return;
+        );
+        if opened != ERROR_SUCCESS {
+            return Err(format!("open Personalize: {}", opened.0));
         }
         let value = (!dark) as u32; // light theme flag = !dark
         let bytes = value.to_le_bytes();
+        let mut result = ERROR_SUCCESS;
         for name in [BREED, APP_BREED] {
             let name_w = wide(name);
             // Personalize values are REG_DWORD (Go SetDWordValue) — writing
             // any other type makes the system theme switch silently fail.
-            let _ = RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), None, REG_DWORD, Some(&bytes));
+            result = RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), None, REG_DWORD, Some(&bytes));
+            if result != ERROR_SUCCESS {
+                break;
+            }
         }
         let _ = RegCloseKey(hkey);
         // Notify running apps + the shell so they repaint.
-        let mut targets = BSM_APPLICATIONS;
-        let _ = BroadcastSystemMessageW(
-            BSF_POSTMESSAGE,
-            Some(&mut targets),
-            WM_SETTINGCHANGE,
-            WPARAM(0),
-            LPARAM(wide("ImmersiveColorSet").as_ptr() as isize),
-        );
+        if result != ERROR_SUCCESS {
+            return Err(format!("write Personalize: {}", result.0));
+        }
+        Ok(())
+    }
+}
+
+fn notify_theme() {
+    unsafe {
+        let setting = wide("ImmersiveColorSet");
         let _ = SendMessageTimeoutW(
             HWND_BROADCAST,
             WM_SETTINGCHANGE,
             WPARAM(0),
-            LPARAM(0),
+            LPARAM(setting.as_ptr() as isize),
             SMTO_ABORTIFHUNG,
             1000,
             None,
+        );
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(crate::hwnd(&crate::HIDDEN)),
+            windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED,
+            WPARAM(0),
+            LPARAM(0),
         );
     }
 }
 
 /// Poll target: applies the theme and updates our own follow layer.
 fn tick() {
+    let generation = crate::theme_recovery::generation();
     let enabled = crate::cfg_map(|c| c.theme_switch_enabled);
     if !enabled {
         return;
@@ -272,26 +332,18 @@ fn tick() {
         crate::log_line("theme engine: paused by foreground GPU activity");
         return;
     }
-    let target = {
+    let operation = THEME_OPERATION.lock().unwrap();
+    if !crate::cfg_map(|c| c.theme_switch_enabled) {
+        return;
+    }
+    let manual = {
         let mut manual = MANUAL_OVERRIDE.lock().unwrap();
-        let mut until = MANUAL_UNTIL.lock().unwrap();
-        // Manual override holds until the next scheduled transition moment;
-        // after that, control returns to the schedule (Go manualUntil).
-        if let (Some(_), Some(expiry)) = (*manual, *until) {
-            let now = local_time();
-            if now.minutes >= expiry {
-                *manual = None;
-                *until = None;
-            }
+        if manual.is_some_and(|(_, expiry)| local_time().absolute_minutes >= expiry) {
+            *manual = None;
         }
-        match *manual {
-            Some(v) => Some(v),
-            None => {
-                *until = None;
-                scheduled_dark()
-            }
-        }
+        manual.map(|(dark, _)| dark)
     };
+    let target = manual.or_else(scheduled_dark);
     let Some(target) = target else { return };
 
     // Battery-based dark preference (Go contract: battery → dark).
@@ -303,16 +355,39 @@ fn tick() {
         target
     };
 
-    let previous = IS_DARK_NOW.swap(target, Ordering::SeqCst);
-    if previous != target {
-        crate::log_line(&format!(
-            "theme engine: switching to {}",
-            if target { "dark" } else { "light" }
-        ));
-        apply_windows_theme(target);
-        crate::theme::refresh_from_registry();
-        crate::theme::apply_to_all();
+    let matches_target = [BREED, APP_BREED]
+        .into_iter()
+        .all(|name| crate::theme::read_light_preference(name) == Some(!target));
+    if matches_target && !crate::theme_recovery::pending() {
+        return;
     }
+    drop(operation);
+    let Some(prepared) = crate::theme_recovery::prepare(generation) else {
+        return;
+    };
+    let operation = THEME_OPERATION.lock().unwrap();
+    if !prepared.current() || !crate::cfg_map(|c| c.theme_switch_enabled) {
+        return;
+    }
+    if crate::cfg_map(|c| c.theme_skip_fullscreen) && crate::display::foreground_is_fullscreen() {
+        return;
+    }
+    if !matches_target && let Err(error) = apply_windows_theme(target) {
+        crate::log_line(&format!("theme switch failed: {error}"));
+        return;
+    }
+    if !matches_target {
+        crate::theme_recovery::transition_applied();
+    }
+    drop(operation);
+    notify_theme();
+    std::thread::sleep(Duration::from_millis(1200));
+    let operation = THEME_OPERATION.lock().unwrap();
+    if prepared.current() && crate::cfg_map(|c| c.theme_switch_enabled) {
+        crate::theme_recovery::finish(prepared, !matches_target);
+    }
+    drop(operation);
+    crate::theme_repair::notify_theme_changed();
 }
 
 /// Spawns the theme scheduler thread (1-minute cadence is enough).
@@ -328,7 +403,12 @@ pub fn spawn() {
                     return;
                 }
                 tick();
-                std::thread::sleep(Duration::from_secs(60));
+                let pending = WAKE.0.lock().unwrap();
+                let (mut pending, _) = WAKE
+                    .1
+                    .wait_timeout_while(pending, Duration::from_secs(60), |pending| !*pending)
+                    .unwrap();
+                *pending = false;
             }
         })
         .expect("spawn theme engine");
@@ -336,24 +416,18 @@ pub fn spawn() {
 
 /// Sets a manual dark/light override until the next scheduled transition.
 pub fn set_manual_override(dark: bool) {
-    *MANUAL_OVERRIDE.lock().unwrap() = Some(dark);
-    // Override holds until the next scheduled transition moment (Go
-    // manualUntil): the light/dark boundary we are currently inside.
-    let expiry = match light_window() {
-        Some((light_start, dark_start)) => {
-            let now = local_time();
-            let boundary = if dark { dark_start } else { light_start };
-            if now.minutes < boundary {
-                boundary
-            } else {
-                boundary + 24 * 60
-            }
-        }
-        None => 24 * 60, // no schedule: hold through the end of the day
-    };
-    *MANUAL_UNTIL.lock().unwrap() = Some(expiry);
-    IS_DARK_NOW.store(dark, Ordering::SeqCst);
-    apply_windows_theme(dark);
+    crate::theme_recovery::changed();
+    let operation = THEME_OPERATION.lock().unwrap();
+    let now = local_time();
+    let expiry = next_transition(now.absolute_minutes, now.minutes, light_window());
+    if let Err(error) = apply_windows_theme(dark) {
+        drop(operation);
+        crate::warn_dialog("", &error);
+        return;
+    }
+    *MANUAL_OVERRIDE.lock().unwrap() = Some((dark, expiry));
+    drop(operation);
+    notify_theme();
     crate::theme::refresh_from_registry();
     crate::theme::apply_to_all();
     crate::log_line(&format!(
@@ -373,35 +447,69 @@ pub fn clear_manual_override() {
 /// The three panel theme buttons: enable is the master toggle; switch/repair
 /// act on demand.
 pub fn toggle_enabled() {
-    crate::cfg_edit(|c| c.theme_switch_enabled = !c.theme_switch_enabled);
-    crate::persist_config();
+    if let Err(error) = crate::edit_config(|c| c.theme_switch_enabled = !c.theme_switch_enabled) {
+        crate::warn_dialog("", &error);
+        return;
+    }
     crate::log_line("theme switching toggled");
 }
 
 pub fn manual_switch() {
-    let current = IS_DARK_NOW.load(Ordering::SeqCst);
+    let current = crate::theme::is_dark();
     set_manual_override(!current);
 }
 
+static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
+static REPAIR_RESULT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+
 pub fn repair() {
-    let target = IS_DARK_NOW.load(Ordering::SeqCst);
-    let (apps_light, system_light) =
-        crate::cfg_map(|c| (!c.theme_dark_on_battery || !target, !target));
-    // On Win11 22H2+, run the full DWM colorization refresh first.
-    if crate::theme_repair::full_dwm_refresh_available() {
-        match crate::theme_repair::refresh_dwm_colorization(apps_light, system_light) {
-            Ok(()) => crate::log_line("theme repair: full DWM colorization refresh completed"),
-            Err(err) => crate::log_line(&format!("theme repair DWM refresh failed: {err}")),
-        }
+    if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
     }
-    // Always apply the registry preference + broadcast.
-    apply_windows_theme(target);
-    crate::theme_repair::notify_theme_changed();
-    crate::theme::refresh_from_registry();
-    crate::theme::apply_to_all();
-    crate::log_line("theme repair applied");
+    crate::theme_recovery::changed();
+    if let Err(error) = std::thread::Builder::new()
+        .name("theme-repair".into())
+        .spawn(|| {
+            let operation = THEME_OPERATION.lock().unwrap();
+            let result = if crate::theme_repair::full_dwm_refresh_available() {
+                crate::theme_repair::refresh_dwm_colorization().map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            };
+            crate::theme_recovery::manual_repair_completed();
+            drop(operation);
+            crate::theme_repair::notify_theme_changed();
+            *REPAIR_RESULT.lock().unwrap() = Some(result);
+            REPAIR_RUNNING.store(false, Ordering::SeqCst);
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(crate::hwnd(&crate::HIDDEN)),
+                    crate::WM_REFRESH_UI,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        })
+    {
+        REPAIR_RUNNING.store(false, Ordering::SeqCst);
+        crate::warn_dialog("", &error.to_string());
+    }
 }
 
+pub fn finish_repair() {
+    let result = REPAIR_RESULT.lock().unwrap().take();
+    if let Some(result) = result {
+        crate::theme::refresh_from_registry();
+        crate::theme::apply_to_all();
+        match result {
+            Ok(()) => crate::log_line("theme repair completed"),
+            Err(error) => {
+                crate::log_line(&format!("theme repair failed: {error}"));
+                crate::warn_dialog("", &crate::t_args("theme_repair_failed", &[&error]));
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod solar_tests {
     use super::*;
@@ -409,5 +517,22 @@ mod solar_tests {
     fn equinox_at_equator_has_about_twelve_hours_of_daylight() {
         let (rise, set) = solar_times(0.0, 0.0, 80).unwrap();
         assert!((710..=740).contains(&(set - rise).rem_euclid(1440)));
+    }
+    #[test]
+    fn invalid_coordinates_terminate_and_manual_hold_expires_across_midnight() {
+        for (lat, lon) in [
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+            (91.0, 0.0),
+            (0.0, 181.0),
+        ] {
+            assert!(solar_times(lat, lon, 80).is_none());
+        }
+        assert_eq!(
+            next_transition(10000, 23 * 60, Some((420, 1140))),
+            10000 + 480
+        );
+        assert_eq!(next_transition(10000, 600, Some((420, 1140))), 10000 + 540);
+        assert_eq!(next_transition(10000, 420, Some((420, 1140))), 10000 + 720);
     }
 }

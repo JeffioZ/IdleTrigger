@@ -3,11 +3,12 @@
 //! Contract parity with Go `internal/feature/theme/location.go`.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 static CACHE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 static LAST_SUCCESS: AtomicI64 = AtomicI64::new(0);
 static LAST_FAILURE: AtomicI64 = AtomicI64::new(0);
+static QUERYING: AtomicBool = AtomicBool::new(false);
 
 const SUCCESS_TTL_SECS: i64 = 24 * 60 * 60;
 const FAILURE_RETRY_SECS: i64 = 30 * 60;
@@ -22,7 +23,7 @@ fn now_secs() -> i64 {
 /// Returns cached or freshly fetched coordinates; None when unavailable and
 /// the retry window hasn't elapsed. Blocking: the 5s timeouts apply to
 /// individual network phases, not the whole request. Background threads only.
-pub fn resolve() -> Option<(f64, f64)> {
+fn resolve() -> Option<(f64, f64)> {
     let now = now_secs();
     if let Some(hit) = *CACHE.lock().unwrap()
         && now - LAST_SUCCESS.load(Ordering::SeqCst) < SUCCESS_TTL_SECS
@@ -39,6 +40,38 @@ pub fn resolve() -> Option<(f64, f64)> {
     *CACHE.lock().unwrap() = Some((lat, lon));
     LAST_SUCCESS.store(now, Ordering::SeqCst);
     Some((lat, lon))
+}
+
+/// Starts at most one lookup and returns immediately, including on the UI thread.
+pub fn request() -> Option<(f64, f64)> {
+    if let Some(hit) = cached() {
+        return Some(hit);
+    }
+    if now_secs() - LAST_FAILURE.load(Ordering::SeqCst) < FAILURE_RETRY_SECS
+        || QUERYING.swap(true, Ordering::SeqCst)
+    {
+        return None;
+    }
+    if std::thread::Builder::new()
+        .name("ip-location".into())
+        .spawn(|| {
+            resolve();
+            QUERYING.store(false, Ordering::SeqCst);
+            crate::theme_engine::wake();
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(crate::hwnd(&crate::HIDDEN)),
+                    crate::WM_REFRESH_UI,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        })
+        .is_err()
+    {
+        QUERYING.store(false, Ordering::SeqCst);
+    }
+    None
 }
 
 /// Last resolved coordinates, when the cache is still fresh (settings status).

@@ -119,9 +119,28 @@ struct BarState {
     drag: Cell<Option<i32>>,
     hover: Cell<bool>,
 }
+pub fn is_scrollbar(hwnd: HWND) -> bool {
+    unsafe { GetWindowSubclass(hwnd, Some(bar_proc), SUBCLASS, None).as_bool() }
+}
+pub fn refresh(hwnd: HWND) {
+    unsafe {
+        let mut data = 0;
+        if GetWindowSubclass(hwnd, Some(list_proc), SUBCLASS, Some(&mut data)).as_bool() {
+            sync(hwnd, &*(data as *const ListState));
+        }
+    }
+}
 
 pub fn install(list: HWND) {
     unsafe {
+        if GetWindowSubclass(list, Some(list_proc), SUBCLASS, None).as_bool() {
+            return;
+        }
+        SetWindowLongW(
+            list,
+            GWL_STYLE,
+            GetWindowLongW(list, GWL_STYLE) | WS_CLIPCHILDREN.0 as i32,
+        );
         let Ok(bar) = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
@@ -158,7 +177,7 @@ pub fn install(list: HWND) {
             let _ = DestroyWindow(bar);
             return;
         }
-        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as *mut _);
+        let header = list_header(list);
         if !header.is_invalid() {
             let tracking = Box::into_raw(Box::new(HeaderState::default()));
             if !SetWindowSubclass(
@@ -178,16 +197,47 @@ pub fn install(list: HWND) {
 
 fn px(list: HWND, value: i32) -> i32 {
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(list) }.max(96);
-    (value * dpi as i32 / 96).max(1)
+    ((value as i64 * dpi as i64 * crate::dpi::text_percent() as i64 / 9600) as i32).max(1)
 }
 
 unsafe fn metrics(list: HWND) -> (i32, i32, i32) {
     unsafe {
+        if let Some(metrics) = crate::viewport::metrics(list) {
+            return metrics;
+        }
+        if is_listbox(list) {
+            let mut client = RECT::default();
+            let _ = GetClientRect(list, &mut client);
+            let row = SendMessageW(list, LB_GETITEMHEIGHT, Some(WPARAM(0)), None)
+                .0
+                .max(1) as i32;
+            return (
+                SendMessageW(list, LB_GETCOUNT, None, None).0.max(0) as i32,
+                (client.bottom / row).max(1),
+                SendMessageW(list, LB_GETTOPINDEX, None, None).0.max(0) as i32,
+            );
+        }
         (
             SendMessageW(list, LVM_GETITEMCOUNT, None, None).0 as i32,
             SendMessageW(list, LVM_GETCOUNTPERPAGE, None, None).0 as i32,
             SendMessageW(list, LVM_GETTOPINDEX, None, None).0 as i32,
         )
+    }
+}
+
+unsafe fn is_listbox(list: HWND) -> bool {
+    let mut name = [0u16; 32];
+    let len = unsafe { GetClassNameW(list, &mut name) };
+    String::from_utf16_lossy(&name[..len.max(0) as usize]).eq_ignore_ascii_case("ListBox")
+}
+
+unsafe fn list_header(list: HWND) -> HWND {
+    unsafe {
+        if is_listbox(list) || crate::viewport::metrics(list).is_some() {
+            HWND::default()
+        } else {
+            HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as *mut _)
+        }
     }
 }
 
@@ -199,7 +249,7 @@ unsafe fn sync(list: HWND, state: &ListState) {
         let _ = ShowScrollBar(list, SB_VERT, false);
         let mut client = RECT::default();
         let _ = GetClientRect(list, &mut client);
-        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as *mut _);
+        let header = list_header(list);
         let mut bounds = RECT::default();
         let _ = GetWindowRect(header, &mut bounds);
         let height = bounds.bottom - bounds.top;
@@ -229,8 +279,15 @@ unsafe fn sync(list: HWND, state: &ListState) {
 
 unsafe fn scroll_to(list: HWND, position: i32) {
     unsafe {
+        if crate::viewport::scroll_to(list, position) {
+            return;
+        }
         let (total, page, current) = metrics(list);
         let position = position.clamp(0, (total - page).max(0));
+        if is_listbox(list) {
+            let _ = SendMessageW(list, LB_SETTOPINDEX, Some(WPARAM(position as usize)), None);
+            return;
+        }
         let mut row = RECT::default(); // LVIR_BOUNDS = 0 in left.
         if SendMessageW(
             list,
@@ -251,7 +308,7 @@ unsafe fn scroll_to(list: HWND, position: i32) {
     }
 }
 
-fn thumb(total: i32, page: i32, position: i32, height: i32, minimum: i32) -> (i32, i32) {
+pub fn thumb(total: i32, page: i32, position: i32, height: i32, minimum: i32) -> (i32, i32) {
     let height = height.max(0);
     if total <= page || page <= 0 {
         return (0, height);
@@ -299,27 +356,40 @@ unsafe fn paint_bar(bar: HWND, dc: HDC, state: &BarState) {
         let _ = GetClientRect(bar, &mut bounds);
         crate::paint::fill_rect(dc, &bounds, p.surface);
         let (track, thumb) = bar_geometry(bar, state.list);
-        let track_color = if state.hover.get() {
-            p.hover_surface
-        } else {
-            p.disabled_surface
-        };
-        let color = if state.drag.get().is_some() {
-            p.accent_pressed
-        } else if state.hover.get() {
-            p.text2
-        } else {
-            p.border
-        };
-        let _ = crate::paint::fill_rounded_rect(
+        draw_scrollbar(
             dc,
             &track,
+            &thumb,
             px(state.list, 4),
-            track_color,
-            track_color,
+            state.hover.get(),
+            state.drag.get().is_some(),
         );
-        let _ = crate::paint::fill_rounded_rect(dc, &thumb, px(state.list, 4), color, color);
     }
+}
+
+pub fn draw_scrollbar(
+    dc: HDC,
+    track: &RECT,
+    thumb: &RECT,
+    radius: i32,
+    hovered: bool,
+    pressed: bool,
+) {
+    let p = crate::theme::palette();
+    let track_color = if hovered {
+        p.hover_surface
+    } else {
+        p.disabled_surface
+    };
+    let color = if pressed {
+        p.accent_pressed
+    } else if hovered {
+        p.text2
+    } else {
+        p.border
+    };
+    let _ = crate::paint::fill_rounded_rect(dc, track, radius, track_color, track_color);
+    let _ = crate::paint::fill_rounded_rect(dc, thumb, radius, color, color);
 }
 
 unsafe extern "system" fn bar_proc(
@@ -489,7 +559,36 @@ unsafe fn draw_header(draw: &NMCUSTOMDRAW) -> LRESULT {
         }
         SetTextColor(draw.hdc, COLORREF(color));
         SetBkMode(draw.hdc, TRANSPARENT);
-        let length = text.iter().position(|v| *v == 0).unwrap_or(text.len());
+        let mut length = text.iter().position(|v| *v == 0).unwrap_or(text.len());
+        if length > 0 && matches!(text[length - 1], 0x2191 | 0x2193) {
+            let mut arrow = [text[length - 1]];
+            length -= 1;
+            while length > 0 && text[length - 1] == b' ' as u16 {
+                length -= 1;
+            }
+            let width = px(draw.hdr.hwndFrom, 14);
+            let gap = px(draw.hdr.hwndFrom, 6);
+            let mut measured = bounds;
+            DrawTextW(
+                draw.hdc,
+                &mut text[..length],
+                &mut measured,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            let mut arrow_bounds = RECT {
+                left: (measured.right + gap)
+                    .min(bounds.right - width)
+                    .max(bounds.left),
+                ..bounds
+            };
+            bounds.right = (arrow_bounds.left - gap).max(bounds.left);
+            DrawTextW(
+                draw.hdc,
+                &mut arrow,
+                &mut arrow_bounds,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
         DrawTextW(
             draw.hdc,
             &mut text[..length],
@@ -511,6 +610,11 @@ unsafe extern "system" fn list_proc(
 ) -> LRESULT {
     unsafe {
         let state = &*(data as *const ListState);
+        if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL)
+            && crate::viewport::horizontal_wheel(hwnd, msg, wp)
+        {
+            return LRESULT(0);
+        }
         if msg == WM_MOUSEWHEEL {
             let delta = state.wheel_delta.get() + (wp.0 >> 16) as i16 as i32;
             state.wheel_delta.set(delta % 120);
@@ -525,7 +629,13 @@ unsafe extern "system" fn list_proc(
             let rows = if lines == u32::MAX {
                 page
             } else {
-                lines.min(i32::MAX as u32) as i32
+                (lines.min(i32::MAX as u32) as i32).saturating_mul(
+                    if crate::viewport::metrics(hwnd).is_some() {
+                        px(hwnd, 24)
+                    } else {
+                        1
+                    },
+                )
             };
             scroll_to(
                 hwnd,
@@ -561,6 +671,13 @@ unsafe extern "system" fn list_proc(
                 | LVM_DELETEITEM
                 | LVM_SCROLL
                 | LVM_ENSUREVISIBLE
+                | LB_ADDSTRING
+                | LB_INSERTSTRING
+                | LB_DELETESTRING
+                | LB_RESETCONTENT
+                | LB_SETTOPINDEX
+                | LB_SETCURSEL
+                | LB_SETITEMHEIGHT
         ) {
             sync(hwnd, state);
         }
@@ -573,6 +690,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_list_scrolls_with_client_bar_and_releases_subclasses() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
         unsafe {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX {
                 dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -726,5 +844,60 @@ mod tests {
         assert_eq!(thumb(100, 10, 90, 100, 24), (76, 100));
         assert_eq!(thumb(100, 10, 999, 10, 24), (0, 10));
         assert_eq!(thumb(0, 0, 0, 100, 24), (0, 100));
+    }
+
+    #[test]
+    fn listbox_uses_the_same_scrollbar_without_losing_selection() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        unsafe {
+            let parent = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                400,
+                400,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let list = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("LISTBOX"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                0,
+                0,
+                300,
+                180,
+                Some(parent),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            install(list);
+            install(list); // Installing twice must not replace/leak the subclass.
+            for _ in 0..100 {
+                SendMessageW(
+                    list,
+                    LB_ADDSTRING,
+                    None,
+                    Some(LPARAM(w!("row").as_ptr() as isize)),
+                );
+            }
+            SendMessageW(list, LB_SETCURSEL, Some(WPARAM(50)), None);
+            scroll_to(list, 90);
+            let (count, page, top) = metrics(list);
+            assert_eq!(count, 100);
+            assert_eq!(top, 90.min(count - page));
+            assert_eq!(SendMessageW(list, LB_GETCURSEL, None, None).0, 50);
+            assert_eq!(GetWindowLongW(list, GWL_STYLE) as u32 & WS_VSCROLL.0, 0);
+            DestroyWindow(parent).unwrap();
+        }
     }
 }

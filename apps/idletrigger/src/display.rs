@@ -60,26 +60,42 @@ pub fn bottom_center_on(hwnd: HWND, w: i32, h: i32, margin: i32) -> (i32, i32) {
 /// environment check closely enough for the two skip-fullscreen flags.
 pub fn foreground_is_fullscreen() -> bool {
     unsafe {
+        if windows::Win32::UI::Shell::SHQueryUserNotificationState()
+            .is_ok_and(|state| matches!(state.0, 2..=4))
+        {
+            return true;
+        }
         let fg = GetForegroundWindow();
         if fg.is_invalid() {
             return false;
         }
-        let work = work_area_for(fg);
+        let mut class = [0u16; 64];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(fg, &mut class);
+        if matches!(
+            String::from_utf16_lossy(&class[..len.max(0) as usize])
+                .to_ascii_lowercase()
+                .as_str(),
+            "progman" | "workerw" | "shell_traywnd" | "shell_secondarytraywnd"
+        ) {
+            return false;
+        }
+        let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
         let mut wr = RECT::default();
         if windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut wr).is_err() {
             return false;
         }
         // Covers the full monitor (not just the work area — taskbar hidden).
-        let full = RECT {
-            left: 0,
-            top: 0,
-            right: GetSystemMetrics(SM_CXSCREEN),
-            bottom: GetSystemMetrics(SM_CYSCREEN),
-        };
+        let full = info.rcMonitor;
         wr.left <= full.left
             && wr.top <= full.top
             && wr.right >= full.right
             && wr.bottom >= full.bottom
-            && (wr.right - wr.left) >= (work.right - work.left)
     }
 }

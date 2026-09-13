@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
@@ -74,16 +74,21 @@ struct ChoiceData {
     popup: isize,
     /// Hovered row inside the open popup (full-list index; -1 none).
     hover: i32,
+    pressed: i32,
     /// First visible row while the popup scrolls.
     first: i32,
     /// Open the popup above the anchor (Go PreferAbove for quick actions).
     prefer_above: bool,
+    update_caption: bool,
 }
 
 static CHOICES: Mutex<Option<HashMap<isize, ChoiceData>>> = Mutex::new(None);
 static OPEN_BUTTON: AtomicIsize = AtomicIsize::new(0);
 static OPEN_OWNER: AtomicIsize = AtomicIsize::new(0);
 static OPEN_BUTTON_ID: AtomicI32 = AtomicI32::new(0);
+static BAR_DRAG: AtomicI32 = AtomicI32::new(-1);
+static BAR_HOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
 
 fn choices() -> std::sync::MutexGuard<'static, Option<HashMap<isize, ChoiceData>>> {
     CHOICES.lock().unwrap()
@@ -186,6 +191,10 @@ pub fn set_items(button: HWND, items: &[(String, String)]) {
 
 /// Item list with per-row danger styling (Go quick-actions menu).
 pub fn set_items_danger(button: HWND, items: &[(String, String, bool)]) {
+    let mut caption = [0u16; 256];
+    unsafe {
+        GetWindowTextW(button, &mut caption);
+    }
     let rows: Vec<ChoiceItem> = items
         .iter()
         .map(|(v, l, d)| ChoiceItem {
@@ -196,10 +205,29 @@ pub fn set_items_danger(button: HWND, items: &[(String, String, bool)]) {
         })
         .collect();
     set_rows(button, &rows);
+    if let Some(data) = choices()
+        .as_mut()
+        .and_then(|map| map.get_mut(&(button.0 as isize)))
+    {
+        data.update_caption = false;
+    }
+    unsafe {
+        let _ = SetWindowTextW(button, PCWSTR(caption.as_ptr()));
+    }
 }
 
 /// Full row model replacement (options + danger + headers).
 pub fn set_rows(button: HWND, rows: &[ChoiceItem]) {
+    unsafe {
+        if !windows::Win32::UI::Shell::SetWindowSubclass(button, Some(button_proc), 0x49544348, 0)
+            .as_bool()
+        {
+            return;
+        }
+    }
+    if OPEN_BUTTON.load(Ordering::SeqCst) == button.0 as isize {
+        close(false);
+    }
     let first_option = rows.iter().position(|r| !r.header).unwrap_or(0) as i32;
     choices().get_or_insert_with(Default::default).insert(
         button.0 as isize,
@@ -208,11 +236,49 @@ pub fn set_rows(button: HWND, rows: &[ChoiceItem]) {
             selected: first_option,
             popup: 0,
             hover: -1,
+            pressed: -1,
             first: 0,
             prefer_above: false,
+            update_caption: true,
         },
     );
-    repaint(button);
+    select_index(button, first_option);
+}
+
+unsafe extern "system" fn button_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_KEYDOWN && wparam.0 == 0x73 {
+        unsafe {
+            toggle(
+                hwnd,
+                GetParent(hwnd).unwrap_or_default(),
+                GetDlgCtrlID(hwnd),
+            );
+        }
+        return LRESULT(0);
+    }
+    if msg == WM_NCDESTROY {
+        if OPEN_BUTTON.load(Ordering::SeqCst) == hwnd.0 as isize {
+            close(false);
+        }
+        if let Some(map) = choices().as_mut() {
+            map.remove(&(hwnd.0 as isize));
+        }
+        unsafe {
+            let _ = windows::Win32::UI::Shell::RemoveWindowSubclass(
+                hwnd,
+                Some(button_proc),
+                0x49544348,
+            );
+        }
+    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 /// Sets the popup open direction for the button's next open.
@@ -265,11 +331,25 @@ pub fn select_value(button: HWND, value: &str) -> Option<i32> {
 
 /// Selects by index and repaints the button.
 pub fn select_index(button: HWND, index: i32) {
+    let mut label = String::new();
+    let mut update_caption = false;
     if let Some(data) = choices()
         .get_or_insert_with(Default::default)
         .get_mut(&(button.0 as isize))
     {
         data.selected = index;
+        update_caption = data.update_caption;
+        label = data
+            .items
+            .get(index as usize)
+            .map(|item| item.label.clone())
+            .unwrap_or_default();
+    }
+    let wide: Vec<u16> = label.encode_utf16().chain([0]).collect();
+    if update_caption {
+        unsafe {
+            let _ = SetWindowTextW(button, PCWSTR(wide.as_ptr()));
+        }
     }
     repaint(button);
 }
@@ -334,6 +414,7 @@ fn visible_rows(count: usize) -> i32 {
 }
 
 fn open(button: HWND, owner: HWND, id: i32) {
+    let _dpi = crate::dpi::Scope::window(button);
     let (count, selected) = match choices().as_ref().and_then(|m| m.get(&(button.0 as isize))) {
         Some(data) => (data.items.len(), data.selected),
         None => return,
@@ -360,20 +441,23 @@ fn open(button: HWND, owner: HWND, id: i32) {
             None,
         )
         .expect("choice popup");
-        let visible = visible_rows(count);
+        let work = crate::display::work_area_for(owner);
+        let visible = visible_rows(count).min(row_count(&RECT {
+            bottom: work.bottom - work.top,
+            ..Default::default()
+        }));
         let height = 2 * crate::scale_pub(INSET)
             + visible * crate::scale_pub(ROW_H)
             + (visible - 1) * crate::scale_pub(ROW_GAP);
         let mut anchor = RECT::default();
         let _ = GetWindowRect(button, &mut anchor);
-        let work = crate::display::work_area_for(owner);
         let width = (anchor.right - anchor.left).min(work.right - work.left);
         // Below with a 1px gap; flip above when it would overflow.
         let prefer_above = choices()
             .as_ref()
             .and_then(|m| m.get(&(button.0 as isize)))
             .is_some_and(|d| d.prefer_above);
-        let mut x = anchor.left;
+        let mut x = anchor.left.max(work.left);
         let mut y = if prefer_above {
             anchor.top - height - crate::scale_pub(1)
         } else {
@@ -388,6 +472,21 @@ fn open(button: HWND, owner: HWND, id: i32) {
         if y < work.top {
             y = work.top;
         }
+        if let Some(data) = choices()
+            .as_mut()
+            .and_then(|m| m.get_mut(&(button.0 as isize)))
+        {
+            data.first = (selected - visible / 2).clamp(0, (count as i32 - visible).max(0));
+            data.popup = popup.0 as isize;
+            data.hover = selected;
+            data.pressed = -1;
+        }
+        OPEN_BUTTON.store(button.0 as isize, Ordering::SeqCst);
+        OPEN_OWNER.store(owner.0 as isize, Ordering::SeqCst);
+        OPEN_BUTTON_ID.store(id, Ordering::SeqCst);
+        BAR_DRAG.store(-1, Ordering::SeqCst);
+        BAR_HOVER.store(false, Ordering::SeqCst);
+        WHEEL_DELTA.store(0, Ordering::SeqCst);
         let _ = SetWindowPos(
             popup,
             Some(HWND_TOPMOST),
@@ -402,20 +501,6 @@ fn open(button: HWND, owner: HWND, id: i32) {
         let _ = SetFocus(Some(popup));
         let _ = SetCapture(popup);
         theme::apply_to_window(popup);
-        if let Some(data) = choices()
-            .get_or_insert_with(Default::default)
-            .get_mut(&(button.0 as isize))
-        {
-            // Start the scroll window so the selected row is visible (Go
-            // ensureVisible on open).
-            let max_first = (count as i32 - visible).max(0);
-            data.first = (selected - visible / 2).clamp(0, max_first);
-            data.popup = popup.0 as isize;
-            data.hover = selected;
-        }
-        OPEN_BUTTON.store(button.0 as isize, Ordering::SeqCst);
-        OPEN_OWNER.store(owner.0 as isize, Ordering::SeqCst);
-        OPEN_BUTTON_ID.store(id, Ordering::SeqCst);
         repaint(button);
     }
 }
@@ -449,10 +534,15 @@ pub fn close(notify: bool) {
         .unwrap_or(0);
     unsafe {
         if popup != 0 {
+            let restore_focus =
+                windows::Win32::UI::Input::KeyboardAndMouse::GetFocus().0 as isize == popup;
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
             // WM_DESTROY detaches the registry entry; the OPEN_* slots are
             // already cleared, so the detach is a no-op there.
             let _ = DestroyWindow(HWND(popup as *mut _));
+            if restore_focus && IsWindow(Some(HWND(button as *mut _))).as_bool() {
+                let _ = SetFocus(Some(HWND(button as *mut _)));
+            }
         }
         let _ = InvalidateRect(Some(HWND(button as *mut _)), None, false);
         if notify {
@@ -547,15 +637,25 @@ unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
     // Card background fills the whole popup (Go popup surface).
     paint::fill_rect(hdc, client, p.elevated);
     let button = OPEN_BUTTON.load(Ordering::SeqCst);
-    let (items, selected, hover, first) = match choices().as_ref().and_then(|m| m.get(&button)) {
-        Some(data) => (data.items.clone(), data.selected, data.hover, data.first),
-        None => (Vec::new(), 0, -1, 0),
-    };
+    let (items, selected, hover, first, pressed) =
+        match choices().as_ref().and_then(|m| m.get(&button)) {
+            Some(data) => (
+                data.items.clone(),
+                data.selected,
+                data.hover,
+                data.first,
+                data.pressed,
+            ),
+            None => (Vec::new(), 0, -1, 0, -1),
+        };
     let font = font_for(HWND(button as *mut _));
     let capacity = row_count(client);
     let end = (first + capacity).min(items.len() as i32);
     for index in first..end {
-        let bounds = row_rect(client, index - first);
+        let mut bounds = row_rect(client, index - first);
+        if items.len() as i32 > capacity {
+            bounds.right -= crate::scale_pub(14);
+        }
         let item = &items[index as usize];
         if item.header {
             draw_popup_header(hdc, &bounds, font, &item.label, p);
@@ -563,6 +663,7 @@ unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
         }
         let state = paint::ControlState {
             hovered: index == hover,
+            pressed: index == pressed && index == hover,
             ..Default::default()
         };
         let selected_font = crate::automation_ui::section_font_cached();
@@ -580,6 +681,107 @@ unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
             RADIUS,
             scale(),
         );
+    }
+    if let Some((track, thumb, _, _)) = scroll_geometry(client) {
+        crate::list_style::draw_scrollbar(
+            hdc,
+            &track,
+            &thumb,
+            crate::scale_pub(4),
+            BAR_HOVER.load(Ordering::SeqCst),
+            BAR_DRAG.load(Ordering::SeqCst) >= 0,
+        );
+    }
+}
+
+fn scroll_geometry(client: &RECT) -> Option<(RECT, RECT, i32, i32)> {
+    let button = OPEN_BUTTON.load(Ordering::SeqCst);
+    let (count, first) = choices()
+        .as_ref()?
+        .get(&button)
+        .map(|d| (d.items.len() as i32, d.first))?;
+    let page = row_count(client);
+    if count <= page {
+        return None;
+    }
+    let track = RECT {
+        left: client.right - crate::scale_pub(14),
+        right: client.right - crate::scale_pub(4),
+        top: crate::scale_pub(INSET),
+        bottom: client.bottom - crate::scale_pub(INSET),
+    };
+    let (top, bottom) = crate::list_style::thumb(
+        count,
+        page,
+        first,
+        track.bottom - track.top,
+        crate::scale_pub(24),
+    );
+    Some((
+        track,
+        RECT {
+            top: track.top + top,
+            bottom: track.top + bottom,
+            ..track
+        },
+        page,
+        count - page,
+    ))
+}
+
+unsafe fn scrollbar_pointer(hwnd: HWND, msg: u32, lp: LPARAM) -> bool {
+    unsafe {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let Some((track, thumb, page, max)) = scroll_geometry(&client) else {
+            return false;
+        };
+        let x = lp.0 as i16 as i32;
+        let y = (lp.0 >> 16) as i16 as i32;
+        let hover = x >= track.left && x < client.right && y >= 0 && y < client.bottom;
+        let drag = BAR_DRAG.load(Ordering::SeqCst);
+        let changed = BAR_HOVER.swap(hover, Ordering::SeqCst) != hover;
+        if changed {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+        match msg {
+            WM_LBUTTONDOWN if hover => {
+                if y >= thumb.top && y < thumb.bottom {
+                    BAR_DRAG.store(y - thumb.top, Ordering::SeqCst);
+                } else {
+                    scroll_rows(if y < thumb.top { -page } else { page });
+                }
+            }
+            WM_MOUSEMOVE if drag >= 0 => {
+                let travel = track.bottom - track.top - (thumb.bottom - thumb.top);
+                if travel > 0 {
+                    let next = ((y - drag - track.top).clamp(0, travel) as i64 * max as i64
+                        / travel as i64) as i32;
+                    let current = choices()
+                        .as_ref()
+                        .and_then(|m| m.get(&OPEN_BUTTON.load(Ordering::SeqCst)))
+                        .map(|d| d.first)
+                        .unwrap_or(0);
+                    scroll_rows(next - current);
+                }
+            }
+            WM_LBUTTONUP if drag >= 0 || hover => {
+                BAR_DRAG.store(-1, Ordering::SeqCst);
+            }
+            WM_MOUSEMOVE if hover => {}
+            _ => return false,
+        }
+        if let Some(data) = choices()
+            .as_mut()
+            .and_then(|map| map.get_mut(&OPEN_BUTTON.load(Ordering::SeqCst)))
+        {
+            data.hover = -1;
+            if msg == WM_LBUTTONUP {
+                data.pressed = -1;
+            }
+        }
+        let _ = InvalidateRect(Some(hwnd), None, false);
+        true
     }
 }
 
@@ -617,6 +819,7 @@ fn draw_popup_header(
             windows::Win32::Graphics::Gdi::DT_LEFT
                 | windows::Win32::Graphics::Gdi::DT_VCENTER
                 | windows::Win32::Graphics::Gdi::DT_SINGLELINE
+                | windows::Win32::Graphics::Gdi::DT_NOPREFIX
                 | windows::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
         );
         windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
@@ -637,7 +840,7 @@ unsafe fn row_at(client: &RECT, y: i32) -> i32 {
         None => return -1,
     };
     let inset = crate::scale_pub(INSET);
-    if y < client.top + inset {
+    if y < client.top + inset || y >= client.bottom - inset {
         return -1;
     }
     let stride = crate::scale_pub(ROW_H) + crate::scale_pub(ROW_GAP);
@@ -672,7 +875,11 @@ fn scroll_rows(delta: i32) {
         .get_or_insert_with(Default::default)
         .get_mut(&button)
     {
-        let visible = visible_rows(data.items.len());
+        let mut client = RECT::default();
+        unsafe {
+            let _ = GetClientRect(HWND(data.popup as *mut _), &mut client);
+        }
+        let visible = row_count(&client);
         let max_first = (data.items.len() as i32 - visible).max(0);
         let next = (data.first + delta).clamp(0, max_first);
         if next != data.first {
@@ -718,7 +925,11 @@ fn move_focus(row: i32) {
         .get_or_insert_with(Default::default)
         .get_mut(&button)
     {
-        let visible = visible_rows(data.items.len());
+        let mut client = RECT::default();
+        unsafe {
+            let _ = GetClientRect(HWND(data.popup as *mut _), &mut client);
+        }
+        let visible = row_count(&client);
         data.hover = row;
         if row < data.first {
             data.first = row;
@@ -740,6 +951,12 @@ unsafe extern "system" fn popup_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
+        let _dpi = crate::dpi::Scope::window(hwnd);
+        if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP)
+            && scrollbar_pointer(hwnd, msg, lparam)
+        {
+            return LRESULT(0);
+        }
         match msg {
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
@@ -779,16 +996,15 @@ unsafe extern "system" fn popup_proc(
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
-                let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16;
-                if delta > 0 {
-                    scroll_rows(-3);
-                } else if delta < 0 {
-                    scroll_rows(3);
-                }
+                let delta = WHEEL_DELTA.load(Ordering::SeqCst) + ((wparam.0 >> 16) as i16 as i32);
+                WHEEL_DELTA.store(delta % 120, Ordering::SeqCst);
+                scroll_rows(-(delta / 120));
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
-                let _ = SetCapture(hwnd);
+                if windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() != hwnd {
+                    let _ = SetCapture(hwnd);
+                }
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
                 let point = POINT {
@@ -801,22 +1017,38 @@ unsafe extern "system" fn popup_proc(
                     || point.y >= client.bottom;
                 if outside {
                     close(false);
+                } else {
+                    let row = row_at(&client, point.y);
+                    if let Some(data) = choices()
+                        .as_mut()
+                        .and_then(|m| m.get_mut(&OPEN_BUTTON.load(Ordering::SeqCst)))
+                    {
+                        data.pressed = row;
+                    }
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                let _ = ReleaseCapture();
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
                 let point = POINT {
                     x: (lparam.0 & 0xFFFF) as i16 as i32,
                     y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
                 };
-                let chosen = if point.x < client.left || point.x >= client.right {
+                let mut chosen = if point.x < client.left || point.x >= client.right {
                     -1
                 } else {
                     row_at(&client, point.y)
                 };
+                let pressed = choices()
+                    .as_ref()
+                    .and_then(|m| m.get(&OPEN_BUTTON.load(Ordering::SeqCst)))
+                    .map(|d| d.pressed)
+                    .unwrap_or(-1);
+                if chosen != pressed {
+                    chosen = -1;
+                }
                 if chosen >= 0 {
                     let button = OPEN_BUTTON.load(Ordering::SeqCst);
                     select_index(HWND(button as *mut _), chosen);
@@ -825,9 +1057,20 @@ unsafe extern "system" fn popup_proc(
                 LRESULT(0)
             }
             WM_KEYDOWN => match wparam.0 {
-                0x1B => {
+                0x1B | 0x73 => {
                     // Escape closes without committing.
                     close(false);
+                    LRESULT(0)
+                }
+                0x09 => {
+                    let owner = HWND(OPEN_OWNER.load(Ordering::SeqCst) as *mut _);
+                    let button = HWND(OPEN_BUTTON.load(Ordering::SeqCst) as *mut _);
+                    close(false);
+                    let previous =
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x10) < 0;
+                    if let Ok(next) = GetNextDlgTabItem(owner, Some(button), previous) {
+                        let _ = SetFocus(Some(next));
+                    }
                     LRESULT(0)
                 }
                 0x25 | 0x27 | 0x48 | 0x4B | 0x4D | 0x50 | 0x57 => LRESULT(0), // swallow
@@ -892,7 +1135,20 @@ unsafe extern "system" fn popup_proc(
                 }
                 _ => LRESULT(0),
             },
-            WM_CANCELMODE | WM_KILLFOCUS => {
+            WM_KILLFOCUS => {
+                // An anchor click can transfer focus through the owner before
+                // its deferred command arrives. Let that command toggle the popup.
+                let next = HWND(wparam.0 as *mut _);
+                let owner = HWND(OPEN_OWNER.load(Ordering::SeqCst) as *mut _);
+                let anchor = HWND(OPEN_BUTTON.load(Ordering::SeqCst) as *mut _);
+                if next.is_invalid()
+                    || (next != owner && next != anchor && !IsChild(owner, next).as_bool())
+                {
+                    close(false);
+                }
+                LRESULT(0)
+            }
+            WM_CANCELMODE | WM_CAPTURECHANGED => {
                 close(false);
                 LRESULT(0)
             }
@@ -908,6 +1164,102 @@ unsafe extern "system" fn popup_proc(
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_pointer_cannot_select_hidden_rows_and_button_destruction_cleans_registry() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        unsafe {
+            let owner = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_POPUP,
+                0,
+                0,
+                400,
+                400,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let rows: Vec<_> = (0..10)
+                .map(|i| ChoiceItem::option(&i.to_string(), &format!("Item {i}")))
+                .collect();
+            let _dpi = crate::dpi::Scope::window(owner);
+            let font = windows::Win32::Graphics::Gdi::HFONT(
+                windows::Win32::Graphics::Gdi::GetStockObject(
+                    windows::Win32::Graphics::Gdi::DEFAULT_GUI_FONT,
+                )
+                .0,
+            );
+            let button = create_rows(owner, 100, (0, 0, 200, 32), &rows, font);
+            open(button, owner, 100);
+            let popup = open_popup();
+            for next in [owner, button] {
+                SendMessageW(popup, WM_KILLFOCUS, Some(WPARAM(next.0 as usize)), None);
+                assert_eq!(open_popup(), popup);
+            }
+            let mut client = RECT::default();
+            GetClientRect(popup, &mut client).unwrap();
+            let (track, thumb, _, max) = scroll_geometry(&client).unwrap();
+            let point_at =
+                |x: i32, y: i32| LPARAM(((y as u32) << 16 | (x as u32 & 0xffff)) as isize);
+            SendMessageW(
+                popup,
+                WM_LBUTTONDOWN,
+                Some(WPARAM(1)),
+                Some(point_at(track.left + 1, thumb.top + 1)),
+            );
+            SendMessageW(
+                popup,
+                WM_MOUSEMOVE,
+                Some(WPARAM(1)),
+                Some(point_at(track.left + 1, client.bottom + 100)),
+            );
+            SendMessageW(
+                popup,
+                WM_LBUTTONUP,
+                None,
+                Some(point_at(track.left + 1, client.bottom + 100)),
+            );
+            assert_eq!(open_popup(), popup);
+            assert_eq!(selection(button), 0);
+            assert_eq!(
+                choices()
+                    .as_ref()
+                    .unwrap()
+                    .get(&(button.0 as isize))
+                    .unwrap()
+                    .first,
+                max
+            );
+            scroll_rows(-max);
+            assert_eq!(row_at(&client, client.bottom + crate::scale_pub(ROW_H)), -1);
+            let point =
+                LPARAM(((crate::scale_pub(INSET + ROW_H + ROW_GAP + 5) as isize) << 16) | 10);
+            SendMessageW(popup, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(point));
+            SendMessageW(popup, WM_LBUTTONUP, Some(WPARAM(0)), Some(point));
+            assert_eq!(selection(button), 1);
+            let mut label = [0u16; 32];
+            let len = GetWindowTextW(button, &mut label);
+            assert_eq!(String::from_utf16_lossy(&label[..len as usize]), "Item 1");
+            open(button, owner, 100);
+            set_rows(button, &rows[..2]);
+            assert!(open_popup().is_invalid());
+            open(button, owner, 100);
+            SendMessageW(open_popup(), WM_KILLFOCUS, Some(WPARAM(0)), None);
+            assert!(open_popup().is_invalid());
+            DestroyWindow(owner).unwrap();
+            assert!(!is_choice(button));
         }
     }
 }

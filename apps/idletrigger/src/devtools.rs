@@ -136,6 +136,7 @@ pub fn maybe_show_warning_preview() {
         // Countdown preview (automation system-action warning): a fake
         // pending action posted to the UI thread like the scheduler does.
         let mut pending = crate::automation::PendingAction {
+            rule: None,
             action: "restart".into(),
             seconds: 10,
             once_date: None,
@@ -163,6 +164,21 @@ pub fn maybe_show_warning_preview() {
 pub fn trace_input(event: &str) {
     if INPUT_TRACE.load(Ordering::SeqCst) {
         crate::log_line(&format!("input-trace: {event}"));
+    }
+}
+
+pub fn trace_idle_sample(tick: Option<u32>) {
+    static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+    if !INPUT_TRACE.load(Ordering::SeqCst) {
+        return;
+    }
+    let current = tick.unwrap_or(u32::MAX);
+    if LAST.swap(current, Ordering::SeqCst) != current {
+        trace_input(if tick.is_some() {
+            "last-input timestamp changed"
+        } else {
+            "input state unavailable"
+        });
     }
 }
 
@@ -233,6 +249,20 @@ pub fn handle_capture_timer() -> bool {
     };
     match step {
         0 => {
+            for (window, name) in [
+                (crate::hwnd(&crate::WARNING), "idle-warning"),
+                (crate::hwnd(&crate::ACTION_WARN_HWND), "action-warning"),
+            ] {
+                if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }
+                    .as_bool()
+                {
+                    shoot(
+                        window,
+                        out_dir.join(format!("IdleTrigger-{name}-capture.bmp")),
+                        name,
+                    );
+                }
+            }
             shoot(
                 crate::hwnd(&crate::PANEL),
                 out_dir.join("IdleTrigger-panel-capture.bmp"),

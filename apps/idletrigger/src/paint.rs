@@ -84,6 +84,10 @@ pub fn ensure_started() -> bool {
             if GdiplusStartup(&mut token, &input, &mut output).0 != 0 || token == 0 {
                 return None;
             }
+            if output.NotificationHook == 0 {
+                GdiplusShutdown(token);
+                return None;
+            }
             let hook: HookProc = std::mem::transmute(output.NotificationHook);
             let mut hook_token = 0usize;
             if hook(&mut hook_token) != 0 {
@@ -415,13 +419,13 @@ pub fn sp(logical: i32, scale: i32) -> i32 {
         }
         return logical * scale / 96;
     }
-    (logical as i64 * scale as i64 + 48) as i32 / 96
+    ((logical as i64 * scale as i64 + 48) / 96) as i32
 }
 
 // ---- Control painters (Go nativeform/controls.go) --------------------------
 
 use windows::Win32::Graphics::Gdi::{
-    DT_CALCRECT, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
+    DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
 };
 
 /// Rounded surface with a 1px border; falls back to GDI RoundRect when the
@@ -801,6 +805,9 @@ pub fn draw_text_link(
     if state.pressed {
         color = p.accent_pressed;
     }
+    if state.disabled {
+        color = p.disabled_text;
+    }
     unsafe {
         let mut text: Vec<u16> = label.encode_utf16().collect();
         let old = SelectObject(hdc, HGDIOBJ(font.0));
@@ -811,7 +818,7 @@ pub fn draw_text_link(
             hdc,
             &mut text,
             &mut text_bounds,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
         let chars: Vec<u16> = label.encode_utf16().collect();
         let mut size = SIZE::default();
@@ -887,7 +894,7 @@ fn draw_label(
         } else {
             DT_CENTER | DT_VCENTER | DT_SINGLELINE
         };
-        let _ = DrawTextW(hdc, &mut text, &mut bounds, flags);
+        let _ = DrawTextW(hdc, &mut text, &mut bounds, flags | DT_NOPREFIX);
         SelectObject(hdc, old);
     }
 }
@@ -920,7 +927,12 @@ pub fn draw_button_label(
         // as a persistent left bias (Go measures and positions manually).
         let original_top = bounds.top;
         let mut measured = bounds;
-        let has_measure = DrawTextW(hdc, &mut text, &mut measured, DT_WORDBREAK | DT_CALCRECT) != 0;
+        let has_measure = DrawTextW(
+            hdc,
+            &mut text,
+            &mut measured,
+            DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX,
+        ) != 0;
         if has_measure {
             let text_w = measured.right - measured.left;
             let text_h = measured.bottom - measured.top;
@@ -941,7 +953,12 @@ pub fn draw_button_label(
             }
         }
 
-        let _ = DrawTextW(hdc, &mut text, &mut bounds, DT_LEFT | DT_WORDBREAK);
+        let _ = DrawTextW(
+            hdc,
+            &mut text,
+            &mut bounds,
+            DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
+        );
         SelectObject(hdc, old);
     }
 }
