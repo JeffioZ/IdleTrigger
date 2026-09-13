@@ -13,7 +13,7 @@ body:
     id: version
     attributes:
       label: IdleTrigger version / IdleTrigger 版本
-      placeholder: "For example: v1.7.0"
+      placeholder: "For example: v2.2.0"
     validations:
       required: true
 
