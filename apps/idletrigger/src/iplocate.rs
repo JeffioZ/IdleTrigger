@@ -20,8 +20,8 @@ fn now_secs() -> i64 {
 }
 
 /// Returns cached or freshly fetched coordinates; None when unavailable and
-/// the retry window hasn't elapsed. Blocking (up to ~5s) — background
-/// threads only.
+/// the retry window hasn't elapsed. Blocking: the 5s timeouts apply to
+/// individual network phases, not the whole request. Background threads only.
 pub fn resolve() -> Option<(f64, f64)> {
     let now = now_secs();
     if let Some(hit) = *CACHE.lock().unwrap()
@@ -32,7 +32,10 @@ pub fn resolve() -> Option<(f64, f64)> {
     if now - LAST_FAILURE.load(Ordering::SeqCst) < FAILURE_RETRY_SECS {
         return None;
     }
-    let (lat, lon) = fetch_ipwho()?;
+    let Some((lat, lon)) = fetch_ipwho() else {
+        LAST_FAILURE.store(now, Ordering::SeqCst);
+        return None;
+    };
     *CACHE.lock().unwrap() = Some((lat, lon));
     LAST_SUCCESS.store(now, Ordering::SeqCst);
     Some((lat, lon))
@@ -68,12 +71,22 @@ fn fetch_ipwho() -> Option<(f64, f64)> {
         if session.is_null() {
             return None;
         }
+        if windows::Win32::Networking::WinHttp::WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000)
+            .is_err()
+        {
+            let _ = WinHttpCloseHandle(session);
+            return None;
+        }
         let url_wide: Vec<u16> = "https://ipwho.is/".encode_utf16().collect();
         let mut parts = URL_COMPONENTS {
             dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
+            dwHostNameLength: u32::MAX,
             ..Default::default()
         };
-        if WinHttpCrackUrl(&url_wide, 0, &mut parts).is_err() {
+        if WinHttpCrackUrl(&url_wide, 0, &mut parts).is_err()
+            || parts.lpszHostName.is_null()
+            || parts.dwHostNameLength == 0
+        {
             let _ = WinHttpCloseHandle(session);
             return None;
         }
@@ -115,10 +128,37 @@ fn fetch_ipwho() -> Option<(f64, f64)> {
             return None;
         }
 
+        let mut status: u32 = 0;
+        let mut status_size = size_of::<u32>() as u32;
+        if windows::Win32::Networking::WinHttp::WinHttpQueryHeaders(
+            request,
+            windows::Win32::Networking::WinHttp::WINHTTP_QUERY_STATUS_CODE
+                | windows::Win32::Networking::WinHttp::WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some((&mut status as *mut u32).cast()),
+            &mut status_size,
+            std::ptr::null_mut(),
+        )
+        .is_err()
+            || status != 200
+        {
+            let _ = WinHttpCloseHandle(request);
+            let _ = WinHttpCloseHandle(connect);
+            let _ = WinHttpCloseHandle(session);
+            return None;
+        }
         let mut body = Vec::new();
+        let mut complete = false;
         loop {
             let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request, &mut available).is_err() || available == 0 {
+            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
+                break;
+            }
+            if available == 0 {
+                complete = true;
+                break;
+            }
+            if available as usize > 64 * 1024 - body.len() {
                 break;
             }
             let mut chunk = vec![0u8; available as usize];
@@ -138,7 +178,11 @@ fn fetch_ipwho() -> Option<(f64, f64)> {
         let _ = WinHttpCloseHandle(connect);
         let _ = WinHttpCloseHandle(session);
 
-        parse_ipwho(&String::from_utf8_lossy(&body))
+        if complete {
+            parse_ipwho(&String::from_utf8_lossy(&body))
+        } else {
+            None
+        }
     }
 }
 
@@ -154,5 +198,8 @@ fn parse_ipwho(body: &str) -> Option<(f64, f64)> {
     }
     let lat = value.get("latitude")?.as_f64()?;
     let lon = value.get("longitude")?.as_f64()?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
     Some((lat, lon))
 }

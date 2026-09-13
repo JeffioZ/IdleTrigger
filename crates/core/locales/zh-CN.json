@@ -402,5 +402,6 @@
   "logic_all": "全部进程命中",
   "logic_none": "无进程命中",
   "cli_status_tray_off": "托盘：未运行",
-  "nosleep_battery_threshold_display": "电池电量阈值（%）"
+  "nosleep_battery_threshold_display": "电池电量阈值（%）",
+  "error_single_instance": "无法确认应用是否已经运行，已停止启动：%s"
 }

@@ -56,11 +56,88 @@ pub struct PendingAction {
 pub static PENDING_ACTION: Mutex<Option<PendingAction>> = Mutex::new(None);
 pub static ACTION_BUSY: AtomicBool = AtomicBool::new(false);
 
-// Per-rule edge tracking.
-static STATE_ACTIVE: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
-static WAS_ANY_PRESENT: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
-static LAST_PRESENT_AT: Mutex<BTreeMap<String, std::time::Instant>> = Mutex::new(BTreeMap::new());
-static EXIT_FIRED: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
+// One baseline per rule, and absence grace per target shared by conditions
+// and edges. A short restart must not create a second process-start event.
+#[derive(Default)]
+struct ProcessTracker {
+    targets: BTreeMap<String, Presence>,
+    edges: BTreeMap<String, (auto::Rule, bool)>,
+}
+#[derive(Default)]
+struct Presence {
+    present: bool,
+    absent_since: Option<std::time::Instant>,
+}
+impl Presence {
+    fn update(&mut self, present: bool, now: std::time::Instant) -> bool {
+        if present {
+            self.present = true;
+            self.absent_since = None;
+        } else if self.present {
+            let since = self.absent_since.get_or_insert(now);
+            if now.saturating_duration_since(*since) >= EXIT_GRACE {
+                self.present = false;
+                self.absent_since = None;
+            }
+        }
+        self.present
+    }
+}
+impl ProcessTracker {
+    fn observe(
+        &mut self,
+        rules: &[auto::Rule],
+        snapshot: Option<&Snapshot>,
+        now: std::time::Instant,
+    ) -> Option<BTreeMap<String, bool>> {
+        self.edges
+            .retain(|_, (previous, _)| rules.iter().any(|r| r.enabled && r == previous));
+        let targets: BTreeMap<_, _> = rules
+            .iter()
+            .filter(|r| r.enabled)
+            .flat_map(|r| &r.processes)
+            .map(|t| (t.key(), t))
+            .collect();
+        self.targets.retain(|key, _| targets.contains_key(key));
+        let snapshot = snapshot?;
+        Some(
+            targets
+                .into_iter()
+                .map(|(key, target)| {
+                    let present = self
+                        .targets
+                        .entry(key.clone())
+                        .or_default()
+                        .update(target_present(target, snapshot), now);
+                    (key, present)
+                })
+                .collect(),
+        )
+    }
+
+    fn edge(&mut self, rule: &auto::Rule, present: bool) -> bool {
+        let previous = self.edges.insert(rule.id.clone(), (rule.clone(), present));
+        let Some((previous_rule, previous)) = previous else {
+            return false;
+        };
+        previous_rule == *rule
+            && match rule.trigger.as_str() {
+                auto::TRIGGER_PROCESS_STARTED => !previous && present,
+                auto::TRIGGER_PROCESS_EXITED => previous && !present,
+                _ => false,
+            }
+    }
+}
+static PROCESS_TRACKER: Mutex<ProcessTracker> = Mutex::new(ProcessTracker {
+    targets: BTreeMap::new(),
+    edges: BTreeMap::new(),
+});
+struct WaitingEvent {
+    rule: auto::Rule,
+    occurrence: String,
+    deadline: std::time::Instant,
+}
+static WAITING_EVENTS: Mutex<BTreeMap<String, WaitingEvent>> = Mutex::new(BTreeMap::new());
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -128,157 +205,148 @@ pub fn spawn(config_dir: PathBuf) {
 }
 
 fn tick(first_tick: bool) -> Result<(), String> {
+    tick_with_snapshot(
+        first_tick,
+        Snapshot::take(),
+        local_now()?,
+        std::time::Instant::now(),
+    )
+}
+
+fn tick_with_snapshot(
+    first_tick: bool,
+    snapshot: Option<Snapshot>,
+    now: LocalNow,
+    monotonic_now: std::time::Instant,
+) -> Result<(), String> {
     let enabled = crate::cfg_map(|c| c.automation_enabled);
-    let snapshot = Snapshot::take();
     let rules = RULES.lock().unwrap().clone();
     if !enabled {
+        WAITING_EVENTS.lock().unwrap().clear();
+        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
         clear_overrides();
         return Ok(());
     }
-    let Some(snapshot) = snapshot else {
-        return Err("process snapshot failed".into());
+    let observations =
+        PROCESS_TRACKER
+            .lock()
+            .unwrap()
+            .observe(&rules, snapshot.as_ref(), monotonic_now);
+    let condition = |rule: &auto::Rule| {
+        rule.processes.is_empty()
+            || observations
+                .as_ref()
+                .is_some_and(|present| evaluate_logic(rule, present))
     };
 
-    let now = local_now()?;
+    let mut active = Vec::new();
+    let waiting = std::mem::take(&mut *WAITING_EVENTS.lock().unwrap());
+    for (id, pending) in waiting {
+        let rule = &pending.rule;
+        if !rules
+            .iter()
+            .any(|current| current == rule && current.enabled)
+        {
+            continue;
+        }
+        if monotonic_now >= pending.deadline {
+            record_occurrence(&id, pending.occurrence);
+        } else if condition(rule) {
+            record_occurrence(&id, pending.occurrence.clone());
+            fire_event(rule, rule_once_date(rule));
+        } else {
+            WAITING_EVENTS.lock().unwrap().insert(id, pending);
+        }
+    }
     for rule in &rules {
         if !rule.enabled {
             continue;
         }
         match rule.trigger.as_str() {
             auto::TRIGGER_PROCESS_RUNNING => {
-                let present = evaluate_logic(rule, &snapshot);
-                if state_edge(&rule.id, present) {
-                    apply_state_action(
-                        &rule.action,
-                        present,
-                        rule.keep_screen_on,
-                        rule.idle_minutes,
-                    );
+                if condition(rule) {
+                    active.push(rule);
                 }
             }
             auto::TRIGGER_TIME_WINDOW => {
-                let inside = in_time_window(rule, &now);
-                if state_edge(&rule.id, inside) {
-                    apply_state_action(
-                        &rule.action,
-                        inside,
-                        rule.keep_screen_on,
-                        rule.idle_minutes,
-                    );
+                if in_time_window(rule, &now) && condition(rule) {
+                    active.push(rule);
                 }
             }
             auto::TRIGGER_ONCE | auto::TRIGGER_DAILY | auto::TRIGGER_WEEKLY => {
-                if first_tick {
+                if first_tick || WAITING_EVENTS.lock().unwrap().contains_key(&rule.id) {
                     continue; // never backfill missed schedules at startup
                 }
                 if day_matches(rule, &now) && schedule_due(&now, &rule.time) {
-                    let key = format!("{}:{}", rule.id, now.date);
+                    let occurrence = format!("{}T{}", now.date, rule.time);
                     let already = RUNTIME_STATE
                         .lock()
                         .unwrap()
-                        .last_occurrences
-                        .contains_key(&key);
+                        .has_scheduled_occurrence(&rule.id, &occurrence);
                     if !already {
-                        record_occurrence(key.clone());
-                        fire_event(rule, rule_once_date(rule));
+                        if condition(rule) {
+                            record_occurrence(&rule.id, occurrence);
+                            fire_event(rule, rule_once_date(rule));
+                        } else if rule.blocked_policy == auto::BLOCKED_WAIT
+                            && rule.max_wait_minutes > 0
+                        {
+                            WAITING_EVENTS.lock().unwrap().insert(
+                                rule.id.clone(),
+                                WaitingEvent {
+                                    rule: rule.clone(),
+                                    occurrence,
+                                    deadline: monotonic_now
+                                        + Duration::from_secs(rule.max_wait_minutes as u64 * 60),
+                                },
+                            );
+                        } else {
+                            record_occurrence(&rule.id, occurrence);
+                        }
                     }
                 }
             }
-            auto::TRIGGER_PROCESS_STARTED => {
-                let any = evaluate_any(rule, &snapshot);
-                let was = WAS_ANY_PRESENT
-                    .lock()
-                    .unwrap()
-                    .get(&rule.id)
-                    .copied()
-                    .unwrap_or(false);
-                if first_tick {
-                    WAS_ANY_PRESENT.lock().unwrap().insert(rule.id.clone(), any);
-                    continue; // baseline: existing processes never backfill
-                }
-                if any && !was {
-                    fire_event(rule, rule_once_date(rule));
-                }
-                WAS_ANY_PRESENT.lock().unwrap().insert(rule.id.clone(), any);
-            }
-            auto::TRIGGER_PROCESS_EXITED => {
-                let any = evaluate_any(rule, &snapshot);
-                let already_fired = EXIT_FIRED
-                    .lock()
-                    .unwrap()
-                    .get(&rule.id)
-                    .copied()
-                    .unwrap_or(false);
-                if any {
-                    LAST_PRESENT_AT
-                        .lock()
-                        .unwrap()
-                        .insert(rule.id.clone(), std::time::Instant::now());
-                    if already_fired {
-                        EXIT_FIRED.lock().unwrap().insert(rule.id.clone(), false);
-                    }
+            auto::TRIGGER_PROCESS_STARTED | auto::TRIGGER_PROCESS_EXITED => {
+                let Some(present) = observations.as_ref() else {
                     continue;
-                }
-                if first_tick {
-                    continue;
-                }
-                let elapsed_ok = {
-                    let last_present = LAST_PRESENT_AT.lock().unwrap();
-                    match last_present.get(&rule.id) {
-                        Some(seen) => seen.elapsed() >= EXIT_GRACE,
-                        None => false,
-                    }
                 };
-                if !already_fired && elapsed_ok {
-                    EXIT_FIRED.lock().unwrap().insert(rule.id.clone(), true);
+                let any = rule
+                    .processes
+                    .iter()
+                    .any(|t| present.get(&t.key()) == Some(&true));
+                let fire = PROCESS_TRACKER.lock().unwrap().edge(rule, any);
+                if fire {
                     fire_event(rule, rule_once_date(rule));
                 }
             }
             _ => {}
         }
     }
-    Ok(())
+    publish_overrides(auto::aggregate_state(active));
+    if snapshot.is_none() {
+        Err("process snapshot failed".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn clear_overrides() {
-    let was_on = OVR.nosleep_on.swap(false, Ordering::SeqCst)
-        | OVR.idle_on.swap(false, Ordering::SeqCst)
-        | OVR.nosleep_paused.swap(false, Ordering::SeqCst)
-        | OVR.idle_paused.swap(false, Ordering::SeqCst);
-    if was_on {
+    publish_overrides(auto::EffectiveState::default());
+}
+
+fn publish_overrides(state: auto::EffectiveState) {
+    let changed = (OVR.nosleep_on.swap(state.stay_awake, Ordering::SeqCst) != state.stay_awake)
+        | (OVR
+            .nosleep_paused
+            .swap(state.pause_stay_awake, Ordering::SeqCst)
+            != state.pause_stay_awake)
+        | (OVR.keep_screen.swap(state.keep_screen_on, Ordering::SeqCst) != state.keep_screen_on)
+        | (OVR.idle_on.swap(state.enable_idle, Ordering::SeqCst) != state.enable_idle)
+        | (OVR.idle_paused.swap(state.pause_idle, Ordering::SeqCst) != state.pause_idle)
+        | (OVR.idle_minutes.swap(state.idle_minutes, Ordering::SeqCst) != state.idle_minutes);
+    if changed {
         request_refresh();
     }
 }
-
-fn state_edge(id: &str, active: bool) -> bool {
-    let mut map = STATE_ACTIVE.lock().unwrap();
-    let previous = map.get(id).copied();
-    map.insert(id.to_string(), active);
-    previous != Some(active)
-}
-
-fn apply_state_action(action: &str, on: bool, keep_screen: bool, idle_minutes: i32) {
-    match action {
-        auto::ACTION_STAY_AWAKE => {
-            OVR.nosleep_on.store(on, Ordering::SeqCst);
-            if on {
-                OVR.keep_screen.store(keep_screen, Ordering::SeqCst);
-            }
-        }
-        auto::ACTION_PAUSE_STAY_AWAKE => OVR.nosleep_paused.store(on, Ordering::SeqCst),
-        auto::ACTION_ENABLE_IDLE => {
-            OVR.idle_on.store(on, Ordering::SeqCst);
-            if on {
-                OVR.idle_minutes.store(idle_minutes, Ordering::SeqCst);
-            }
-        }
-        auto::ACTION_PAUSE_IDLE => OVR.idle_paused.store(on, Ordering::SeqCst),
-        _ => return,
-    }
-    crate::log_line(&format!("automation state override {action}={on}"));
-    request_refresh();
-}
-
 fn request_refresh() {
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
@@ -291,16 +359,26 @@ fn request_refresh() {
 }
 
 fn fire_event(rule: &auto::Rule, once_date: Option<String>) {
-    if ACTION_BUSY.load(Ordering::SeqCst) {
-        if rule.blocked_policy == auto::BLOCKED_WAIT && rule.max_wait_minutes > 0 {
-            // Simplified wait: the next tick retries while the slot is busy.
-            unrecord_occurrence_if_daily(&rule.id);
-            crate::log_line(&format!(
-                "automation event {} postponed (countdown busy)",
-                rule.id
-            ));
-            return;
-        }
+    dispatch_event(rule, once_date, || unsafe {
+        let hidden = crate::hwnd(&crate::HIDDEN);
+        // A null HWND posts a thread message successfully, but no window will
+        // consume it. Treat a missing recipient as a failed dispatch.
+        !hidden.is_invalid()
+            && windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(hidden),
+                crate::WM_ACTION_SHOW,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(0),
+            )
+            .is_ok()
+    });
+}
+
+fn dispatch_event(rule: &auto::Rule, once_date: Option<String>, notify: impl FnOnce() -> bool) {
+    if ACTION_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         crate::log_line(&format!(
             "automation event {} skipped (countdown busy)",
             rule.id
@@ -308,38 +386,29 @@ fn fire_event(rule: &auto::Rule, once_date: Option<String>) {
         return;
     }
     let seconds = rule.warning_seconds.max(auto::MIN_WARNING_SECONDS);
-    *PENDING_ACTION.lock().unwrap() = Some(PendingAction {
+    let mut pending = PENDING_ACTION.lock().unwrap();
+    *pending = Some(PendingAction {
         action: rule.action.clone(),
         seconds,
         rule_id: rule.id.clone(),
         once_date,
     });
-    unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(crate::hwnd(&crate::HIDDEN)),
-            crate::WM_ACTION_SHOW,
-            windows::Win32::Foundation::WPARAM(0),
-            windows::Win32::Foundation::LPARAM(0),
-        );
+    if !notify() {
+        *pending = None;
+        ACTION_BUSY.store(false, Ordering::SeqCst);
+        drop(pending);
+        crate::log_line(&format!(
+            "automation event {} skipped (dispatch failed)",
+            rule.id
+        ));
     }
 }
 
-fn unrecord_occurrence_if_daily(rule_id: &str) {
-    let now = local_now().ok();
-    if let Some(now) = now {
-        let key = format!("{rule_id}:{}", now.date);
-        RUNTIME_STATE.lock().unwrap().last_occurrences.remove(&key);
-    }
-}
-
-fn record_occurrence(key: String) {
-    let now = local_now().ok();
-    let date = now.map(|n| n.date).unwrap_or_default();
+fn record_occurrence(rule_id: &str, occurrence: String) {
     RUNTIME_STATE
         .lock()
         .unwrap()
-        .last_occurrences
-        .insert(key, date);
+        .record_scheduled_occurrence(rule_id, occurrence);
     persist_state();
 }
 
@@ -357,30 +426,18 @@ pub fn persist_state() {
 /// Cancelling a one-shot rule disables only that specific rule (identified
 /// by the rule_id carried in the pending action), not every once rule.
 pub fn disable_rule_after_cancel(rule_id: &str) {
-    let changed = {
-        let mut rules = RULES.lock().unwrap();
-        let mut changed = false;
-        for rule in rules.iter_mut() {
-            if rule.id == rule_id && rule.trigger == auto::TRIGGER_ONCE && rule.enabled {
-                rule.enabled = false;
-                changed = true;
-            }
-        }
-        changed
-    };
-    if !changed {
+    let mut rules = RULES.lock().unwrap().clone();
+    let Some(rule) = rules
+        .iter_mut()
+        .find(|r| r.id == rule_id && r.trigger == auto::TRIGGER_ONCE && r.enabled)
+    else {
         return;
+    };
+    rule.enabled = false;
+    if let Err(err) = crate::save_automation_rules(&rules) {
+        crate::warn_dialog("", &err);
     }
-    let text = toml_edit::ser::to_string(&*RULES.lock().unwrap()).unwrap_or_default();
-    if let Ok(item) = text.parse::<toml_edit::Item>() {
-        let mut doc = crate::CONFIG_DOC.lock().unwrap();
-        if let Some(doc) = doc.as_mut() {
-            doc["automation_rules"] = item;
-        }
-    }
-    crate::persist_config();
 }
-
 /// A schedule is "due" when now is within the 2-minute grace past the
 /// scheduled minute. The occurrence key prevents refiring within the same
 /// day, so the grace only bridges sleep/resume gaps.
@@ -391,7 +448,7 @@ fn schedule_due(now: &LocalNow, scheduled: &str) -> bool {
     };
     let sched = parse(scheduled);
     let diff = now.minutes - sched;
-    (0..=2).contains(&diff)
+    (0..2).contains(&diff)
 }
 
 fn rule_once_date(rule: &auto::Rule) -> Option<String> {
@@ -427,7 +484,7 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let mp = ((m + 9) % 12) as i64;
     let doy = (153 * mp + 2) / 5 + d as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe
+    era * 146_097 + doe - 719_468
 }
 
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
@@ -545,12 +602,6 @@ fn day_matches(rule: &auto::Rule, now: &LocalNow) -> bool {
 }
 
 fn in_time_window(rule: &auto::Rule, now: &LocalNow) -> bool {
-    if !rule
-        .days
-        .contains(&auto::weekday_key(now.weekday).to_string())
-    {
-        return false;
-    }
     let parse = |s: &str| -> i32 {
         let h: i32 = s.get(..2).and_then(|v| v.parse().ok()).unwrap_or(0);
         let m: i32 = s.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -558,20 +609,25 @@ fn in_time_window(rule: &auto::Rule, now: &LocalNow) -> bool {
     };
     let start = parse(&rule.time);
     let end = parse(&rule.end_time);
+    let day_matches = |weekday| {
+        rule.days.is_empty()
+            || rule
+                .days
+                .iter()
+                .any(|day| day == auto::weekday_key(weekday))
+    };
     if start <= end {
-        now.minutes >= start && now.minutes < end
+        day_matches(now.weekday) && now.minutes >= start && now.minutes < end
     } else {
-        // Window crossing midnight.
-        now.minutes >= start || now.minutes < end
+        // The after-midnight segment belongs to the day the window started.
+        (now.minutes >= start && day_matches(now.weekday))
+            || (now.minutes < end && day_matches((now.weekday + 6) % 7))
     }
 }
 
 fn target_present(target: &auto::ProcessTarget, snapshot: &Snapshot) -> bool {
     match target.kind.as_str() {
-        auto::MATCH_PATH => snapshot
-            .path_of(&target.executable.to_lowercase())
-            .map(|p| p == normalize(&target.path))
-            .unwrap_or(false),
+        auto::MATCH_PATH => snapshot.matches_path(target, query_process_path),
         _ => snapshot.names().contains(&target.executable.to_lowercase()),
     }
 }
@@ -584,21 +640,17 @@ fn normalize(path: &str) -> String {
     cleaned
 }
 
-fn evaluate_logic(rule: &auto::Rule, snapshot: &Snapshot) -> bool {
+fn evaluate_logic(rule: &auto::Rule, present: &BTreeMap<String, bool>) -> bool {
     let hits: Vec<bool> = rule
         .processes
         .iter()
-        .map(|t| target_present(t, snapshot))
+        .map(|t| present.get(&t.key()) == Some(&true))
         .collect();
     match rule.process_logic.as_str() {
         auto::LOGIC_ALL => !hits.is_empty() && hits.iter().all(|h| *h),
         auto::LOGIC_NONE => hits.iter().all(|h| !*h),
         _ => hits.iter().any(|h| *h),
     }
-}
-
-fn evaluate_any(rule: &auto::Rule, snapshot: &Snapshot) -> bool {
-    rule.processes.iter().any(|t| target_present(t, snapshot))
 }
 
 // ---- Process scanner -------------------------------------------------
@@ -627,8 +679,20 @@ impl Snapshot {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
             };
-            if windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW(snapshot, &mut entry)
-                .is_ok()
+            let first = windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW(
+                snapshot, &mut entry,
+            );
+            if let Err(err) = &first {
+                let _ = CloseHandle(snapshot);
+                return (err.code()
+                    == windows::core::HRESULT::from_win32(
+                        windows::Win32::Foundation::ERROR_NO_MORE_FILES.0,
+                    ))
+                .then_some(Snapshot {
+                    names,
+                    pids_by_name,
+                });
+            }
             {
                 loop {
                     let len = entry
@@ -641,11 +705,17 @@ impl Snapshot {
                         names.insert(name.clone());
                         pids_by_name.push((name, entry.th32ProcessID));
                     }
-                    if !windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(
+                    if let Err(err) = windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(
                         snapshot, &mut entry,
-                    )
-                    .is_ok()
-                    {
+                    ) {
+                        if err.code()
+                            != windows::core::HRESULT::from_win32(
+                                windows::Win32::Foundation::ERROR_NO_MORE_FILES.0,
+                            )
+                        {
+                            let _ = CloseHandle(snapshot);
+                            return None; // A partial list must not manufacture process exits.
+                        }
                         break;
                     }
                 }
@@ -666,6 +736,18 @@ impl Snapshot {
     /// (lowercase name, pid) pairs for grouping and self-exclusion.
     pub fn pid_names(&self) -> &[(String, u32)] {
         &self.pids_by_name
+    }
+
+    fn matches_path(
+        &self,
+        target: &auto::ProcessTarget,
+        resolve: impl Fn(u32) -> Option<String>,
+    ) -> bool {
+        let expected = normalize(&target.path);
+        self.pids_by_name
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(&target.executable))
+            .any(|(_, pid)| resolve(*pid).is_some_and(|path| normalize(&path) == expected))
     }
 
     /// Absolute lowercase path of the first process with this executable
@@ -701,5 +783,253 @@ fn query_process_path(pid: u32) -> Option<String> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+    #[test]
+    fn civil_dates_roundtrip_across_epoch_and_leap_boundaries() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(weekday_of(days_from_civil(2026, 9, 13)), 0);
+        for date in [
+            (1969, 12, 31),
+            (1970, 1, 1),
+            (2000, 2, 29),
+            (2026, 9, 13),
+            (2100, 3, 1),
+        ] {
+            assert_eq!(
+                civil_from_days(days_from_civil(date.0, date.1, date.2)),
+                date
+            );
+        }
+        assert_eq!(
+            civil_from_days(days_from_civil(2024, 2, 28) + 1),
+            (2024, 2, 29)
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    #[test]
+    fn scheduled_process_conditions_wait_and_expire_without_dispatch() {
+        let previous_config = crate::CONFIG
+            .lock()
+            .unwrap()
+            .replace(idletrigger_core::config::Config::default());
+        crate::cfg_edit(|c| c.automation_enabled = true);
+        let rule: auto::Rule = toml_edit::de::from_str(
+            r#"
+id = "condition-test"
+name = "condition test"
+enabled = true
+action = "lock"
+trigger = "daily"
+time = "12:00"
+process_logic = "any"
+blocked_policy = "wait"
+max_wait_minutes = 5
+[[processes]]
+match = "name"
+executable = "missing.exe"
+"#,
+        )
+        .unwrap();
+        *RULES.lock().unwrap() = vec![rule.clone()];
+        let now = || LocalNow {
+            date: "2026-09-13".into(),
+            minutes: 720,
+            weekday: 0,
+        };
+        let snapshot = || {
+            Some(Snapshot {
+                names: BTreeSet::new(),
+                pids_by_name: vec![],
+            })
+        };
+        let instant = std::time::Instant::now();
+        tick_with_snapshot(false, snapshot(), now(), instant).unwrap();
+        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst));
+        assert_eq!(WAITING_EVENTS.lock().unwrap().len(), 1);
+        assert!(RUNTIME_STATE.lock().unwrap().last_occurrences.is_empty());
+        tick_with_snapshot(false, snapshot(), now(), instant + Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            WAITING_EVENTS.lock().unwrap()["condition-test"].deadline,
+            instant + Duration::from_secs(300)
+        );
+        // A failed scan cannot postpone an elapsed waiting deadline.
+        assert!(
+            tick_with_snapshot(false, None, now(), instant + Duration::from_secs(300)).is_err()
+        );
+        assert!(WAITING_EVENTS.lock().unwrap().is_empty());
+        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert_eq!(
+            RUNTIME_STATE.lock().unwrap().last_occurrences["condition-test"],
+            "2026-09-13T12:00"
+        );
+
+        // Failed delivery releases both resources. A subsequent action can
+        // reserve the slot; a busy action never overwrites its payload.
+        dispatch_event(&rule, None, || false);
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst));
+        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        dispatch_event(&rule, None, || true);
+        assert!(ACTION_BUSY.load(Ordering::SeqCst));
+        let mut second = rule;
+        second.id = "second".into();
+        dispatch_event(&second, None, || panic!("busy dispatch must not notify"));
+        assert_eq!(
+            PENDING_ACTION.lock().unwrap().as_ref().unwrap().rule_id,
+            "condition-test"
+        );
+        *PENDING_ACTION.lock().unwrap() = None;
+        ACTION_BUSY.store(false, Ordering::SeqCst);
+
+        // Time-only work still evaluates while the process scanner is unknown.
+        second.processes.clear();
+        second.action = auto::ACTION_STAY_AWAKE.into();
+        second.trigger = auto::TRIGGER_TIME_WINDOW.into();
+        second.time = "00:00".into();
+        second.end_time = "23:59".into();
+        *RULES.lock().unwrap() = vec![second.clone()];
+        assert!(tick_with_snapshot(false, None, now(), instant).is_err());
+        assert!(OVR.nosleep_on.load(Ordering::SeqCst));
+        second.action = auto::ACTION_LOCK.into();
+        second.trigger = auto::TRIGGER_DAILY.into();
+        second.time = "12:00".into();
+        *RULES.lock().unwrap() = vec![second];
+        assert!(tick_with_snapshot(false, None, now(), instant).is_err());
+        assert!(
+            RUNTIME_STATE
+                .lock()
+                .unwrap()
+                .has_scheduled_occurrence("second", "2026-09-13T12:00")
+        );
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst)); // Null recipient is a failed dispatch.
+        RULES.lock().unwrap().clear();
+        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
+        clear_overrides();
+        RUNTIME_STATE.lock().unwrap().last_occurrences.clear();
+        *crate::CONFIG.lock().unwrap() = previous_config;
+    }
+
+    #[test]
+    fn process_baselines_grace_and_rule_changes_use_known_observations() {
+        let mut rule: auto::Rule = toml_edit::de::from_str(
+            r#"
+id = "edge"
+name = "edge"
+enabled = true
+action = "lock"
+trigger = "process_started"
+[[processes]]
+match = "name"
+executable = "app.exe"
+"#,
+        )
+        .unwrap();
+        let mut tracker = ProcessTracker::default();
+        let instant = std::time::Instant::now();
+        let rules = |r: &auto::Rule| vec![r.clone()];
+        let snapshot = |present: bool| Snapshot {
+            names: if present {
+                BTreeSet::from(["app.exe".into()])
+            } else {
+                BTreeSet::new()
+            },
+            pids_by_name: vec![],
+        };
+        let key = rule.processes[0].key();
+        assert!(tracker.observe(&rules(&rule), None, instant).is_none());
+        let known = tracker
+            .observe(&rules(&rule), Some(&snapshot(true)), instant)
+            .unwrap();
+        assert!(!tracker.edge(&rule, known[&key])); // First successful scan is only a baseline.
+        let update = |tracker: &mut ProcessTracker, rule: &auto::Rule, present, seconds| {
+            let known = tracker
+                .observe(
+                    &rules(rule),
+                    Some(&snapshot(present)),
+                    instant + Duration::from_secs(seconds),
+                )
+                .unwrap();
+            (known[&key], tracker.edge(rule, known[&key]))
+        };
+        assert_eq!(update(&mut tracker, &rule, false, 60), (true, false));
+        assert_eq!(update(&mut tracker, &rule, false, 64), (true, false));
+        assert_eq!(update(&mut tracker, &rule, true, 64), (true, false));
+        assert_eq!(update(&mut tracker, &rule, false, 70), (true, false));
+        assert_eq!(update(&mut tracker, &rule, false, 75), (false, false));
+        assert_eq!(update(&mut tracker, &rule, true, 76), (true, true));
+        rule.trigger = auto::TRIGGER_PROCESS_EXITED.into();
+        assert_eq!(update(&mut tracker, &rule, true, 77), (true, false));
+        assert_eq!(update(&mut tracker, &rule, false, 90), (true, false));
+        assert_eq!(update(&mut tracker, &rule, false, 95), (false, true));
+        assert_eq!(update(&mut tracker, &rule, false, 96), (false, false));
+        rule.enabled = false;
+        tracker.observe(&rules(&rule), None, instant);
+        assert!(tracker.edges.is_empty());
+        rule.enabled = true;
+        assert_eq!(update(&mut tracker, &rule, true, 100), (true, false));
+    }
+
+    #[test]
+    fn path_condition_checks_every_same_name_instance() {
+        let snapshot = Snapshot {
+            names: BTreeSet::from(["app.exe".into()]),
+            pids_by_name: vec![
+                ("app.exe".into(), 1),
+                ("app.exe".into(), 2),
+                ("other.exe".into(), 3),
+            ],
+        };
+        let target = auto::ProcessTarget {
+            kind: auto::MATCH_PATH.into(),
+            executable: "App.EXE".into(),
+            path: "D:/chosen/app.exe".into(),
+        };
+        assert!(snapshot.matches_path(&target, |pid| match pid {
+            1 => Some("C:\\wrong\\app.exe".into()),
+            2 => Some("D:\\CHOSEN\\APP.EXE".into()),
+            _ => panic!("unrelated executable must not be queried"),
+        }));
+        assert!(snapshot.matches_path(&target, |pid| {
+            (pid == 2).then(|| "D:\\chosen\\app.exe".into())
+        }));
+        assert!(!snapshot.matches_path(&target, |_| None));
+    }
+
+    #[test]
+    fn overnight_window_uses_start_day_and_schedule_grace_is_exclusive() {
+        let rule: auto::Rule = toml_edit::de::from_str(
+            r#"
+id = "night"
+name = "night"
+enabled = true
+action = "stay_awake"
+trigger = "time_window"
+time = "23:00"
+end_time = "02:00"
+days = ["sat"]
+"#,
+        )
+        .unwrap();
+        let at = |weekday, minutes| LocalNow {
+            date: "2026-09-13".into(),
+            weekday,
+            minutes,
+        };
+        assert!(in_time_window(&rule, &at(6, 23 * 60)));
+        assert!(in_time_window(&rule, &at(0, 60)));
+        assert!(!in_time_window(&rule, &at(6, 60)));
+        assert!(!in_time_window(&rule, &at(0, 120)));
+        assert!(!in_time_window(&rule, &at(0, 23 * 60)));
+        assert!(schedule_due(&at(0, 721), "12:00"));
+        assert!(!schedule_due(&at(0, 722), "12:00"));
     }
 }

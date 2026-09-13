@@ -87,8 +87,8 @@ pub fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
     let solar_noon_utc = 720.0 - 4.0 * lon - eq_time;
     let offset = local_utc_offset_minutes() as f64;
     let solar_noon = solar_noon_utc + offset;
-    let mut sunrise = solar_noon - day_len_min / 2.0;
-    let mut sunset = solar_noon + day_len_min / 2.0;
+    let mut sunrise = solar_noon - day_len_min;
+    let mut sunset = solar_noon + day_len_min;
     // Clamp into the day (Go wrap loops).
     while sunrise < 0.0 {
         sunrise += 1440.0;
@@ -400,4 +400,14 @@ pub fn repair() {
     crate::theme::refresh_from_registry();
     crate::theme::apply_to_all();
     crate::log_line("theme repair applied");
+}
+
+#[cfg(test)]
+mod solar_tests {
+    use super::*;
+    #[test]
+    fn equinox_at_equator_has_about_twelve_hours_of_daylight() {
+        let (rise, set) = solar_times(0.0, 0.0, 80).unwrap();
+        assert!((710..=740).contains(&(set - rise).rem_euclid(1440)));
+    }
 }

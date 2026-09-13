@@ -131,10 +131,12 @@ mod display;
 mod gpu_activity;
 mod ipc;
 mod iplocate;
+mod list_style;
 mod nativeform;
 mod paint;
 mod popups;
 mod settings_ui;
+mod single_instance;
 mod system;
 mod theme;
 mod theme_engine;
@@ -232,6 +234,14 @@ fn scale(v: i32) -> i32 {
 
 fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
     let guard = CONFIG.lock().unwrap();
+    #[cfg(feature = "devtools")]
+    if devtools::ENABLED.load(Ordering::SeqCst) {
+        let mut runtime = guard.as_ref().expect("config initialized").clone();
+        drop(guard);
+        devtools::apply_idle_test(&mut runtime);
+        devtools::apply_config_overrides(&mut runtime);
+        return f(&runtime);
+    }
     f(guard.as_ref().expect("config initialized"))
 }
 
@@ -301,26 +311,17 @@ fn main() {
     let config_path = exe_dir.join("IdleTrigger.toml");
     let loaded = config::load(&config_path);
 
-    let mut effective_config = loaded.config.clone();
+    let effective_config = loaded.config.clone();
     #[cfg(feature = "devtools")]
-    let devtools_active = devtools::load();
-    #[cfg(feature = "devtools")]
-    {
-        if devtools_active {
-            devtools::apply_idle_test(&mut effective_config);
-            devtools::apply_config_overrides(&mut effective_config);
-        }
-    }
-    #[cfg(not(feature = "devtools"))]
-    let _ = &mut effective_config;
+    let _ = devtools::load();
 
     *CONFIG.lock().unwrap() = Some(effective_config.clone());
     *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
     *CONFIG_PATH.lock().unwrap() = Some(config_path.clone());
     apply_language(&effective_config.language);
 
-    // effective_config carries the devtools FORCE_LOG override too.
-    if effective_config.logging_enabled {
+    // Runtime diagnostic reads never mutate the persisted configuration.
+    if cfg_map(|c| c.logging_enabled) {
         init_log(&exe_dir);
     }
     log_line("IdleTrigger starting");
@@ -335,11 +336,18 @@ fn main() {
         warn_dialog("", &body);
     }
 
-    if !acquire_single_instance() {
-        request_show_from_second_instance();
-        log_line("another instance is running; requested panel show and exiting");
-        return;
-    }
+    let _instance_guard = match single_instance::acquire() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            request_show_from_second_instance();
+            log_line("another instance is running; requested panel show and exiting");
+            return;
+        }
+        Err(err) => {
+            warn_dialog("", &t_pub("error_single_instance").replace("%s", &err));
+            return;
+        }
+    };
 
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
@@ -474,22 +482,6 @@ fn msg_default() -> windows::Win32::UI::WindowsAndMessaging::MSG {
 }
 
 // ---- Single instance -----------------------------------------------------
-
-fn acquire_single_instance() -> bool {
-    use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
-    use windows::Win32::System::Threading::CreateEventW;
-
-    let name: Vec<u16> = "Local\\IdleTriggerSingleton"
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    unsafe {
-        match CreateEventW(None, true, false, PCWSTR(name.as_ptr())) {
-            Ok(_handle) => windows::Win32::Foundation::GetLastError() != ERROR_ALREADY_EXISTS,
-            Err(_) => true, // fail open: better a second instance than no app
-        }
-    }
-}
 
 fn request_show_from_second_instance() {
     unsafe {
@@ -909,7 +901,20 @@ unsafe extern "system" fn panel_proc(
                     log_line("exit via panel button");
                     PostQuitMessage(0);
                 } else if code == IDC_SYSTEM_BUTTON {
-                    show_system_controls_menu(hwnd_);
+                    if (wparam.0 >> 16) == 1 {
+                        // CBN_SELCHANGE
+                        let button =
+                            GetDlgItem(Some(hwnd_), IDC_SYSTEM_BUTTON as i32).unwrap_or_default();
+                        if let Ok(id) = choice::value(button).parse::<usize>()
+                            && (900..=904).contains(&id)
+                        {
+                            execute_system_action(
+                                ["lock", "sleep", "hibernate", "shutdown", "restart"][id - 900],
+                            );
+                        }
+                    } else {
+                        show_system_controls_menu(hwnd_);
+                    }
                 } else if (900..=904).contains(&code) {
                     // Quick-action rows committed from the choice popup.
                     let action = ["lock", "sleep", "hibernate", "shutdown", "restart"][code - 900];
@@ -955,7 +960,7 @@ unsafe extern "system" fn panel_proc(
                 LRESULT(0)
             }
             WM_DESTROY => {
-                PostQuitMessage(0);
+                // UI reconstruction is not application shutdown.
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd_, msg, wparam, lparam),
@@ -2241,11 +2246,13 @@ fn persist_config() {
         return;
     };
     if let Err(err) = config::save(&path, doc, &cfgv) {
+        drop(doc_guard);
         log_line(&format!("config save failed: {err}"));
         warn_dialog(
             "",
             &t_pub("msg_config_save_failed").replace("%s", &err.to_string()),
         );
+        return;
     } else {
         log_line("config saved");
         // Remember our own write's mtime so the config watcher doesn't
@@ -2259,6 +2266,40 @@ fn persist_config() {
     }
     drop(doc_guard);
     automation::reload_rules();
+}
+
+/// Commit rule edits only after the candidate document has reached disk.
+fn save_automation_rules(rules: &[idletrigger_core::automation::Rule]) -> Result<(), String> {
+    let save = || -> Result<(), String> {
+        let path = CONFIG_PATH
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("configuration path unavailable")?;
+        let config = CONFIG
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("configuration unavailable")?;
+        let mut guard = CONFIG_DOC.lock().unwrap();
+        let mut candidate = guard
+            .as_ref()
+            .ok_or("configuration document unavailable")?
+            .clone();
+        idletrigger_core::automation::replace_rules(&mut candidate, rules)
+            .map_err(|e| e.to_string())?;
+        config::save(&path, &mut candidate, &config).map_err(|e| e.to_string())?;
+        *guard = Some(candidate);
+        if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified())
+            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            *SELF_CONFIG_MTIME.lock().unwrap() = Some(dur.as_secs_f64());
+        }
+        Ok(())
+    };
+    save().map_err(|err| t_pub("msg_config_save_failed").replacen("%s", &err, 1))?;
+    automation::reload_rules();
+    Ok(())
 }
 
 /// Last mtime (seconds) written by this process; external watcher skips it.
@@ -2275,6 +2316,12 @@ fn hot_reload_config() {
         .unwrap_or_else(|| PathBuf::from("."));
     let config_path = exe_dir.join("IdleTrigger.toml");
     let loaded = config::load(&config_path);
+    if let Some(err) = loaded.load_error.as_ref() {
+        log_line(&format!(
+            "config reload rejected; retaining last valid configuration: {err}"
+        ));
+        return;
+    }
     *CONFIG.lock().unwrap() = Some(loaded.config.clone());
     *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
     apply_language(&loaded.config.language);
@@ -2523,7 +2570,12 @@ fn apply_stay_awake() {
     let auto_on = automation::OVR.nosleep_on.load(Ordering::SeqCst);
     let auto_keep_screen = automation::OVR.keep_screen.load(Ordering::SeqCst);
     let paused = automation::OVR.nosleep_paused.load(Ordering::SeqCst);
-    let effective = if auto_on { !paused } else { manual };
+    let battery_allowed = ON_AC.load(Ordering::SeqCst)
+        || cfg_map(|c| {
+            c.nosleep_on_battery
+                && BATTERY_PERCENT.load(Ordering::SeqCst) >= c.nosleep_battery_threshold
+        });
+    let effective = (manual || auto_on) && !paused && battery_allowed;
     let keep_screen = if auto_on {
         auto_keep_screen
     } else {
@@ -2652,6 +2704,12 @@ fn spawn_idle_thread() {
                     manual_minutes as i64
                 }) * 60_000;
                 let warn_ms = warn_seconds as i64 * 1000;
+                #[cfg(feature = "devtools")]
+                let threshold_ms = if devtools::IDLE_MONITOR_TEST.load(Ordering::SeqCst) {
+                    i64::from(devtools::IDLE_TEST_SECONDS.load(Ordering::SeqCst)) * 1000
+                } else {
+                    threshold_ms
+                };
                 let armed = (manual_idle || auto_idle)
                     && !idle_paused
                     && !NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst)
@@ -2772,6 +2830,21 @@ fn center_on_screen(hwnd_: HWND) {
 }
 
 fn tick_warning() {
+    if !WARNING_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    #[cfg(feature = "devtools")]
+    let preview = devtools::preview_only();
+    #[cfg(not(feature = "devtools"))]
+    let preview = false;
+    if !preview
+        && (!(cfg_map(|c| c.idle_enabled) || automation::OVR.idle_on.load(Ordering::SeqCst))
+            || automation::OVR.idle_paused.load(Ordering::SeqCst)
+            || NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst))
+    {
+        cancel_warning("monitor no longer active");
+        return;
+    }
     let left = WARN_SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1;
     if left <= 0 {
         cancel_warning("timeout");
@@ -2804,6 +2877,11 @@ fn execute_idle_action() {
 /// Executes one built-in system action by its config name. Shared by the
 /// idle monitor, automatic tasks, the system-controls menu, and hotkeys.
 pub fn execute_system_action(action: &str) {
+    #[cfg(feature = "devtools")]
+    if devtools::preview_only() {
+        log_line(&format!("preview: suppressed system action {action}"));
+        return;
+    }
     unsafe {
         match action {
             "lock" => {
@@ -2919,6 +2997,8 @@ pub fn t_pub(key: &str) -> String {
 
 /// Devtools warning preview entry (feature-gated call site).
 pub fn popups_show_warning_preview() {
+    WARNING_ACTIVE.store(true, Ordering::SeqCst);
+    WARN_SECONDS_LEFT.store(10, Ordering::SeqCst);
     show_warning();
 }
 

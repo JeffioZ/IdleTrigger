@@ -226,8 +226,14 @@ unsafe extern "system" fn tracked_proc(
                 with_map(|m| {
                     m.remove(&key);
                 });
-                // The subclass dies with the window; nothing to restore.
-                return DefWindowProcW(hwnd, msg, wparam, lparam);
+                // Native controls still need their original destruction chain.
+                return CallWindowProcW(
+                    std::mem::transmute::<isize, WNDPROC>(old),
+                    hwnd,
+                    msg,
+                    wparam,
+                    lparam,
+                );
             }
             _ => {}
         }

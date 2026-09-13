@@ -43,6 +43,58 @@ pub const LOGIC_NONE: &str = "none";
 pub const BLOCKED_SKIP: &str = "skip";
 pub const BLOCKED_WAIT: &str = "wait";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveState {
+    pub stay_awake: bool,
+    pub pause_stay_awake: bool,
+    pub keep_screen_on: bool,
+    pub enable_idle: bool,
+    pub pause_idle: bool,
+    pub idle_minutes: i32,
+}
+
+impl Default for EffectiveState {
+    fn default() -> Self {
+        Self {
+            stay_awake: false,
+            pause_stay_awake: false,
+            keep_screen_on: false,
+            enable_idle: false,
+            pause_idle: false,
+            idle_minutes: DEFAULT_IDLE_MINUTES,
+        }
+    }
+}
+
+/// Aggregate only active rules. No mutable edge history can leave stale effects.
+pub fn aggregate_state<'a>(rules: impl IntoIterator<Item = &'a Rule>) -> EffectiveState {
+    let mut result = EffectiveState::default();
+    let mut minutes = None;
+    for rule in rules {
+        if !rule.enabled {
+            continue;
+        }
+        match rule.action.as_str() {
+            ACTION_STAY_AWAKE => {
+                result.stay_awake = true;
+                result.keep_screen_on |= rule.keep_screen_on;
+            }
+            ACTION_PAUSE_STAY_AWAKE => result.pause_stay_awake = true,
+            ACTION_ENABLE_IDLE => {
+                result.enable_idle = true;
+                if rule.idle_minutes > 0 {
+                    minutes =
+                        Some(minutes.map_or(rule.idle_minutes, |m: i32| m.min(rule.idle_minutes)));
+                }
+            }
+            ACTION_PAUSE_IDLE => result.pause_idle = true,
+            _ => {}
+        }
+    }
+    result.idle_minutes = minutes.unwrap_or(DEFAULT_IDLE_MINUTES);
+    result
+}
+
 /// Identifies an application, never one ephemeral PID.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessTarget {
@@ -97,6 +149,22 @@ pub struct Rule {
 
 fn is_zero(v: &i32) -> bool {
     *v == 0
+}
+
+/// TOML documents require a named root; a bare rule sequence is unsupported.
+pub fn replace_rules(
+    document: &mut toml_edit::DocumentMut,
+    rules: &[Rule],
+) -> Result<(), toml_edit::ser::Error> {
+    #[derive(Serialize)]
+    struct RulesDocument<'a> {
+        automation_rules: &'a [Rule],
+    }
+    let mut encoded = toml_edit::ser::to_document(&RulesDocument {
+        automation_rules: rules,
+    })?;
+    document["automation_rules"] = encoded.remove("automation_rules").unwrap_or_default();
+    Ok(())
 }
 
 /// Why one configured rule is unsafe to run.
@@ -506,6 +574,37 @@ pub struct RuntimeState {
     pub last_occurrences: BTreeMap<String, String>,
 }
 
+impl RuntimeState {
+    /// Go stores rule ID -> YYYY-MM-DDTHH:MM. Early Rust builds instead
+    /// stored rule ID:date -> date, losing the scheduled minute.
+    pub fn has_scheduled_occurrence(&self, rule_id: &str, occurrence: &str) -> bool {
+        if self
+            .last_occurrences
+            .get(rule_id)
+            .is_some_and(|v| v == occurrence)
+        {
+            return true;
+        }
+        let Some((date, _)) = occurrence.split_once('T') else {
+            return false;
+        };
+        self.last_occurrences
+            .get(&format!("{rule_id}:{date}"))
+            .is_some_and(|v| v == date)
+    }
+
+    pub fn record_scheduled_occurrence(&mut self, rule_id: &str, occurrence: String) {
+        // Retire only recognized legacy entries for this exact ID. A daily
+        // task now overwrites one checkpoint instead of growing the file.
+        let prefix = format!("{rule_id}:");
+        self.last_occurrences.retain(|key, value| {
+            !key.strip_prefix(&prefix)
+                .is_some_and(|date| valid_date(date) && date == value)
+        });
+        self.last_occurrences.insert(rule_id.into(), occurrence);
+    }
+}
+
 pub fn load_runtime_state(path: &Path) -> (RuntimeState, Option<String>) {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str(&text) {
@@ -540,6 +639,26 @@ pub fn save_runtime_state(path: &Path, state: &RuntimeState) -> std::io::Result<
 mod tests {
     use super::*;
 
+    #[test]
+    fn occurrence_checkpoints_accept_both_formats_and_remain_bounded() {
+        let mut state: RuntimeState = serde_json::from_str(
+            r#"{"last_occurrences":{
+            "go":"2026-09-13T12:00", "rust:2026-09-13":"2026-09-13",
+            "other:2026-09-13":"2026-09-13"
+        }}"#,
+        )
+        .unwrap();
+        assert!(state.has_scheduled_occurrence("go", "2026-09-13T12:00"));
+        assert!(!state.has_scheduled_occurrence("go", "2026-09-13T13:00"));
+        assert!(state.has_scheduled_occurrence("rust", "2026-09-13T12:00"));
+        for day in 14..=30 {
+            state.record_scheduled_occurrence("rust", format!("2026-09-{day}T12:00"));
+            assert_eq!(state.last_occurrences.len(), 3);
+        }
+        assert!(state.has_scheduled_occurrence("rust", "2026-09-30T12:00"));
+        assert!(state.last_occurrences.contains_key("other:2026-09-13"));
+    }
+
     fn rule(id: &str, action: &str, trigger: &str) -> Rule {
         Rule {
             id: id.into(),
@@ -558,6 +677,53 @@ mod tests {
             warning_seconds: MIN_WARNING_SECONDS,
             blocked_policy: String::new(),
             max_wait_minutes: 0,
+        }
+    }
+
+    #[test]
+    fn state_aggregation_is_order_independent_and_removes_expired_effects() {
+        let mut a = rule("a", ACTION_STAY_AWAKE, TRIGGER_PROCESS_RUNNING);
+        a.keep_screen_on = true;
+        let b = rule("b", ACTION_STAY_AWAKE, TRIGGER_PROCESS_RUNNING);
+        let mut c = rule("c", ACTION_ENABLE_IDLE, TRIGGER_PROCESS_RUNNING);
+        c.idle_minutes = 90;
+        let mut d = c.clone();
+        d.idle_minutes = 60;
+        assert_eq!(
+            aggregate_state([&a, &b, &c, &d]),
+            aggregate_state([&d, &c, &b, &a])
+        );
+        assert_eq!(aggregate_state([&c, &d]).idle_minutes, 60);
+        assert!(aggregate_state([&b]).stay_awake);
+        assert!(!aggregate_state([&b]).keep_screen_on);
+        a.enabled = false;
+        assert_eq!(aggregate_state([&a]), EffectiveState::default());
+        assert_eq!(aggregate_state([]), EffectiveState::default());
+    }
+
+    #[test]
+    fn rules_document_roundtrip_and_clear_preserves_other_keys() {
+        #[derive(Deserialize)]
+        struct Stored {
+            automation_rules: Vec<Rule>,
+        }
+        let mut doc: toml_edit::DocumentMut = "# user note\ncustom = 42\n".parse().unwrap();
+        let mut first = rule("a", ACTION_SLEEP, TRIGGER_DAILY);
+        first.name = "中文 name".into();
+        first.time = "08:30".into();
+        first.processes.push(ProcessTarget {
+            kind: MATCH_PATH.into(),
+            executable: "app.exe".into(),
+            path: "C:\\Apps\\app.exe".into(),
+        });
+        let second = rule("b", ACTION_LOCK, TRIGGER_WEEKLY);
+        for rules in [vec![first.clone()], vec![first, second], vec![]] {
+            replace_rules(&mut doc, &rules).unwrap();
+            let text = doc.to_string();
+            let stored: Stored = toml_edit::de::from_str(&text).unwrap();
+            assert_eq!(stored.automation_rules, rules);
+            assert!(text.contains("# user note"));
+            assert_eq!(doc["custom"].as_integer(), Some(42));
         }
     }
 

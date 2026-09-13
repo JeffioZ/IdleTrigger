@@ -402,5 +402,6 @@
   "logic_all": "All processes match",
   "logic_none": "No process matches",
   "cli_status_tray_off": "Tray: not running",
-  "nosleep_battery_threshold_display": "Battery threshold (%)"
+  "nosleep_battery_threshold_display": "Battery threshold (%)",
+  "error_single_instance": "Could not check whether the app is already running. Startup was stopped: %s"
 }

@@ -12,9 +12,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, HMENU,
-    KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostQuitMessage, RegisterClassW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
+    KillTimer, LoadCursorW, LoadIconW, MoveWindow, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
@@ -281,7 +281,14 @@ unsafe extern "system" fn action_wnd_proc(
                 LRESULT(crate::theme::bg_brush().0 as isize)
             }
             WM_DESTROY => {
-                PostQuitMessage(0);
+                // A queued action can own the slot before this window shows
+                // it. Destroying an idle window must not release that slot.
+                if CURRENT.lock().unwrap().take().is_some() {
+                    ACTION_BUSY.store(false, Ordering::SeqCst);
+                }
+                WINDOW.store(0, Ordering::SeqCst);
+                TEXT.store(0, Ordering::SeqCst);
+                crate::ACTION_WARN_HWND.store(0, Ordering::SeqCst);
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),

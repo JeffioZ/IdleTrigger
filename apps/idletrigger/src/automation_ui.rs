@@ -787,6 +787,7 @@ pub fn show() {
     unsafe {
         ensure_created();
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
+        lower_surfaces(mgr);
         refresh_list();
         theme::retheme_children(mgr);
         present_control(HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _));
@@ -1032,13 +1033,14 @@ fn toggle_selected(mgr: HWND) {
     let Some(idx) = selected_index() else {
         return;
     };
-    let mut rules = crate::automation::RULES.lock().unwrap();
+    let mut rules = crate::automation::RULES.lock().unwrap().clone();
     if idx >= rules.len() {
         return;
     }
     rules[idx].enabled = !rules[idx].enabled;
-    drop(rules);
-    save_rules_to_config();
+    if let Err(err) = save_rules_to_config(rules) {
+        crate::warn_dialog("", &err);
+    }
     let _ = mgr;
 }
 
@@ -1057,12 +1059,14 @@ fn delete_selected(mgr: HWND) {
     if !confirm_dialog(mgr, &t_pub("automation_delete_title"), &body) {
         return;
     }
-    let mut rules = crate::automation::RULES.lock().unwrap();
+    let mut rules = crate::automation::RULES.lock().unwrap().clone();
     if idx < rules.len() {
         rules.remove(idx);
     }
-    drop(rules);
-    save_rules_to_config();
+    if let Err(err) = save_rules_to_config(rules) {
+        crate::warn_dialog("", &err);
+        return;
+    }
     crate::log_line(&format!("automation: rule {} deleted", rule.id));
 }
 
@@ -1376,20 +1380,11 @@ unsafe extern "system" fn time_edit_proc(
 
 // ===== Rules persistence ====================================================
 
-fn save_rules_to_config() {
-    let rules = crate::automation::RULES.lock().unwrap().clone();
-    let text = toml_edit::ser::to_string(&rules).unwrap_or_default();
-    if let Ok(item) = text.parse::<toml_edit::Item>() {
-        let mut doc = crate::CONFIG_DOC.lock().unwrap();
-        if let Some(doc) = doc.as_mut() {
-            doc["automation_rules"] = item;
-        }
-    }
-    crate::persist_config();
-    crate::automation::reload_rules();
+fn save_rules_to_config(rules: Vec<auto::Rule>) -> Result<(), String> {
+    crate::save_automation_rules(&rules)?;
     refresh_list();
+    Ok(())
 }
-
 // ===== Editor ===============================================================
 
 fn show_editor() {
@@ -1601,6 +1596,7 @@ fn create_editor() {
         mk_label(ED_DAYS_LBL, &t_pub("automation_days"), font);
         mk_label(ED_BLOCKED_LBL, &t_pub("automation_blocked_policy"), font);
         mk_label(ED_NAME_HINT, &t_pub("automation_name_hint"), font);
+        mk_label(ED_PROC_SUMMARY, "", font);
         mk_label(ED_NO_OPTIONS, &t_pub("automation_no_action_options"), font);
         mk_label(ED_VALIDATION, &t_pub("automation_runtime_note"), font);
 
@@ -1997,8 +1993,10 @@ fn save_rule(ed: HWND) {
 
     // Go saves PrepareRules' normalized output, not the raw candidate.
     let (normalized, _) = auto::prepare_rules(&candidate);
-    *crate::automation::RULES.lock().unwrap() = normalized;
-    save_rules_to_config();
+    if let Err(err) = save_rules_to_config(normalized) {
+        set_editor_error(ed, ED_SAVE, &err);
+        return;
+    }
     hide_editor();
 }
 
@@ -2053,6 +2051,7 @@ pub fn layout_editor() {
         if ed.is_invalid() {
             return;
         }
+        lower_surfaces(ed);
         let content_w = ED_W - 2 * ED_PAD;
         let column_w = (content_w - ED_GAP) / 2;
         let trigger = choice_value(ed, ED_TRIGGER);
@@ -2846,6 +2845,36 @@ fn present_control(control: HWND) {
     }
 }
 
+/// Child controls are inserted below existing siblings. Move cards behind
+/// content only after all children exist, not before creating the EDIT/list.
+unsafe fn lower_surfaces(parent: HWND) {
+    unsafe {
+        let ids = [
+            MGR_LIST_SURFACE,
+            PK_SEARCH_SURFACE,
+            PK_LIST_SURFACE,
+            PK_PREVIEW_SURFACE,
+        ];
+        for id in ids
+            .into_iter()
+            .chain(ED_LAYOUT_IDS.into_iter().filter_map(field_surface_of))
+        {
+            let surface = get_dlg_item(parent, id);
+            if !surface.is_invalid() {
+                let _ = SetWindowPos(
+                    surface,
+                    Some(HWND(1 as *mut _)),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+}
+
 // ===== Process picker =======================================================
 
 #[derive(Clone)]
@@ -2873,6 +2902,7 @@ fn show_picker(owner: HWND) {
             create_picker(owner);
         }
         let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
+        lower_surfaces(pk);
 
         // Seed the selection from the editor draft (Go Show Selected).
         *PK_SELECTED.lock().unwrap() = EDIT_PROCS.lock().unwrap().clone();
@@ -3175,6 +3205,7 @@ fn create_picker(owner: HWND) {
         picker_create_columns(list);
         apply_list_theme(list);
         apply_state_images(list);
+        crate::list_style::install(list);
 
         // Loading overlay inside the list card (Go idEmpty, hidden until the
         // list turns empty).
@@ -3355,6 +3386,8 @@ unsafe fn picker_create_columns(list: HWND) {
 
 unsafe fn apply_list_theme(list: HWND) {
     unsafe {
+        // Use the same native style on first creation and subsequent flips.
+        theme::apply_control_theme(list);
         let p = theme::palette();
         let _ = SendMessageW(
             list,
@@ -3374,10 +3407,11 @@ unsafe fn apply_list_theme(list: HWND) {
             Some(WPARAM(0)),
             Some(LPARAM(p.surface as isize)),
         );
-        // The embedded header follows the window dark mode.
+        // Header colors are custom-drawn by list_style; native theming still
+        // supplies interaction state. DWM title-bar attributes do not color it.
         let header = SendMessageW(list, LVM_GETHEADER, Some(WPARAM(0)), Some(LPARAM(0))).0;
         if header != 0 {
-            theme::apply_to_window(HWND(header as *mut _));
+            theme::apply_control_theme(HWND(header as *mut _));
         }
     }
 }
@@ -3452,12 +3486,17 @@ unsafe fn apply_state_images(list: HWND) {
             let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
             let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(list), hdc);
         }
-        let _ = SendMessageW(
+        let old = SendMessageW(
             list,
             LVM_SETIMAGELIST,
             Some(WPARAM(LVSIL_STATE)),
             Some(LPARAM(images.0 as isize)),
         );
+        if old.0 != 0 {
+            let _ = windows::Win32::UI::Controls::ImageList_Destroy(Some(
+                windows::Win32::UI::Controls::HIMAGELIST(old.0),
+            ));
+        }
     }
 }
 
@@ -3783,7 +3822,7 @@ unsafe fn capture_selection() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|t| t.kind == "path")
+            .filter(|t| !visible.iter().any(|item| item.target.key() == t.key()))
             .cloned()
             .collect();
         for (index, item) in visible.iter().enumerate() {
@@ -4290,6 +4329,17 @@ unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
 
 // ===== Devtools + theme hooks ===============================================
 
+pub fn refresh_theme() {
+    let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
+    if !list.is_invalid() && unsafe { IsWindow(Some(list)) }.as_bool() {
+        unsafe {
+            apply_list_theme(list);
+            apply_state_images(list);
+        }
+        present_control(list);
+    }
+}
+
 /// Devtools capture support: open the editor in new-rule mode.
 #[cfg(feature = "devtools")]
 pub fn devtools_show_editor() {
@@ -4381,4 +4431,65 @@ pub fn theme_hwnds() -> [HWND; 3] {
         HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
         HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _),
     ]
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    #[test]
+    fn background_is_lowered_after_content_children_are_created() {
+        unsafe {
+            let parent = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let surface = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_CHILD,
+                0,
+                0,
+                100,
+                100,
+                Some(parent),
+                Some(HMENU(MGR_LIST_SURFACE as *mut _)),
+                None,
+                None,
+            )
+            .unwrap();
+            let list = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("LISTBOX"),
+                windows::core::w!(""),
+                WS_CHILD,
+                2,
+                2,
+                96,
+                96,
+                Some(parent),
+                Some(HMENU(MGR_LIST as *mut _)),
+                None,
+                None,
+            )
+            .unwrap();
+            use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GW_CHILD, GetWindow};
+            // Establish the native creation behavior that caused the blank UI.
+            assert_eq!(GetWindow(parent, GW_CHILD).unwrap(), surface);
+            lower_surfaces(parent);
+            assert_eq!(GetWindow(parent, GW_CHILD).unwrap(), list);
+            DestroyWindow(parent).unwrap();
+        }
+    }
 }

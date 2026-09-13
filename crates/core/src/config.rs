@@ -83,9 +83,9 @@ impl Config {
         ) {
             self.idle_action = "lock".into();
         }
-        self.idle_timeout_minutes = self.idle_timeout_minutes.clamp(1, 24 * 60);
-        self.idle_warning_seconds = self.idle_warning_seconds.clamp(0, 600);
-        self.nosleep_battery_threshold = self.nosleep_battery_threshold.clamp(1, 99);
+        self.idle_timeout_minutes = self.idle_timeout_minutes.clamp(1, 7 * 24 * 60);
+        self.idle_warning_seconds = self.idle_warning_seconds.clamp(0, 3600);
+        self.nosleep_battery_threshold = self.nosleep_battery_threshold.clamp(0, 100);
         if !matches!(self.theme_mode.as_str(), "fixed" | "sunrise") {
             self.theme_mode = "sunrise".into();
         }
@@ -153,17 +153,17 @@ fn read_config(document: &toml_edit::DocumentMut, defaults: Config) -> Config {
         keep_screen_on: as_bool("keep_screen_on").unwrap_or(defaults.keep_screen_on),
         nosleep_on_battery: as_bool("nosleep_on_battery").unwrap_or(defaults.nosleep_on_battery),
         nosleep_battery_threshold: as_int("nosleep_battery_threshold")
-            .map(|v| v as i32)
+            .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.nosleep_battery_threshold),
         idle_enabled: as_bool("idle_enabled").unwrap_or(defaults.idle_enabled),
         idle_timeout_minutes: as_int("idle_timeout_minutes")
-            .map(|v| v as i32)
+            .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.idle_timeout_minutes),
         idle_action: as_str("idle_action")
             .unwrap_or(&defaults.idle_action)
             .to_string(),
         idle_warning_seconds: as_int("idle_warning_seconds")
-            .map(|v| v as i32)
+            .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.idle_warning_seconds),
         idle_enhanced_monitor: as_bool("idle_enhanced_monitor")
             .unwrap_or(defaults.idle_enhanced_monitor),
@@ -204,28 +204,32 @@ pub fn save(
     document: &mut toml_edit::DocumentMut,
     config: &Config,
 ) -> std::io::Result<()> {
-    let set_bool = |doc: &mut toml_edit::DocumentMut, key: &str, value: bool| {
-        if let Some(item) = doc.get_mut(key) {
-            *item = toml_edit::Item::Value(toml_edit::Value::from(value));
-        } else {
-            doc[key] = toml_edit::value(value);
+    let mut candidate = document.clone();
+    save_candidate(path, &mut candidate, config)?;
+    *document = candidate;
+    Ok(())
+}
+
+fn save_candidate(
+    path: &Path,
+    document: &mut toml_edit::DocumentMut,
+    config: &Config,
+) -> std::io::Result<()> {
+    let set_value = |doc: &mut toml_edit::DocumentMut, key: &str, mut value: toml_edit::Value| {
+        if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
         }
+        doc[key] = toml_edit::Item::Value(value);
+    };
+    let set_bool = |doc: &mut toml_edit::DocumentMut, key: &str, value: bool| {
+        set_value(doc, key, value.into())
     };
     let set_int = |doc: &mut toml_edit::DocumentMut, key: &str, value: i32| {
-        if let Some(item) = doc.get_mut(key) {
-            *item = toml_edit::Item::Value(toml_edit::Value::from(i64::from(value)));
-        } else {
-            doc[key] = toml_edit::value(i64::from(value));
-        }
+        set_value(doc, key, i64::from(value).into())
     };
     let set_str = |doc: &mut toml_edit::DocumentMut, key: &str, value: &str| {
-        if let Some(item) = doc.get_mut(key) {
-            *item = toml_edit::Item::Value(toml_edit::Value::from(value));
-        } else {
-            doc[key] = toml_edit::value(value);
-        }
+        set_value(doc, key, value.into())
     };
-
     set_bool(document, "logging_enabled", config.logging_enabled);
     set_bool(document, "nosleep_enabled", config.nosleep_enabled);
     set_bool(document, "keep_screen_on", config.keep_screen_on);
@@ -314,4 +318,61 @@ pub fn save(
     std::fs::write(&tmp, document.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    #[test]
+    fn save_load_preserves_comments_and_ui_limits() {
+        let path = std::env::temp_dir().join(format!(
+            "idletrigger-roundtrip-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut doc: toml_edit::DocumentMut =
+            "# user note\nnosleep_enabled = false # inline note\ncustom = 42\n"
+                .parse()
+                .unwrap();
+        let config = Config {
+            nosleep_enabled: true,
+            idle_timeout_minutes: 10080,
+            idle_warning_seconds: 3600,
+            nosleep_battery_threshold: 0,
+            ..Config::default()
+        };
+        save(&path, &mut doc, &config).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(text.contains("nosleep_enabled = true # inline note"));
+        assert!(text.contains("# user note"));
+        assert_eq!(loaded.document["custom"].as_integer(), Some(42));
+        assert_eq!(loaded.config.idle_timeout_minutes, 10080);
+        assert_eq!(loaded.config.idle_warning_seconds, 3600);
+        assert_eq!(loaded.config.nosleep_battery_threshold, 0);
+    }
+    #[test]
+    fn failed_save_does_not_publish_candidate_document() {
+        let mut doc: toml_edit::DocumentMut =
+            "nosleep_enabled = false # preserved\n".parse().unwrap();
+        let original = doc.to_string();
+        let config = Config {
+            nosleep_enabled: true,
+            ..Config::default()
+        };
+        let missing = std::env::temp_dir().join(format!(
+            "idletrigger-no-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(save(&missing.join("config.toml"), &mut doc, &config).is_err());
+        assert_eq!(doc.to_string(), original);
+    }
 }

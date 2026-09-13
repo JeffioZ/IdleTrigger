@@ -334,6 +334,7 @@ pub fn apply_to_all() {
             retheme_children(hwnd);
         }
     }
+    crate::automation_ui::refresh_theme();
 }
 
 /// Go nativeform.ApplyControl parity: picks the visual-style class so

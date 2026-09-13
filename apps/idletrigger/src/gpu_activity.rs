@@ -1,113 +1,10 @@
-//! GPU activity detection for theme-switch pause — Go `gpu_activity.go`
-//! parity. Uses PDH with the English counter path `\GPU Engine(*)\Utilization
-//! Percentage` to measure the foreground process's 3D+graphics engine
-//! utilization. Two samples at 500ms; both ≥15% = sustained activity
-//! (windowed games pause theme switching without being fullscreen).
-
+//! Foreground GPU activity, sampled through the SDK PDH layout.
 use std::time::Duration;
-
+use windows::Win32::System::Performance::*;
 use windows::core::PCWSTR;
 
-// PDH raw FFI: the windows crate has no PDH bindings.
-#[link(name = "pdh")]
-unsafe extern "system" {
-    fn PdhOpenQueryW(
-        szdatasource: PCWSTR,
-        dwuserdata: *mut core::ffi::c_void,
-        phquery: *mut isize,
-    ) -> i32;
-    fn PdhAddEnglishCounterW(
-        hquery: isize,
-        szfullcounterpath: PCWSTR,
-        dwuserdata: *mut core::ffi::c_void,
-        phcounter: *mut isize,
-    ) -> i32;
-    fn PdhCollectQueryData(hquery: isize) -> i32;
-    fn PdhGetFormattedCounterArrayW(
-        hcounter: isize,
-        dwwtype: u32,
-        lpdwbuffersize: *mut u32,
-        lpdwitemcount: *mut u32,
-        itembuffer: *mut u8,
-    ) -> i32;
-    fn PdhCloseQuery(hquery: isize) -> i32;
-}
-
-const PDH_FMT_DOUBLE: u32 = 0x00000200;
-const ERROR_SUCCESS: i32 = 0;
-const PDH_MORE_DATA: i32 = 0x800007D2u32 as i32;
 const COUNTER_PATH: &str = "\\GPU Engine(*)\\Utilization Percentage";
-const SUSTAINED_THRESHOLD: f64 = 15.0;
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
-const SAMPLE_COUNT: usize = 2;
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct PdhFmtCounterValueDouble {
-    csize: u32,
-    union: f64,
-    cstatus: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct PdhFmtCounterItemW {
-    szname: *mut u16,
-    fmtvalue: PdhFmtCounterValueDouble,
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
-
-/// True when the current foreground process shows sustained GPU activity
-/// (windowed games/apps). Call from a background thread only — this blocks
-/// for ~1s (2 × 500ms samples).
-pub fn foreground_gpu_active() -> bool {
-    let Ok(foreground_pid) = get_foreground_pid() else {
-        return false;
-    };
-    let path = wide(COUNTER_PATH);
-
-    unsafe {
-        let mut query: isize = 0;
-        if PdhOpenQueryW(PCWSTR::null(), std::ptr::null_mut(), &mut query) != ERROR_SUCCESS {
-            return false;
-        }
-        let _guard = scopeguard_close(query);
-
-        let mut counter: isize = 0;
-        if PdhAddEnglishCounterW(
-            query,
-            PCWSTR(path.as_ptr()),
-            std::ptr::null_mut(),
-            &mut counter,
-        ) != ERROR_SUCCESS
-        {
-            return false;
-        }
-
-        // Collect 2 samples with 500ms gap.
-        let mut values = [0f64; SAMPLE_COUNT];
-        for (i, slot) in values.iter_mut().enumerate() {
-            if i > 0 {
-                std::thread::sleep(SAMPLE_INTERVAL);
-            }
-            if PdhCollectQueryData(query) != ERROR_SUCCESS {
-                return false;
-            }
-            // Re-check foreground between samples (Go re-checks PID each sample).
-            if get_foreground_pid().is_ok_and(|pid| pid != foreground_pid) {
-                return false;
-            }
-            *slot = counter_utilization_for_pid(counter, foreground_pid);
-        }
-
-        values.iter().all(|v| *v >= SUSTAINED_THRESHOLD)
-    }
-}
-
-struct QueryGuard(isize);
+struct QueryGuard(PDH_HQUERY);
 impl Drop for QueryGuard {
     fn drop(&mut self) {
         unsafe {
@@ -116,70 +13,96 @@ impl Drop for QueryGuard {
     }
 }
 
-fn scopeguard_close(query: isize) -> QueryGuard {
-    QueryGuard(query)
-}
-
-/// Sums engtype_3D + engtype_Graphics utilization for the given PID.
-unsafe fn counter_utilization_for_pid(counter: isize, pid: u32) -> f64 {
+pub fn foreground_gpu_active() -> bool {
+    let Ok(pid) = get_foreground_pid() else {
+        return false;
+    };
+    let path: Vec<u16> = COUNTER_PATH.encode_utf16().chain([0]).collect();
     unsafe {
-        // First call to get buffer size.
-        let mut buf_size: u32 = 0;
-        let mut item_count: u32 = 0;
-        let hr = PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buf_size,
-            &mut item_count,
-            std::ptr::null_mut(),
-        );
-        if hr != PDH_MORE_DATA || buf_size == 0 {
-            return 0.0;
+        let mut query = PDH_HQUERY::default();
+        if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
+            return false;
         }
-        let mut buffer = vec![0u8; buf_size as usize];
-        let hr = PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buf_size,
-            &mut item_count,
-            buffer.as_mut_ptr(),
-        );
-        if hr != ERROR_SUCCESS || item_count == 0 {
-            return 0.0;
+        let _guard = QueryGuard(query);
+        let mut counter = PDH_HCOUNTER::default();
+        if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut counter) != 0 {
+            return false;
         }
-
-        let item_size = std::mem::size_of::<PdhFmtCounterItemW>();
-        let mut total = 0f64;
-        for i in 0..item_count as usize {
-            let offset = i * item_size;
-            if offset + item_size > buffer.len() {
-                break;
+        // Rate counters require a baseline before either measured interval.
+        if PdhCollectQueryData(query) != 0 {
+            return false;
+        }
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(500));
+            if get_foreground_pid() != Ok(pid) || PdhCollectQueryData(query) != 0 {
+                return false;
             }
-            let item = &*(buffer.as_ptr().add(offset) as *const PdhFmtCounterItemW);
-            if item.szname.is_null() {
-                continue;
-            }
-            // Instance name format: "pid_X;type_..." — check for pid and engine type.
-            let name = read_wide(item.szname);
-            if !name.contains(&format!("pid_{pid}")) {
-                continue;
-            }
-            if name.contains("engtype_3D") || name.contains("engtype_Graphics") {
-                total += item.fmtvalue.union;
+            if utilization(counter, pid) < 15.0 {
+                return false;
             }
         }
-        total
+        true
     }
 }
 
-unsafe fn read_wide(ptr: *mut u16) -> String {
+fn matches_engine(name: &str, pid: u32) -> bool {
+    name.starts_with(&format!("pid_{pid}_"))
+        && (name.ends_with("engtype_3D") || name.ends_with("engtype_Graphics"))
+}
+
+unsafe fn utilization(counter: PDH_HCOUNTER, pid: u32) -> f64 {
     unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
+        let mut size = 0;
+        let mut count = 0;
+        if PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None)
+            != PDH_MORE_DATA
+            || size == 0
+        {
+            return 0.0;
         }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        String::from_utf16_lossy(slice)
+        // Typed storage supplies SDK alignment and includes space for names.
+        let stride = size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        let mut storage =
+            vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); (size as usize).div_ceil(stride)];
+        if PdhGetFormattedCounterArrayW(
+            counter,
+            PDH_FMT_DOUBLE,
+            &mut size,
+            &mut count,
+            Some(storage.as_mut_ptr()),
+        ) != 0
+            || count as usize > storage.len()
+            || size as usize > storage.len() * stride
+            || (count as usize) * stride > size as usize
+        {
+            return 0.0;
+        }
+        let start = storage.as_ptr() as usize;
+        let end = start + size as usize;
+        let mut total = 0.0;
+        for item in storage.iter().take(count as usize) {
+            if !matches!(
+                item.FmtValue.CStatus,
+                PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA
+            ) {
+                continue;
+            }
+            let addr = item.szName.0 as usize;
+            if addr < start || addr >= end || !addr.is_multiple_of(align_of::<u16>()) {
+                continue;
+            }
+            let chars = std::slice::from_raw_parts(item.szName.0, (end - addr) / 2);
+            let Some(len) = chars.iter().position(|c| *c == 0) else {
+                continue;
+            };
+            if matches_engine(&String::from_utf16_lossy(&chars[..len]), pid) {
+                let value = item.FmtValue.Anonymous.doubleValue;
+                if value.is_finite() && value >= 0.0 {
+                    total += value;
+                }
+            }
+        }
+        total
     }
 }
 
@@ -198,5 +121,25 @@ fn get_foreground_pid() -> Result<u32, ()> {
             return Err(());
         }
         Ok(pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn engine_matches_whole_pid_and_supported_engine() {
+        assert!(matches_engine(
+            "pid_12_luid_0x0_phys_0_eng_1_engtype_3D",
+            12
+        ));
+        assert!(!matches_engine(
+            "pid_123_luid_0x0_phys_0_eng_1_engtype_3D",
+            12
+        ));
+        assert!(!matches_engine(
+            "pid_12_luid_0x0_phys_0_eng_1_engtype_Copy",
+            12
+        ));
     }
 }

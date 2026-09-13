@@ -7,12 +7,18 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 pub static FORCE_LOG: AtomicBool = AtomicBool::new(false);
+pub static ENABLED: AtomicBool = AtomicBool::new(false);
 pub static INPUT_TRACE: AtomicBool = AtomicBool::new(false);
 pub static IDLE_MONITOR_TEST: AtomicBool = AtomicBool::new(false);
 pub static IDLE_TEST_SECONDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub static WARNING_PREVIEW: AtomicBool = AtomicBool::new(false);
 pub static CAPTURE_PANEL: AtomicBool = AtomicBool::new(false);
 static ACTION_WARNING_PREVIEW: AtomicBool = AtomicBool::new(false);
+
+/// Preview sessions cannot dispatch any real system action, including Run now.
+pub fn preview_only() -> bool {
+    WARNING_PREVIEW.load(Ordering::SeqCst) || ACTION_WARNING_PREVIEW.load(Ordering::SeqCst)
+}
 static THEME_OVERRIDE: AtomicI32 = AtomicI32::new(0); // 0 none, 1 dark, 2 light
 
 /// Parses IDLETRIGGER_DEVTOOLS and its derived variables. Returns false
@@ -25,6 +31,7 @@ pub fn load() -> bool {
     if master != "1" {
         return false;
     }
+    ENABLED.store(true, Ordering::SeqCst);
     let mut active = false;
     if std::env::var("IDLETRIGGER_DEVTOOLS_LOG").as_deref() == Ok("1") {
         FORCE_LOG.store(true, Ordering::SeqCst);
@@ -113,7 +120,7 @@ pub fn apply_idle_test(config: &mut idletrigger_core::config::Config) {
             ((IDLE_TEST_SECONDS.load(Ordering::SeqCst) / 60) as i32).max(1);
         config.idle_action = "lock".into();
         config.idle_warning_seconds = 5;
-        config.nosleep_enabled = false; // mutual exclusion
+        // Keep the user's Stay Awake choice: normal runtime mutual exclusion wins.
     }
     if FORCE_LOG.load(Ordering::SeqCst) {
         config.logging_enabled = true;
@@ -292,6 +299,30 @@ pub fn handle_capture_timer() -> bool {
                 out_dir.join("IdleTrigger-picker-capture.bmp"),
                 "process picker",
             );
+            if std::env::var("IDLETRIGGER_DEVTOOLS_VERIFY_LIST_THEME").as_deref() == Ok("1") {
+                let original = crate::theme::is_dark();
+                capture_header_states(picker, &out_dir);
+                for (suffix, dark) in [("flipped", !original), ("restored", original)] {
+                    crate::theme::force_dark(dark);
+                    crate::theme::apply_to_all();
+                    unsafe {
+                        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+                            Some(picker),
+                            None,
+                            None,
+                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN
+                                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+                        );
+                    }
+                    shoot(
+                        picker,
+                        out_dir.join(format!("IdleTrigger-picker-{suffix}.bmp")),
+                        "picker theme transition",
+                    );
+                    capture_header_states(picker, &out_dir);
+                }
+            }
         }
         _ => {
             crate::log_line("capture sequence complete");
@@ -308,4 +339,61 @@ pub fn handle_capture_timer() -> bool {
         crate::log_line("capture walk frozen for manual interaction");
     }
     true
+}
+
+/// Exercise the real Header message path and capture each column's states.
+/// Scoped to the opt-in capture session; no synthetic desktop input is sent.
+fn capture_header_states(picker: windows::Win32::Foundation::HWND, directory: &std::path::Path) {
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow};
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+    use windows::Win32::UI::Controls::{HDM_GETITEMCOUNT, HDM_GETITEMRECT, LVM_GETHEADER};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let Ok(list) = FindWindowExW(Some(picker), None, windows::core::w!("SysListView32"), None)
+        else {
+            return;
+        };
+        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as *mut _);
+        let count = SendMessageW(header, HDM_GETITEMCOUNT, None, None).0;
+        let theme = if crate::theme::is_dark() {
+            "dark"
+        } else {
+            "light"
+        };
+        for column in 0..count.max(0) as usize {
+            let mut rect = RECT::default();
+            if SendMessageW(
+                header,
+                HDM_GETITEMRECT,
+                Some(WPARAM(column)),
+                Some(LPARAM(&mut rect as *mut _ as isize)),
+            )
+            .0 == 0
+            {
+                continue;
+            }
+            let point = LPARAM(
+                (((rect.top + rect.bottom) / 2) << 16 | ((rect.left + rect.right) / 2)) as isize,
+            );
+            for (name, msg) in [
+                ("hover", WM_MOUSEMOVE),
+                ("pressed", WM_LBUTTONDOWN),
+                ("released", WM_LBUTTONUP),
+                ("normal", WM_MOUSELEAVE),
+            ] {
+                SendMessageW(
+                    header,
+                    msg,
+                    Some(WPARAM(usize::from(msg == WM_LBUTTONDOWN))),
+                    Some(point),
+                );
+                let _ = RedrawWindow(Some(header), None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+                let path = directory.join(format!("header-{theme}-{column}-{name}.bmp"));
+                if let Err(err) = crate::capture_client_bmp_pub(header, &path) {
+                    crate::log_line(&format!("header state capture failed: {err}"));
+                }
+            }
+        }
+    }
 }
