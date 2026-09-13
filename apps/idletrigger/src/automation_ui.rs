@@ -2073,14 +2073,7 @@ pub fn layout_editor() {
         let trigger = choice_value(ed, ED_TRIGGER);
         let action = choice_value(ed, ED_ACTION);
 
-        // Everything starts hidden; each section places what it needs.
-        for id in ED_LAYOUT_IDS {
-            let _ = ShowWindow(get_dlg_item(ed, id), SW_HIDE);
-            let surface = field_surface_of(id);
-            if let Some(surface) = surface {
-                let _ = ShowWindow(get_dlg_item(ed, surface), SW_HIDE);
-            }
-        }
+        let mut visible = Vec::new();
 
         let mut place = |id: usize, x: i32, y: i32, w: i32, h: i32| {
             let control = get_dlg_item(ed, id);
@@ -2098,9 +2091,9 @@ pub fn layout_editor() {
                         s(y),
                         s(w),
                         s(h),
-                        SWP_NOZORDER | SWP_NOACTIVATE,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                     );
-                    let _ = ShowWindow(surface, SW_SHOW);
+                    visible.push(surface);
                     let inner_h = (h - 4).min(20);
                     let _ = SetWindowPos(
                         control,
@@ -2109,7 +2102,7 @@ pub fn layout_editor() {
                         s(y + (h - inner_h) / 2),
                         s(w - 4),
                         s(inner_h),
-                        SWP_NOZORDER | SWP_NOACTIVATE,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                     );
                 }
             } else {
@@ -2120,10 +2113,10 @@ pub fn layout_editor() {
                     s(y),
                     s(w),
                     s(h),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                 );
             }
-            let _ = ShowWindow(control, SW_SHOW);
+            visible.push(control);
         };
 
         let label_row2 = |place: &mut dyn FnMut(usize, i32, i32, i32, i32),
@@ -2362,29 +2355,24 @@ pub fn layout_editor() {
             wr.top,
             frame.right - frame.left,
             frame.bottom - frame.top,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
         );
 
-        crate::viewport::fit(ed);
-        // Native EDIT fields can keep a validated region after the hide/
-        // place/show cycle; present each visible one (Go PresentFrame over
-        // frameControls at the end of a layout pass).
+        // Apply only final visibility; existing fields never hide and reappear.
         for id in ED_LAYOUT_IDS {
             let control = get_dlg_item(ed, id);
-            if control.is_invalid() || !IsWindowVisible(control).as_bool() {
-                continue;
-            }
-            present_control(control);
+            crate::nativeform::set_visible_deferred(control, visible.contains(&control));
             if let Some(surface_id) = field_surface_of(id) {
                 let surface = get_dlg_item(ed, surface_id);
-                if !surface.is_invalid() && IsWindowVisible(surface).as_bool() {
-                    present_control(surface);
-                }
+                crate::nativeform::set_visible_deferred(surface, visible.contains(&surface));
             }
+        }
+        crate::viewport::fit(ed);
+        if IsWindowVisible(ed).as_bool() {
+            crate::present_layout(ed);
         }
     }
 }
-
 /// Weekday row: label + 工作日/每天 quick buttons, then 7 equal buttons
 /// (Go layoutWeekdays).
 fn layout_weekdays(
@@ -2856,14 +2844,17 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
 /// and never composite their text to the screen.
 fn present_control(control: HWND) {
     use windows::Win32::Graphics::Gdi::{
-        RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS, RedrawWindow,
+        RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, REDRAW_WINDOW_FLAGS,
+        RedrawWindow,
     };
     unsafe {
         let _ = RedrawWindow(
             Some(control),
             None,
             None,
-            REDRAW_WINDOW_FLAGS(RDW_INVALIDATE.0 | RDW_ERASE.0 | RDW_UPDATENOW.0 | RDW_FRAME.0),
+            REDRAW_WINDOW_FLAGS(
+                RDW_INVALIDATE.0 | RDW_ERASE.0 | RDW_UPDATENOW.0 | RDW_FRAME.0 | RDW_ALLCHILDREN.0,
+            ),
         );
     }
 }
@@ -4849,6 +4840,68 @@ pub fn refresh_language() {
 #[cfg(test)]
 mod surface_tests {
     use super::*;
+    #[test]
+    fn editor_layout_keeps_common_fields_visible_and_preserves_drafts() {
+        use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+        unsafe extern "system" fn track(
+            hwnd: HWND,
+            msg: u32,
+            wp: WPARAM,
+            lp: LPARAM,
+            _: usize,
+            data: usize,
+        ) -> LRESULT {
+            unsafe {
+                if msg == WM_WINDOWPOSCHANGING {
+                    let position = &*(lp.0 as *const WINDOWPOS);
+                    if position.flags.contains(SWP_HIDEWINDOW) {
+                        let count = &*(data as *const std::cell::Cell<u32>);
+                        count.set(count.get() + 1);
+                    }
+                }
+                DefSubclassProc(hwnd, msg, wp, lp)
+            }
+        }
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let previous = crate::CONFIG.lock().unwrap().replace(Default::default());
+        create_editor();
+        populate_editor();
+        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+        let name = get_dlg_item(ed, ED_NAME);
+        set_text(name, "unsaved draft");
+        let hidden = std::cell::Cell::new(0u32);
+        unsafe {
+            assert!(
+                SetWindowSubclass(name, Some(track), 992, &hidden as *const _ as usize).as_bool()
+            );
+        }
+        for (action, trigger) in [
+            (auto::ACTION_STAY_AWAKE, auto::TRIGGER_TIME_WINDOW),
+            (auto::ACTION_STAY_AWAKE, auto::TRIGGER_PROCESS_RUNNING),
+            (auto::ACTION_LOCK, auto::TRIGGER_ONCE),
+            (auto::ACTION_LOCK, auto::TRIGGER_WEEKLY),
+            (auto::ACTION_LOCK, auto::TRIGGER_PROCESS_EXITED),
+        ] {
+            choice_select(ed, ED_ACTION, action);
+            fill_trigger_choice(ed, action, trigger);
+            layout_editor();
+            assert_eq!(crate::window_text(name), "unsaved draft");
+            assert_ne!(
+                unsafe { GetWindowLongW(name, GWL_STYLE) as u32 & WS_VISIBLE.0 },
+                0
+            );
+        }
+        assert_eq!(
+            hidden.get(),
+            0,
+            "common fields must not hide between layouts"
+        );
+        unsafe {
+            let _ = RemoveWindowSubclass(name, Some(track), 992);
+            DestroyWindow(ed).unwrap();
+        }
+        *crate::CONFIG.lock().unwrap() = previous;
+    }
     #[test]
     fn background_is_lowered_after_content_children_are_created() {
         unsafe {

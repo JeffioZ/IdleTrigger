@@ -259,7 +259,7 @@ fn scheduled_dark() -> Option<bool> {
     }
 }
 
-/// Writes both Personalize values and notifies the shell.
+/// Writes and verifies both Personalize values.
 fn apply_windows_theme(dark: bool) -> Result<(), String> {
     unsafe {
         let key = wide(PERSONALIZE_KEY);
@@ -274,25 +274,92 @@ fn apply_windows_theme(dark: bool) -> Result<(), String> {
         if opened != ERROR_SUCCESS {
             return Err(format!("open Personalize: {}", opened.0));
         }
-        let value = (!dark) as u32; // light theme flag = !dark
-        let bytes = value.to_le_bytes();
-        let mut result = ERROR_SUCCESS;
-        for name in [BREED, APP_BREED] {
-            let name_w = wide(name);
-            // Personalize values are REG_DWORD (Go SetDWordValue) — writing
-            // any other type makes the system theme switch silently fail.
-            result = RegSetValueExW(hkey, PCWSTR(name_w.as_ptr()), None, REG_DWORD, Some(&bytes));
-            if result != ERROR_SUCCESS {
-                break;
+        let result = apply_preferences(
+            dark,
+            |name| {
+                let mut value = 0u32;
+                let mut kind = REG_DWORD;
+                let mut size = 4;
+                let status = windows::Win32::System::Registry::RegQueryValueExW(
+                    hkey,
+                    PCWSTR(wide(name).as_ptr()),
+                    None,
+                    Some(&mut kind),
+                    Some((&mut value as *mut u32).cast()),
+                    Some(&mut size),
+                );
+                if status == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+                    return Ok(None);
+                }
+                if status != ERROR_SUCCESS || kind != REG_DWORD || size != 4 || value > 1 {
+                    return Err(format!(
+                        "read Personalize {name}: invalid value or error {}",
+                        status.0
+                    ));
+                }
+                Ok(Some(value))
+            },
+            |name, value| {
+                let status = match value {
+                    Some(value) => RegSetValueExW(
+                        hkey,
+                        PCWSTR(wide(name).as_ptr()),
+                        None,
+                        REG_DWORD,
+                        Some(&value.to_le_bytes()),
+                    ),
+                    None => windows::Win32::System::Registry::RegDeleteValueW(
+                        hkey,
+                        PCWSTR(wide(name).as_ptr()),
+                    ),
+                };
+                if status == ERROR_SUCCESS
+                    || (value.is_none()
+                        && status == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND)
+                {
+                    Ok(())
+                } else {
+                    Err(format!("write Personalize {name}: {}", status.0))
+                }
+            },
+        );
+        let _ = RegCloseKey(hkey);
+        result
+    }
+}
+
+/// Restore attempted values if a write or read-back fails. Untouched values
+/// stay untouched, and missing values remain absent after rollback.
+fn apply_preferences(
+    dark: bool,
+    mut read: impl FnMut(&str) -> Result<Option<u32>, String>,
+    mut write: impl FnMut(&str, Option<u32>) -> Result<(), String>,
+) -> Result<(), String> {
+    let names = [BREED, APP_BREED];
+    let previous = [read(names[0])?, read(names[1])?];
+    let desired = Some(u32::from(!dark));
+    let mut attempted = 0;
+    let result = (|| {
+        for name in names {
+            attempted += 1;
+            write(name, desired)?;
+        }
+        for name in names {
+            if read(name)? != desired {
+                return Err(format!("verify Personalize {name}: value not retained"));
             }
         }
-        let _ = RegCloseKey(hkey);
-        // Notify running apps + the shell so they repaint.
-        if result != ERROR_SUCCESS {
-            return Err(format!("write Personalize: {}", result.0));
-        }
         Ok(())
+    })();
+    if let Err(mut error) = result {
+        for (name, value) in names.into_iter().zip(previous).take(attempted).rev() {
+            if let Err(rollback) = write(name, value) {
+                error.push_str(&format!("; rollback failed: {rollback}"));
+            }
+        }
+        return Err(error);
     }
+    Ok(())
 }
 
 fn notify_theme() {
@@ -512,6 +579,56 @@ pub fn finish_repair() {
 }
 #[cfg(test)]
 mod solar_tests {
+    #[test]
+    fn preference_first_write_failure_does_not_restore_untouched_value() {
+        use std::cell::RefCell;
+        let values = RefCell::new([Some(1), Some(1)]);
+        let mut writes = Vec::new();
+        let result = super::apply_preferences(
+            true,
+            |name| Ok(values.borrow()[usize::from(name == super::APP_BREED)]),
+            |name, value| {
+                writes.push(name.to_owned());
+                if writes.len() == 1 {
+                    // An external change to the untouched preference must survive.
+                    *values.borrow_mut() = [Some(0), Some(0)];
+                    return Err("injected failure".into());
+                }
+                values.borrow_mut()[usize::from(name == super::APP_BREED)] = value;
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "injected failure");
+        assert_eq!(writes, [super::BREED, super::BREED]);
+        assert_eq!(*values.borrow(), [Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn preference_transaction_restores_partial_writes_and_failed_verification() {
+        use std::cell::RefCell;
+        for fail_write in [true, false] {
+            let values = RefCell::new([Some(1), None]);
+            let calls = std::cell::Cell::new(0);
+            let index = |name: &str| usize::from(name == super::APP_BREED);
+            let result = super::apply_preferences(
+                true,
+                |name| Ok(values.borrow()[index(name)]),
+                |name, value| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        if fail_write {
+                            return Err("injected failure".into());
+                        }
+                        return Ok(()); // Simulate Windows not retaining the write.
+                    }
+                    values.borrow_mut()[index(name)] = value;
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(*values.borrow(), [Some(1), None]);
+        }
+    }
     use super::*;
     #[test]
     fn equinox_at_equator_has_about_twelve_hours_of_daylight() {

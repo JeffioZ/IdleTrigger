@@ -5,7 +5,13 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-static CACHE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+#[derive(Clone)]
+struct Location {
+    coordinates: (f64, f64),
+    label: String,
+}
+
+static CACHE: Mutex<Option<Location>> = Mutex::new(None);
 static LAST_SUCCESS: AtomicI64 = AtomicI64::new(0);
 static LAST_FAILURE: AtomicI64 = AtomicI64::new(0);
 static QUERYING: AtomicBool = AtomicBool::new(false);
@@ -25,21 +31,20 @@ fn now_secs() -> i64 {
 /// individual network phases, not the whole request. Background threads only.
 fn resolve() -> Option<(f64, f64)> {
     let now = now_secs();
-    if let Some(hit) = *CACHE.lock().unwrap()
-        && now - LAST_SUCCESS.load(Ordering::SeqCst) < SUCCESS_TTL_SECS
-    {
+    if let Some(hit) = cached() {
         return Some(hit);
     }
     if now - LAST_FAILURE.load(Ordering::SeqCst) < FAILURE_RETRY_SECS {
         return None;
     }
-    let Some((lat, lon)) = fetch_ipwho() else {
+    let Some(location) = fetch_ipwho() else {
         LAST_FAILURE.store(now, Ordering::SeqCst);
         return None;
     };
-    *CACHE.lock().unwrap() = Some((lat, lon));
+    let coordinates = location.coordinates;
+    *CACHE.lock().unwrap() = Some(location);
     LAST_SUCCESS.store(now, Ordering::SeqCst);
-    Some((lat, lon))
+    Some(coordinates)
 }
 
 /// Starts at most one lookup and returns immediately, including on the UI thread.
@@ -69,6 +74,7 @@ pub fn request() -> Option<(f64, f64)> {
         })
         .is_err()
     {
+        LAST_FAILURE.store(now_secs(), Ordering::SeqCst);
         QUERYING.store(false, Ordering::SeqCst);
     }
     None
@@ -76,15 +82,42 @@ pub fn request() -> Option<(f64, f64)> {
 
 /// Last resolved coordinates, when the cache is still fresh (settings status).
 pub fn cached() -> Option<(f64, f64)> {
+    cached_location().map(|location| location.coordinates)
+}
+
+pub fn cached_label() -> Option<String> {
+    cached_location().map(|location| location.label)
+}
+
+pub enum Status {
+    Resolved(String),
+    Querying,
+    Failed,
+    NotRequested,
+}
+
+pub fn status() -> Status {
+    if let Some(label) = cached_label() {
+        Status::Resolved(label)
+    } else if QUERYING.load(Ordering::SeqCst) {
+        Status::Querying
+    } else if LAST_FAILURE.load(Ordering::SeqCst) != 0 {
+        Status::Failed
+    } else {
+        Status::NotRequested
+    }
+}
+
+fn cached_location() -> Option<Location> {
     let now = now_secs();
     if now - LAST_SUCCESS.load(Ordering::SeqCst) < SUCCESS_TTL_SECS {
-        *CACHE.lock().unwrap()
+        CACHE.lock().unwrap().clone()
     } else {
         None
     }
 }
 
-fn fetch_ipwho() -> Option<(f64, f64)> {
+fn fetch_ipwho() -> Option<Location> {
     use windows::Win32::Networking::WinHttp::{
         URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
         WINHTTP_INTERNET_SCHEME_HTTPS, WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl,
@@ -223,8 +256,8 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
 
-/// Minimal JSON field extraction for `{"success":true,"latitude":x,"longitude":y}`.
-fn parse_ipwho(body: &str) -> Option<(f64, f64)> {
+/// Keep the display label alongside the coordinates used for solar calculations.
+fn parse_ipwho(body: &str) -> Option<Location> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     if !value.get("success")?.as_bool()? {
         return None;
@@ -234,5 +267,64 @@ fn parse_ipwho(body: &str) -> Option<(f64, f64)> {
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
         return None;
     }
-    Some((lat, lon))
+    let label = ["city", "region", "country"]
+        .iter()
+        .filter_map(|key| value.get(key)?.as_str())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Location {
+        coordinates: (lat, lon),
+        label: if label.is_empty() {
+            format!("{lat:.2}, {lon:.2}")
+        } else {
+            label
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_distinguishes_unrequested_inflight_failure_and_cached_success() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let previous = CACHE.lock().unwrap().take();
+        let success = LAST_SUCCESS.swap(0, Ordering::SeqCst);
+        let failure = LAST_FAILURE.swap(0, Ordering::SeqCst);
+        let querying = QUERYING.swap(false, Ordering::SeqCst);
+        assert!(matches!(status(), Status::NotRequested));
+        QUERYING.store(true, Ordering::SeqCst);
+        assert!(matches!(status(), Status::Querying));
+        assert!(request().is_none()); // No duplicate lookup while one is running.
+        QUERYING.store(false, Ordering::SeqCst);
+        LAST_FAILURE.store(now_secs(), Ordering::SeqCst);
+        assert!(matches!(status(), Status::Failed));
+        assert!(request().is_none()); // Preserve the failure retry interval.
+        *CACHE.lock().unwrap() = Some(Location {
+            coordinates: (22.28, 114.17),
+            label: "Hong Kong, China".into(),
+        });
+        LAST_SUCCESS.store(now_secs(), Ordering::SeqCst);
+        assert!(matches!(status(), Status::Resolved(label) if label == "Hong Kong, China"));
+        assert_eq!(request(), Some((22.28, 114.17)));
+        *CACHE.lock().unwrap() = previous;
+        LAST_SUCCESS.store(success, Ordering::SeqCst);
+        LAST_FAILURE.store(failure, Ordering::SeqCst);
+        QUERYING.store(querying, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn location_retains_coordinates_and_formats_available_place_names() {
+        let location = parse_ipwho(r#"{"success":true,"latitude":22.28,"longitude":114.17,"city":" Hong Kong ","region":" ","country":"China"}"#).unwrap();
+        assert_eq!(location.coordinates, (22.28, 114.17));
+        assert_eq!(location.label, "Hong Kong, China");
+        let location =
+            parse_ipwho(r#"{"success":true,"latitude":22.28,"longitude":114.17}"#).unwrap();
+        assert_eq!(location.label, "22.28, 114.17");
+        assert!(parse_ipwho(r#"{"success":false,"latitude":22,"longitude":114}"#).is_none());
+        assert!(parse_ipwho(r#"{"success":true,"latitude":91,"longitude":114}"#).is_none());
+    }
 }

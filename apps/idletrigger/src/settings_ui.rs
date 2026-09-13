@@ -136,7 +136,7 @@ fn get(parent: HWND, id: i32) -> HWND {
 fn set_text(parent: HWND, id: i32, text: &str) {
     unsafe {
         let target = get(parent, id);
-        if !target.is_invalid() {
+        if !target.is_invalid() && control_text(parent, id) != text {
             let _ = SetWindowTextW(target, PCWSTR(wide(text).as_ptr()));
         }
     }
@@ -207,11 +207,9 @@ pub fn show() {
         if hwnd.is_invalid() {
             return;
         }
+        request_location_preview(hwnd);
         let _ = EnableWindow(crate::hwnd(&crate::PANEL), false);
-        // Paint the full frame before showing so the theme never flashes
-        // (Go first-frame presenter parity).
-        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        crate::FirstFrameGate::begin(hwnd).reveal();
         let _ = SetForegroundWindow(hwnd);
     }
 }
@@ -1085,15 +1083,38 @@ fn populate(hwnd: HWND) {
 /// Go theme_location.go status line for the day/night page.
 fn location_status_text(ip_enabled: bool) -> String {
     if ip_enabled {
-        if let Some((lat, lon)) = crate::iplocate::cached() {
-            let label = format!("{lat:.2}, {lon:.2}");
-            return t_pub("settings_location_ip_resolved").replace("%s", &label);
-        }
-        return t_pub("settings_location_ip_pending")
-            .replace("%s", &t_pub(crate::theme_engine::location(false).2));
+        let key = match crate::iplocate::status() {
+            crate::iplocate::Status::Resolved(label) => {
+                return t_pub("settings_location_ip_resolved").replace("%s", &label);
+            }
+            crate::iplocate::Status::Querying => "settings_location_ip_pending",
+            crate::iplocate::Status::Failed => "settings_location_ip_failed",
+            crate::iplocate::Status::NotRequested => "settings_location_ip_not_requested",
+        };
+        return t_pub(key).replace("%s", &t_pub(crate::theme_engine::location(false).2));
     }
     t_pub("settings_location_auto_status")
         .replace("%s", &t_pub(crate::theme_engine::location(false).2))
+}
+
+/// Preview the selected source without saving the settings draft.
+fn request_location_preview(hwnd: HWND) {
+    if combo_sel(hwnd, ID_LOCATION_SOURCE) == 1 {
+        crate::iplocate::request();
+    }
+    refresh_location_status();
+}
+
+/// Refresh only the runtime label; never repopulate an open settings draft.
+pub fn refresh_location_status() {
+    let hwnd = current();
+    if !hwnd.is_invalid() {
+        set_text(
+            hwnd,
+            ID_THEME_LOCATION_STATUS,
+            &location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1),
+        );
+    }
 }
 
 /// Page membership — Go pageControlIDs().
@@ -1159,16 +1180,17 @@ fn page_ids(page: i32) -> &'static [i32] {
 /// Visibility + enable cascades — Go applyDependentStates().
 fn apply_dependent_states(hwnd: HWND) {
     unsafe {
+        let mut visibility = std::collections::BTreeMap::new();
+        let mut show = |id, visible| {
+            visibility.insert(id, visible);
+        };
         let page = PAGE.load(Ordering::SeqCst);
         for p in 0..4 {
             for id in page_ids(p) {
-                let _ = ShowWindow(get(hwnd, *id), if p == page { SW_SHOW } else { SW_HIDE });
+                show(*id, p == page);
                 // Edit surfaces hide/show together with their inner edit.
                 if *id >= ID_BATTERY_THRESH && *id <= ID_DARK_TIME {
-                    let _ = ShowWindow(
-                        get(hwnd, FIELD_SURFACE_BASE + *id),
-                        if p == page { SW_SHOW } else { SW_HIDE },
-                    );
+                    show(FIELD_SURFACE_BASE + *id, p == page);
                 }
             }
         }
@@ -1185,13 +1207,10 @@ fn apply_dependent_states(hwnd: HWND) {
                 ID_DARK_TIME_LBL,
                 ID_DARK_TIME,
             ] {
-                let _ = ShowWindow(get(hwnd, id), if sunrise { SW_HIDE } else { SW_SHOW });
+                show(id, !sunrise);
                 // Field surfaces hide together with their inner edits.
                 if id == ID_LIGHT_TIME || id == ID_DARK_TIME {
-                    let _ = ShowWindow(
-                        get(hwnd, FIELD_SURFACE_BASE + id),
-                        if sunrise { SW_HIDE } else { SW_SHOW },
-                    );
+                    show(FIELD_SURFACE_BASE + id, !sunrise);
                 }
             }
             for id in [
@@ -1200,8 +1219,11 @@ fn apply_dependent_states(hwnd: HWND) {
                 ID_THEME_LOCATION_STATUS,
                 ID_THEME_HINT,
             ] {
-                let _ = ShowWindow(get(hwnd, id), if sunrise { SW_SHOW } else { SW_HIDE });
+                show(id, sunrise);
             }
+        }
+        for (id, visible) in visibility {
+            crate::nativeform::set_visible_deferred(get(hwnd, id), visible);
         }
         let lock_keys = is_checked(hwnd, ID_LOCK_KEYS);
         for id in [
@@ -1218,6 +1240,9 @@ fn apply_dependent_states(hwnd: HWND) {
             if !control.is_invalid() {
                 let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, false);
             }
+        }
+        if IsWindowVisible(hwnd).as_bool() {
+            crate::present_layout(hwnd);
         }
     }
 }
@@ -1654,7 +1679,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                         LRESULT(0)
                     }
-                    CBN_SELCHANGE if idc == ID_THEME_MODE => {
+                    CBN_SELCHANGE if idc == ID_THEME_MODE || idc == ID_LOCATION_SOURCE => {
+                        request_location_preview(hwnd);
                         apply_dependent_states(hwnd);
                         LRESULT(0)
                     }
@@ -2148,6 +2174,24 @@ mod locale_tests {
         assert_eq!(control_text(window, ID_TITLE), "设置");
         assert_eq!(combo_sel(window, ID_LANGUAGE), 2);
         assert_eq!(*DRAFT_BASE.lock().unwrap(), baseline);
+        PAGE.store(1, Ordering::SeqCst);
+        crate::choice::select_index(get(window, ID_THEME_MODE), 1);
+        crate::choice::select_index(get(window, ID_LOCATION_SOURCE), 1);
+        apply_dependent_states(window);
+        refresh_location_status();
+        assert!(control_text(window, ID_THEME_LOCATION_STATUS).starts_with("IP 定位"));
+        let visible =
+            |id| unsafe { GetWindowLongW(get(window, id), GWL_STYLE) as u32 & WS_VISIBLE.0 != 0 };
+        assert!(visible(ID_LOCATION_SOURCE));
+        assert!(!visible(ID_LIGHT_TIME));
+        assert!(!visible(FIELD_SURFACE_BASE + ID_LIGHT_TIME));
+        assert!(!visible(ID_IDLE_TIMEOUT));
+        crate::choice::select_index(get(window, ID_THEME_MODE), 0);
+        apply_dependent_states(window);
+        assert!(!visible(ID_LOCATION_SOURCE));
+        assert!(visible(ID_LIGHT_TIME));
+        assert!(visible(FIELD_SURFACE_BASE + ID_LIGHT_TIME));
+        assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
         unsafe {
             DestroyWindow(window).unwrap();
         }

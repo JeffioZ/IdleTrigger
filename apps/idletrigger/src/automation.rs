@@ -675,7 +675,9 @@ fn in_time_window(rule: &auto::Rule, now: &LocalNow) -> bool {
                 .iter()
                 .any(|day| day == auto::weekday_key(weekday))
     };
-    if start <= end {
+    if start == end {
+        day_matches(now.weekday)
+    } else if start < end {
         day_matches(now.weekday) && now.minutes >= start && now.minutes < end
     } else {
         // The after-midnight segment belongs to the day the window started.
@@ -1173,5 +1175,11 @@ days = ["sat"]
         assert!(!in_time_window(&rule, &at(0, 23 * 60)));
         assert!(schedule_due(&at(0, 721), "12:00"));
         assert!(!schedule_due(&at(0, 722), "12:00"));
+        let mut all_day = rule;
+        all_day.end_time = all_day.time.clone();
+        for minute in [0, 60, 23 * 60, 1439] {
+            assert!(in_time_window(&all_day, &at(6, minute)));
+            assert!(!in_time_window(&all_day, &at(0, minute)));
+        }
     }
 }

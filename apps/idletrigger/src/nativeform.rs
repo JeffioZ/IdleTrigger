@@ -16,6 +16,36 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::paint::ControlState;
 
+/// Change child visibility without presenting an intermediate layout.
+/// The caller commits the complete parent frame after all changes.
+pub fn set_visible_deferred(control: HWND, visible: bool) {
+    unsafe {
+        if control.is_invalid()
+            || (GetWindowLongW(control, GWL_STYLE) as u32 & WS_VISIBLE.0 != 0) == visible
+        {
+            return;
+        }
+        let _ = SetWindowPos(
+            control,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_NOREDRAW
+                | if visible {
+                    SWP_SHOWWINDOW
+                } else {
+                    SWP_HIDEWINDOW
+                },
+        );
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct InteractionState {
     hovered: bool,

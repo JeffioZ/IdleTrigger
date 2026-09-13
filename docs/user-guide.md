@@ -32,9 +32,9 @@ Process-name targets match all instances of that name; Browse selects an exact E
 
 进程名匹配全部同名实例，浏览选择的 EXE 按路径匹配。选择器读取名称、实例数及文件说明，不启动文件、不保存 PID、不读取进程内存。筛选、排序保留已勾选目标，包括被筛选隐藏的项。
 
-A shared scan runs about every five seconds, so very short processes can be missed. Process-start triggers establish a baseline: already-running processes are not new starts. Disappearance has a five-second grace period; failed scans do not mean that all processes exited. Scheduled process conditions can skip a blocked occurrence or wait until its deadline. A window crossing midnight uses its starting weekday. Tasks require IdleTrigger to be running and are not installed into Windows Task Scheduler.
+A shared scan runs about every five seconds, so very short processes can be missed. Process-start triggers establish a baseline: already-running processes are not new starts. Disappearance has a five-second grace period; failed scans do not mean that all processes exited. Scheduled process conditions can skip a blocked occurrence or wait until its deadline. A window crossing midnight uses its starting weekday. Equal start and end times mean the entire selected day. Tasks require IdleTrigger to be running and are not installed into Windows Task Scheduler.
 
-共享扫描约每 5 秒一次，极短进程可能漏检。进程启动触发器先建立基线，已有进程不算新启动；消失有 5 秒宽限，扫描失败不等于全部退出。计划进程条件不满足时可跳过或等待至截止时间。跨午夜时间段按开始日判断星期。任务依赖 IdleTrigger 运行，不会安装到 Windows 任务计划程序。
+共享扫描约每 5 秒一次，极短进程可能漏检。进程启动触发器先建立基线，已有进程不算新启动；消失有 5 秒宽限，扫描失败不等于全部退出。计划进程条件不满足时可跳过或等待至截止时间。跨午夜时间段按开始日判断星期；开始和结束时间相同时，表示所选日期全天生效。任务依赖 IdleTrigger 运行，不会安装到 Windows 任务计划程序。
 
 Schedules remain due during the scheduled minute and the following minute, including after startup or resume; older times are skipped. A scheduled action is queued only after its occurrence checkpoint is saved successfully. Save failures skip the action and display an error; the same occurrence is not retried during that app session. After restarting, an unsaved occurrence can be reconsidered if it is still within the grace window, but must be saved before it can run.
 

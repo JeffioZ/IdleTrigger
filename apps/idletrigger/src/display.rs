@@ -66,7 +66,22 @@ pub fn foreground_is_fullscreen() -> bool {
             return true;
         }
         let fg = GetForegroundWindow();
-        if fg.is_invalid() {
+        if fg.is_invalid()
+            || !windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(fg).as_bool()
+            || windows::Win32::UI::WindowsAndMessaging::IsIconic(fg).as_bool()
+        {
+            return false;
+        }
+        let mut cloaked = 0u32;
+        if windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            fg,
+            windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+        {
             return false;
         }
         let mut class = [0u16; 64];
@@ -88,14 +103,62 @@ pub fn foreground_is_fullscreen() -> bool {
             return false;
         }
         let mut wr = RECT::default();
-        if windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut wr).is_err() {
+        if windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            fg,
+            windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut wr as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        )
+        .is_err()
+            && windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut wr).is_err()
+        {
             return false;
         }
-        // Covers the full monitor (not just the work area — taskbar hidden).
-        let full = info.rcMonitor;
-        wr.left <= full.left
-            && wr.top <= full.top
-            && wr.right >= full.right
-            && wr.bottom >= full.bottom
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(fg).max(96);
+        covers_monitor(wr, info.rcMonitor, ((dpi * 2 + 48) / 96) as i32)
+    }
+}
+
+fn covers_monitor(window: RECT, monitor: RECT, tolerance: i32) -> bool {
+    window.right > window.left
+        && window.bottom > window.top
+        && monitor.right > monitor.left
+        && monitor.bottom > monitor.top
+        && window.left as i64 <= monitor.left as i64 + tolerance as i64
+        && window.top as i64 <= monitor.top as i64 + tolerance as i64
+        && window.right as i64 >= monitor.right as i64 - tolerance as i64
+        && window.bottom as i64 >= monitor.bottom as i64 - tolerance as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fullscreen_accepts_dpi_rounding_but_not_taskbar_work_area() {
+        let monitor = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        assert!(covers_monitor(
+            RECT {
+                left: -1918,
+                top: 2,
+                right: -2,
+                bottom: 1078
+            },
+            monitor,
+            2
+        ));
+        assert!(!covers_monitor(
+            RECT {
+                bottom: 1040,
+                ..monitor
+            },
+            monitor,
+            2
+        ));
+        assert!(!covers_monitor(RECT::default(), monitor, 2));
     }
 }

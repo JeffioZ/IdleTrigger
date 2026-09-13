@@ -710,6 +710,7 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_REFRESH_UI => {
+                settings_ui::refresh_location_status();
                 theme_engine::finish_repair();
                 automation::show_save_errors();
                 apply_stay_awake();
@@ -2311,6 +2312,15 @@ fn present_frame(window: HWND) {
     }
 }
 
+/// Layout moves suppress intermediate erases, so clear the vacated area when
+/// committing the final frame (child paints are included by present_frame).
+fn present_layout(window: HWND) {
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(window), None, true);
+    }
+    present_frame(window);
+}
+
 impl FirstFrameGate {
     /// Prepares a still-hidden top-level window for atomic presentation.
     /// Unsupported DWM attributes safely keep the normal hidden path.
@@ -2690,6 +2700,9 @@ fn refresh_status() {
 }
 
 fn set_text(slot: &AtomicIsize, text: &str) {
+    if window_text(hwnd(slot)) == text {
+        return;
+    }
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     unsafe {
         let _ = SetWindowTextW(hwnd(slot), PCWSTR(wide.as_ptr()));
