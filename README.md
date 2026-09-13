@@ -4,6 +4,12 @@
 
 <p><strong>Lightweight, native Windows power automation in one portable EXE.</strong></p>
 
+<blockquote>
+  <p><strong>Rust rewrite:</strong> this repository has been rewritten from Go to Rust
+  (native Win32 via windows-rs, no UI framework). Feature parity with the Go version is
+  complete except for items noted below; this README now describes the Rust build.</p>
+</blockquote>
+
 <p>Keep work running, respond to real input inactivity,<br>and automate power or Windows themes by time and process.</p>
 
 <p>
@@ -24,14 +30,8 @@
 
 ## 🪟 Native Control Panel
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/control-panel-en-dark.png">
-    <img src="docs/images/control-panel-en-light.png" alt="IdleTrigger control panel" width="430">
-  </picture>
-</p>
-
-<p align="center"><sub>Adapts to Windows light/dark mode and display DPI.</sub></p>
+<p align="center"><sub>Adapts to Windows light/dark mode and display DPI.<br>
+New screenshots arrive with the Rust rewrite; the Go-era panel is preserved in the git history.</sub></p>
 
 Left-click the tray icon for quick controls, then open **Settings** for all persistent preferences.
 
@@ -46,6 +46,10 @@ Left-click the tray icon for quick controls, then open **Settings** for all pers
 
 **Small by design:** IdleTrigger is a portable native Win32 app for Windows 10 / Windows Server 2016 or later. It needs no installer, service, WebView, simulated input, or extra runtime. Settings stay in a readable TOML file beside the EXE.
 
+> **System requirements (Rust build):** Windows 10 1607 / Server 2016 or later (x64 or x86).
+> 1607 is the practical floor because per-monitor DPI APIs require it; the theme title-bar
+> tint uses the modern DWM attribute on 20H1+ and falls back to the legacy one on 1809–1909.
+
 ## 🚀 Get Started
 
 1. Download **x64** for most PCs, or **x86** for 32-bit Windows.
@@ -56,16 +60,15 @@ Left-click the tray icon for quick controls, then open **Settings** for all pers
 
 | | Read this |
 | --- | --- |
-| 🧭 | [User guide](docs/user-guide.md) — features, automatic tasks, configuration, CLI, and updates |
 | 📝 | [Configuration reference](IdleTrigger.example.toml) — every TOML field in English and Chinese |
-| 🛠️ | [Build and development](docs/development.md) — local builds, checks, resources, and release process |
-| 🗂️ | [Documentation index](docs/README.md) — all project documents in one place |
+| 🗂️ | [Documentation index](docs/README.md) — docs status during the Rust rewrite |
+
+User and development guides from the Go implementation are being rewritten;
+they remain available in the git history of the last Go release.
 
 ## 🤝 Credits
 
-Tray integration is adapted from [getlantern/systray v1.2.2](https://github.com/getlantern/systray) ([Apache-2.0 notice](internal/ui/trayicon/LICENSE)).
-
-Built with [BurntSushi/toml](https://github.com/BurntSushi/toml) and [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys). Stay Awake was inspired by [NoSleep](https://github.com/CHerSun/NoSleep). The Windows 11 theme-repair behavior is an independent implementation informed by [Auto Dark Mode's DWM refresh strategy](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs).
+The Rust rewrite uses the [tray-icon](https://crates.io/crates/tray-icon), [windows-rs](https://crates.io/crates/windows), [toml_edit](https://crates.io/crates/toml_edit), and [serde](https://crates.io/crates/serde) crates. The Go implementation's tray code was adapted from [getlantern/systray v1.2.2](https://github.com/getlantern/systray) (Apache-2.0 notice preserved in the git history). Stay Awake was inspired by [NoSleep](https://github.com/CHerSun/NoSleep). The Windows 11 theme-repair behavior is an independent implementation informed by [Auto Dark Mode's DWM refresh strategy](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs).
 
 ## 📄 License
 

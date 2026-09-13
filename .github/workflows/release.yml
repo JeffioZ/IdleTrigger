@@ -21,53 +21,52 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.x'
+      - name: Toolchain components
+        run: |
+          rustup component add clippy rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add i686-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate release tag
         run: |
-          $version = (./tools/validate-release-tag.ps1 -Tag $env:RELEASE_TAG).Trim()
+          # Port of tools/validate-release-tag.ps1: strict SemVer vMAJOR.MINOR.PATCH
+          # with Windows uint16 version components.
+          $tag = $env:RELEASE_TAG
+          $semVerPattern = '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+          if (-not [regex]::IsMatch($tag, $semVerPattern)) {
+            Write-Error "Release tag '$tag' is not strict SemVer in the form vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]."
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          foreach ($part in ([regex]::Matches($version, '[0-9]+') | Select-Object -First 4)) {
+            if ([uint32]$part.Value -gt [uint16]::MaxValue) {
+              Write-Error "Release tag '$tag' contains a Windows version component outside 0..65535."
+              exit 1
+            }
+          }
           Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
 
       - name: Verify
         run: |
-          go mod download
+          cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tools/check.ps1 -Full -Vulncheck
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
-        with:
-          version: v2.11.4
-          args: --timeout=5m --disable=errcheck
-
-      - name: errcheck (core)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
-        with:
-          version: v2.11.4
-          args: >-
-            --timeout=5m --default=none --enable=errcheck
-            ./internal/config/... ./internal/automation/... ./internal/app/...
-            ./internal/platform/windows/autostart/... ./internal/platform/windows/gdiplus/...
-            ./internal/platform/windows/hotkey/...
-            ./internal/platform/windows/ipc/... ./internal/platform/windows/singleinstance/...
-
-      - name: Generate .syso
-        run: |
-          go run ./tools/resourcegen.go -version $env:RELEASE_VERSION
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
+        env:
+          IDLETRIGGER_VERSION: ${{ env.RELEASE_VERSION }}
         run: |
-          $env:CGO_ENABLED = "0"
-          $ldflags = "-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=$env:RELEASE_VERSION"
-          $env:GOARCH = "386"
-          go build -trimpath -ldflags "$ldflags" -o dist/IdleTrigger-x86.exe ./cmd/idletrigger
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cargo build --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:GOARCH = "amd64"
-          go build -trimpath -ldflags "$ldflags" -o dist/IdleTrigger-x64.exe ./cmd/idletrigger
+          Copy-Item target/x86_64-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x64.exe -Force
+          cargo build --release --target i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target/i686-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x86.exe -Force
 
       - name: Checksums
         run: |
@@ -93,9 +92,9 @@ jobs:
             dist/IdleTrigger-x86.exe
             dist/IdleTrigger-x64.exe
             SHA256SUMS.txt
-          # Release notes are hand-written bilingual (see docs/release-notes.md);
-          # disable auto-generation so the draft never mixes in English-only
-          # notes that must be cleared before filling the template.
+          # Release notes are hand-written bilingual; disable auto-generation
+          # so the draft never mixes in English-only notes that must be
+          # cleared before filling the template.
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

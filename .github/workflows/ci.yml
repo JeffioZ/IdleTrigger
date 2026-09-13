@@ -21,79 +21,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.x"
-
-      - name: Verify modules
+      - name: Toolchain components
         run: |
-          go mod download
+          rustup component add clippy rustfmt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go mod verify
+          rustup target add i686-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: gofmt
-        run: |
-          $unfmt = (gofmt -l .)
-          if ($unfmt) { Write-Error "gofmt: $unfmt"; exit 1 }
+      - name: rustfmt
+        run: cargo fmt --all -- --check
 
-      - name: go test
-        run: go test -count=1 ./...
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: go test (devtools)
-        run: go test -count=1 -tags devtools ./...
-
-      - name: go test (tools)
-        run: go test -count=1 -tags tools ./...
-
-      - name: Test release tag validation
-        run: ./tools/validate-release-tag.ps1 -SelfTest
-
-      - name: go test (386 platform and UI)
-        run: |
-          $env:CGO_ENABLED = "0"
-          $env:GOARCH = "386"
-          go test -count=1 ./internal/platform/windows/... ./internal/ui/...
-
-      - name: Generate CI resources
-        run: go run ./tools/resourcegen.go -version ci
+      - name: cargo test
+        run: cargo test --workspace
 
       - name: Build supported Windows architectures
+        env:
+          IDLETRIGGER_VERSION: ci
         run: |
-          $env:CGO_ENABLED = "0"
-          $ldflags = "-s -w -H windowsgui -X github.com/JeffioZ/idletrigger/internal/version.Value=ci"
-          foreach ($arch in @("386", "amd64")) {
-            $env:GOARCH = $arch
-            go build -trimpath -ldflags $ldflags -o (Join-Path $env:RUNNER_TEMP "IdleTrigger-$arch.exe") ./cmd/idletrigger
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          cargo build --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --target i686-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: go vet
-        run: go vet ./...
-
-      - name: go vet (devtools)
-        run: go vet -tags devtools ./...
-
-      - name: Verify build dependency boundaries
-        run: ./tools/check-build-boundaries.ps1
-
-      - name: govulncheck
-        # Version is kept in sync with the -Vulncheck path in tools/check.ps1.
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
-        with:
-          version: v2.11.4
-          args: --timeout=5m --disable=errcheck
-
-      - name: errcheck (core)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
-        with:
-          version: v2.11.4
-          args: >-
-            --timeout=5m --default=none --enable=errcheck
-            ./internal/config/... ./internal/automation/... ./internal/app/...
-            ./internal/platform/windows/autostart/... ./internal/platform/windows/gdiplus/...
-            ./internal/platform/windows/hotkey/...
-            ./internal/platform/windows/ipc/... ./internal/platform/windows/singleinstance/...
+      - name: Build devtools variant
+        env:
+          IDLETRIGGER_VERSION: ci
+        run: cargo build --release --features devtools --target x86_64-pc-windows-msvc

@@ -2,7 +2,8 @@
 *       text=auto
 
 # Source files
-*.go    text eol=lf
+*.rs    text eol=lf
+*.slint text eol=lf
 
 # Scripts
 *.ps1   text eol=lf
@@ -14,13 +15,12 @@
 *.toml  text eol=lf
 *.xml   text eol=lf
 *.yml   text eol=lf
-*.mod   text eol=lf
-*.sum   text eol=lf
+*.lock  text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
 
 # Binary files: never normalize line endings.
 *.ico   binary
 *.exe   binary
-*.syso  binary
 *.png   binary
+*.bmp   binary

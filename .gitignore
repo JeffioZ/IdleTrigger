@@ -1,18 +1,9 @@
-# Build artifacts
-/IdleTrigger*.exe
-/dist/*
-!/dist/Start-IdleTrigger-Devtools-Idle-Monitor-Test.bat
-!/dist/Start-IdleTrigger-Devtools-Input-Trace.bat
-!/dist/Start-IdleTrigger-Devtools-UI-Capture.bat
-!/dist/Start-IdleTrigger-Devtools-Warning-Preview.bat
-/cmd/idletrigger/rsrc_windows_*.syso
-*.test
-*.prof
-coverage.out
+# Rust build artifacts
+/target/
+**/*.rs.bk
 
-# Local Go cache and vendored dependencies
-/.gocache/
-/vendor/
+# Generated release outputs
+/dist/
 
 # Runtime config and logs generated next to the EXE
 IdleTrigger.toml

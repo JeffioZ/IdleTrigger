@@ -1,26 +1,13 @@
 version: 2
 updates:
-  - package-ecosystem: gomod
+  - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
+      interval: "weekly"
     groups:
-      go-modules:
-        patterns:
-          - "*"
-  - package-ecosystem: github-actions
+      cargo-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
-      time: "09:30"
-      timezone: Asia/Shanghai
-    open-pull-requests-limit: 5
-    groups:
-      github-actions:
-        patterns:
-          - "*"
+      interval: "weekly"
