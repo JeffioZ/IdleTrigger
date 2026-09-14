@@ -487,6 +487,7 @@ fn open(button: HWND, owner: HWND, id: i32) {
         BAR_DRAG.store(-1, Ordering::SeqCst);
         BAR_HOVER.store(false, Ordering::SeqCst);
         WHEEL_DELTA.store(0, Ordering::SeqCst);
+        theme::apply_to_window(popup);
         let _ = SetWindowPos(
             popup,
             Some(HWND_TOPMOST),
@@ -500,7 +501,6 @@ fn open(button: HWND, owner: HWND, id: i32) {
         // the dismissal (Go popup message filter behavior).
         let _ = SetFocus(Some(popup));
         let _ = SetCapture(popup);
-        theme::apply_to_window(popup);
         repaint(button);
     }
 }

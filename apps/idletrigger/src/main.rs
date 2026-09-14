@@ -2426,9 +2426,18 @@ impl FirstFrameGate {
     /// Marks the window visible while cloaked, commits one complete frame,
     /// then uncloaks — and presents once more, because DWM can retain the
     /// pre-cloak surface for one composition cycle.
-    pub fn reveal(mut self) {
+    pub fn reveal(self) {
+        self.reveal_with(SW_SHOW);
+    }
+
+    /// Present a warning without taking activation from the user's window.
+    pub fn reveal_no_activate(self) {
+        self.reveal_with(SW_SHOWNOACTIVATE);
+    }
+
+    fn reveal_with(mut self, command: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD) {
         unsafe {
-            let _ = ShowWindow(self.window, SW_SHOW);
+            let _ = ShowWindow(self.window, command);
             present_frame(self.window);
             if self.cloaked {
                 if set_dwm_boolean(self.window, DWMWA_CLOAK, false) {
@@ -2504,12 +2513,15 @@ fn show_panel() {
     unsafe {
         let target = active_modal_window().unwrap_or_else(|| hwnd(&PANEL));
         recover_pending_frame(target);
-        let command = if windows::Win32::UI::WindowsAndMessaging::IsIconic(target).as_bool() {
-            windows::Win32::UI::WindowsAndMessaging::SW_RESTORE
+        if windows::Win32::UI::WindowsAndMessaging::IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+        } else if !IsWindowVisible(target).as_bool() {
+            // Reopening a retained panel needs the same complete first frame
+            // as startup; ShowWindow alone can expose an unfinished surface.
+            FirstFrameGate::begin(target).reveal();
         } else {
-            SW_SHOW
-        };
-        let _ = ShowWindow(target, command);
+            let _ = ShowWindow(target, SW_SHOW);
+        }
         let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(target);
     }
 }
@@ -2531,7 +2543,7 @@ fn toggle_panel() {
         if IsWindowVisible(hwnd(&PANEL)).as_bool() {
             let _ = ShowWindow(hwnd(&PANEL), SW_HIDE);
         } else {
-            let _ = ShowWindow(hwnd(&PANEL), SW_SHOW);
+            show_panel();
         }
     }
 }
@@ -3108,7 +3120,7 @@ fn show_warning() {
         popups::layout_warning(warning, hwnd(&WARN_TEXT), &[IDC_WARN_CANCEL]);
         center_on_screen(warning);
         viewport::fit(warning);
-        let _ = ShowWindow(warning, SW_SHOWNOACTIVATE);
+        FirstFrameGate::begin(warning).reveal_no_activate();
         let _ = SetTimer(Some(warning), WARN_TIMER, 1000, None);
     }
     log_line("idle warning shown");
@@ -3372,6 +3384,31 @@ fn theme_changes_survive_native_messages() {
         DestroyWindow, PM_REMOVE, PeekMessageW, WM_THEMECHANGED,
     };
     static NATIVE_REFRESHES: AtomicU32 = AtomicU32::new(0);
+    static UNGUARDED_SHOWS: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "system" fn observe_show(
+        window: HWND,
+        msg: u32,
+        wp: WPARAM,
+        lp: LPARAM,
+        _: usize,
+        _: usize,
+    ) -> LRESULT {
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_SHOWWINDOW && wp.0 != 0 {
+            let mut cloaked = 0u32;
+            unsafe {
+                let _ = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                    window,
+                    windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                    (&mut cloaked as *mut u32).cast(),
+                    size_of::<u32>() as u32,
+                );
+            }
+            if cloaked & 1 == 0 {
+                UNGUARDED_SHOWS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        unsafe { DefSubclassProc(window, msg, wp, lp) }
+    }
     unsafe extern "system" fn observe_theme(
         window: HWND,
         msg: u32,
@@ -3407,6 +3444,12 @@ fn theme_changes_survive_native_messages() {
     create_windows();
     let tray = tray_init().expect("test tray");
     FirstFrameGate::begin(hwnd(&PANEL)).reveal();
+    unsafe {
+        assert!(SetWindowSubclass(hwnd(&PANEL), Some(observe_show), 2, 0).as_bool());
+        for warning in [hwnd(&WARNING), hwnd(&ACTION_WARN_HWND)] {
+            assert!(SetWindowSubclass(warning, Some(observe_show), 2, 0).as_bool());
+        }
+    }
     {
         let frame = FrameTransition::begin(hwnd(&PANEL)).expect("visible panel");
         assert!(
@@ -3463,6 +3506,35 @@ fn theme_changes_survive_native_messages() {
     for dark in [true, false, true, false] {
         theme::force_dark(dark);
         theme::apply_to_all();
+        toggle_panel();
+        assert!(!unsafe { IsWindowVisible(hwnd(&PANEL)) }.as_bool());
+        toggle_panel();
+        assert!(unsafe { IsWindowVisible(hwnd(&PANEL)) }.as_bool());
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            for warning in [hwnd(&WARNING), hwnd(&ACTION_WARN_HWND)] {
+                let foreground = GetForegroundWindow();
+                let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+                FirstFrameGate::begin(warning).reveal_no_activate();
+                assert!(IsWindowVisible(warning).as_bool());
+                assert_eq!(GetForegroundWindow(), foreground);
+                assert_eq!(
+                    windows::Win32::UI::Input::KeyboardAndMouse::GetFocus(),
+                    focus
+                );
+                let mut cloaked = 1u32;
+                windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                    warning,
+                    windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                    (&mut cloaked as *mut u32).cast(),
+                    size_of::<u32>() as u32,
+                )
+                .unwrap();
+                assert_eq!(cloaked, 0, "warning must be visible after its first frame");
+                let _ = ShowWindow(warning, SW_HIDE);
+            }
+        }
+        assert_eq!(UNGUARDED_SHOWS.load(Ordering::SeqCst), 0);
         let refreshes = NATIVE_REFRESHES.load(Ordering::SeqCst);
         assert!(refreshes > 0);
         theme::apply_to_all();

@@ -190,7 +190,7 @@ pub fn show_pending() {
         );
         center(hwnd);
         crate::viewport::fit(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        crate::FirstFrameGate::begin(hwnd).reveal_no_activate();
         let _ = SetTimer(Some(hwnd), TIMER, 1000, None);
     }
     crate::log_line(&format!(
