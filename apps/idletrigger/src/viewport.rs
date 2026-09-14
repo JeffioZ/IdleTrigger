@@ -297,6 +297,7 @@ unsafe extern "system" fn window_proc(
         let state = &*(data as *const State);
         let _dpi = crate::dpi::Scope::window(hwnd);
         if msg == WM_DPICHANGED || msg == crate::dpi::TEXT_CHANGED {
+            let _frame = crate::FrameTransition::begin(hwnd);
             let old = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
             // The dpi subclass retains the previous DPI until it handles this message.
             let old = if msg == crate::dpi::TEXT_CHANGED {

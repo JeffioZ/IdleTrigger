@@ -202,7 +202,7 @@ fn cached_brush(color: u32) -> HBRUSH {
 }
 
 /// Devtools capture support: force a theme regardless of the system value.
-#[cfg(feature = "devtools")]
+#[cfg(any(feature = "devtools", test))]
 pub fn force_dark(value: bool) {
     DARK.store(value, Ordering::SeqCst);
 }
@@ -273,9 +273,7 @@ pub fn tooltip_text_color() -> u32 {
 pub fn apply_to_window(hwnd: HWND) {
     unsafe {
         set_preferred_app_mode_allow_dark();
-        if is_dark() {
-            allow_dark_for_window(hwnd, true);
-        }
+        allow_dark_for_window(hwnd, is_dark());
         let value: i32 = if is_dark() { 1 } else { 0 };
         let attr20 = DwmSetWindowAttribute(
             hwnd,
@@ -298,7 +296,37 @@ pub fn apply_to_window(hwnd: HWND) {
 }
 
 pub fn apply_to_all() {
-    set_process_menu_theme(is_dark());
+    apply_to_all_with_force(false);
+}
+
+/// A Windows theme-file repair can invalidate native styles without changing
+/// our semantic palette (Go RefreshThemeAfterSystemRepair).
+pub fn apply_to_all_after_repair() {
+    apply_to_all_with_force(true);
+}
+
+fn apply_to_all_with_force(force: bool) {
+    // DWM/SetWindowTheme can synchronously deliver another theme message.
+    // Do not enter the refresh again while native controls are being updated.
+    thread_local! { static REFRESHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if REFRESHING.replace(true) {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REFRESHING.set(false);
+        }
+    }
+    let _reset = Reset;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::UI::WindowsAndMessaging::{GetPropW, IsWindow, SetPropW};
+    // Palettes have process lifetime (including high-contrast palettes).
+    // Window properties are discarded by USER32 when an HWND is destroyed.
+    let palette_key = HANDLE(palette() as *const Palette as *mut _);
+    let dark_key = HANDLE((1 + usize::from(is_dark())) as *mut _);
+    let palette_prop = windows::core::w!("IdleTrigger.ThemePalette");
+    let dark_prop = windows::core::w!("IdleTrigger.ThemeDark");
     let mut windows = vec![
         crate::hwnd(&crate::PANEL),
         crate::hwnd(&crate::WARNING),
@@ -307,13 +335,38 @@ pub fn apply_to_all() {
         crate::settings_ui::theme_hwnd(),
     ];
     windows.extend(crate::automation_ui::theme_hwnds());
+    windows.retain(|hwnd| unsafe {
+        !hwnd.is_invalid()
+            && IsWindow(Some(*hwnd)).as_bool()
+            && (force
+                || GetPropW(*hwnd, palette_prop) != palette_key
+                || GetPropW(*hwnd, dark_prop) != dark_key)
+    });
+    if windows.is_empty() {
+        return;
+    }
+    crate::choice::close(false);
+    let frames: Vec<_> = windows
+        .iter()
+        .filter_map(|w| crate::FrameTransition::begin(*w))
+        .collect();
+    set_process_menu_theme(is_dark());
+    let instance = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+        .unwrap_or_default();
     for hwnd in windows {
-        if !hwnd.is_invalid() {
-            apply_to_window(hwnd);
-            retheme_children(hwnd);
+        let _dpi = crate::dpi::Scope::window(hwnd);
+        apply_to_window(hwnd);
+        retheme_children(hwnd);
+        crate::set_window_icons(hwnd, instance);
+        unsafe {
+            let _ = SetPropW(hwnd, palette_prop, Some(palette_key));
+            let _ = SetPropW(hwnd, dark_prop, Some(dark_key));
         }
     }
+    crate::tooltips::retheme();
+    crate::settings_ui::retheme_tooltip();
     crate::automation_ui::refresh_theme();
+    drop(frames);
 }
 
 /// Go nativeform.ApplyControl parity: picks the visual-style class so

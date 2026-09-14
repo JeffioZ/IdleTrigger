@@ -191,7 +191,10 @@ pub fn finish(prepared: Prepared, switched: bool) {
         && crate::theme_repair::full_dwm_refresh_available()
     {
         history.1 = Some(Instant::now());
-        if let Err(error) = crate::theme_repair::refresh_dwm_colorization() {
+        let result = crate::theme_repair::refresh_dwm_colorization();
+        // Even a partially failed theme-file apply may have reset native styles.
+        crate::request_theme_repair_refresh();
+        if let Err(error) = result {
             crate::log_line(&format!("automatic theme recovery failed: {error}"));
             return;
         }

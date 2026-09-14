@@ -233,7 +233,7 @@ unsafe fn resize_children(parent: HWND, old: u32, new: u32) {
                     ratio(origin.y),
                     ratio(rect.right - rect.left),
                     ratio(rect.bottom - rect.top),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                 );
                 let old_font = SendMessageW(child, WM_GETFONT, None, None).0;
                 let mut font = LOGFONTW::default();
@@ -250,7 +250,7 @@ unsafe fn resize_children(parent: HWND, old: u32, new: u32) {
                         child,
                         WM_SETFONT,
                         Some(WPARAM(font.0 as usize)),
-                        Some(LPARAM(1)),
+                        Some(LPARAM(0)),
                     );
                 }
             }
@@ -271,6 +271,8 @@ unsafe extern "system" fn window_proc(
         let state = &*(data as *const State);
         let _scope = Scope::enter(state.dpi.get() as i32);
         if msg == TEXT_CHANGED {
+            let _frame = crate::FrameTransition::begin(hwnd);
+            crate::choice::close(false);
             let old = (wp.0 as u32).max(1);
             let new = (lp.0 as u32).max(1);
             let mut client = RECT::default();
@@ -297,15 +299,17 @@ unsafe extern "system" fn window_proc(
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
             crate::automation_ui::dpi_changed(hwnd);
+            crate::set_window_icons_pub(hwnd);
             let _ = RedrawWindow(
                 Some(hwnd),
                 None,
                 None,
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
             );
             return LRESULT(0);
         }
         if msg == WM_DPICHANGED && lp.0 != 0 {
+            let _frame = crate::FrameTransition::begin(hwnd);
             crate::choice::close(false);
             let new = (wp.0 as u32 & 0xffff).max(96);
             let old = state.dpi.replace(new);
@@ -322,11 +326,12 @@ unsafe extern "system" fn window_proc(
                 SWP_NOACTIVATE | SWP_NOZORDER,
             );
             crate::automation_ui::dpi_changed(hwnd);
+            crate::set_window_icons_pub(hwnd);
             let _ = RedrawWindow(
                 Some(hwnd),
                 None,
                 None,
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
             );
             return LRESULT(0);
         }
@@ -392,6 +397,7 @@ mod tests {
             )
             .unwrap();
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(owner, false);
+            let _ = ShowWindow(form, SW_SHOWNOACTIVATE);
             let old = GetDpiForWindow(form).max(96);
             let next = old * 2;
             let rect = RECT {
@@ -424,6 +430,19 @@ mod tests {
             assert_eq!(
                 String::from_utf16_lossy(&text[..len as usize]),
                 "unsaved draft"
+            );
+            assert!(IsWindowVisible(form).as_bool());
+            let mut cloaked = 1u32;
+            windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                form,
+                windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                (&mut cloaked as *mut u32).cast(),
+                size_of::<u32>() as u32,
+            )
+            .unwrap();
+            assert_eq!(
+                cloaked, 0,
+                "DPI/text-scale transition must reveal the final frame"
             );
             DestroyWindow(form).unwrap();
             DestroyWindow(owner).unwrap();

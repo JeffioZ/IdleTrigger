@@ -295,7 +295,7 @@ fn create() {
 }
 
 /// Re-themes the tooltip colors after a light/dark switch (Go ApplyTooltip).
-fn retheme_tooltip() {
+pub(crate) fn retheme_tooltip() {
     unsafe {
         let tip = HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _);
         if tip.is_invalid() {
@@ -319,14 +319,8 @@ fn retheme_tooltip() {
 
 /// Full theme refresh: caption, control visual styles, tooltip, repaint
 /// (Go applyTheme on WM_SETTINGCHANGE / WM_SYSCOLORCHANGE / WM_THEMECHANGED).
-fn refresh_theme(hwnd: HWND) {
-    unsafe {
-        theme::refresh_from_registry();
-        theme::apply_to_window(hwnd);
-        theme::retheme_children(hwnd);
-        retheme_tooltip();
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
-    }
+fn refresh_theme() {
+    crate::request_theme_refresh();
 }
 
 unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_font: HFONT) {
@@ -1485,7 +1479,9 @@ fn save() {
         crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
         crate::refresh_checkboxes();
         crate::refresh_status();
-        crate::theme::apply_to_all();
+        // Settings do not directly change the active palette. Theme changes
+        // arrive through the normal notification path; retheming here can
+        // cloak/reveal this newly created dialog just before we destroy it.
 
         {
             crate::system::unregister_all();
@@ -1704,7 +1700,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 LRESULT(0)
             }
             WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => {
-                refresh_theme(hwnd);
+                refresh_theme();
                 LRESULT(0)
             }
             WM_SETCURSOR => {
@@ -2147,7 +2143,7 @@ pub fn refresh_language() {
     unsafe {
         create_tooltip(hwnd);
     }
-    refresh_theme(hwnd);
+    refresh_theme();
 }
 
 #[cfg(test)]

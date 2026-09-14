@@ -17,6 +17,31 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 static THEME_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
+#[derive(Default)]
+struct ManualRequests {
+    pending: Option<bool>,
+    target: Option<bool>,
+}
+
+impl ManualRequests {
+    fn toggle(&mut self, current: bool) {
+        let target = !self.target.unwrap_or(current);
+        self.pending = Some(target);
+        self.target = Some(target);
+    }
+
+    fn complete(&mut self) {
+        if self.pending.is_none() {
+            self.target = None;
+        }
+    }
+}
+
+static MANUAL_REQUESTS: Mutex<ManualRequests> = Mutex::new(ManualRequests {
+    pending: None,
+    target: None,
+});
+static MANUAL_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static THEME_OPERATION: Mutex<()> = Mutex::new(());
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
@@ -469,6 +494,24 @@ pub fn spawn() {
                 if crate::EXITING.load(Ordering::SeqCst) {
                     return;
                 }
+                let manual = MANUAL_REQUESTS.lock().unwrap().pending.take();
+                if let Some(dark) = manual {
+                    let result = set_manual_override(dark);
+                    MANUAL_REQUESTS.lock().unwrap().complete();
+                    if let Err(error) = result {
+                        *MANUAL_ERROR.lock().unwrap() = Some(error);
+                        unsafe {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                Some(crate::hwnd(&crate::HIDDEN)),
+                                crate::WM_REFRESH_UI,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                    } else {
+                        notify_theme();
+                    }
+                }
                 tick();
                 let pending = WAKE.0.lock().unwrap();
                 let (mut pending, _) = WAKE
@@ -482,27 +525,22 @@ pub fn spawn() {
 }
 
 /// Sets a manual dark/light override until the next scheduled transition.
-pub fn set_manual_override(dark: bool) {
+fn set_manual_override(dark: bool) -> Result<(), String> {
     crate::theme_recovery::changed();
     let operation = THEME_OPERATION.lock().unwrap();
     let now = local_time();
     let expiry = next_transition(now.absolute_minutes, now.minutes, light_window());
-    if let Err(error) = apply_windows_theme(dark) {
-        drop(operation);
-        crate::warn_dialog("", &error);
-        return;
-    }
+    apply_windows_theme(dark)?;
     *MANUAL_OVERRIDE.lock().unwrap() = Some((dark, expiry));
     drop(operation);
-    notify_theme();
-    crate::theme::refresh_from_registry();
-    crate::theme::apply_to_all();
+    crate::request_theme_refresh();
     crate::log_line(&format!(
         "theme manual override: {} (until {:02}:{:02})",
         if dark { "dark" } else { "light" },
         (expiry % (24 * 60)) / 60,
         (expiry % (24 * 60)) % 60
     ));
+    Ok(())
 }
 
 /// Clears the manual override (returns control to the schedule).
@@ -522,8 +560,30 @@ pub fn toggle_enabled() {
 }
 
 pub fn manual_switch() {
-    let current = crate::theme::is_dark();
-    set_manual_override(!current);
+    enqueue_manual_switch(&MANUAL_REQUESTS, || {
+        crate::theme::read_light_preference(APP_BREED)
+            .map(|light| !light)
+            .unwrap_or_else(crate::theme::is_dark)
+    });
+    wake();
+}
+
+fn enqueue_manual_switch(requests: &Mutex<ManualRequests>, read_current: impl FnOnce() -> bool) {
+    // Keep completion from clearing target between reading the registry and
+    // choosing the next request. This lock never covers a theme operation.
+    let mut requests = requests.lock().unwrap();
+    let current = read_current();
+    // Only enqueue here: the scheduler/repair lock can cover a slow Windows
+    // theme-file operation, and must never be acquired by a button callback.
+    requests.toggle(current);
+}
+
+pub fn finish_manual_switch() {
+    let error = MANUAL_ERROR.lock().unwrap().take();
+    if let Some(error) = error {
+        crate::log_line(&format!("manual theme switch failed: {error}"));
+        crate::warn_dialog("", &error);
+    }
 }
 
 static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -566,8 +626,7 @@ pub fn repair() {
 pub fn finish_repair() {
     let result = REPAIR_RESULT.lock().unwrap().take();
     if let Some(result) = result {
-        crate::theme::refresh_from_registry();
-        crate::theme::apply_to_all();
+        crate::request_theme_repair_refresh();
         match result {
             Ok(()) => crate::log_line("theme repair completed"),
             Err(error) => {
@@ -579,6 +638,80 @@ pub fn finish_repair() {
 }
 #[cfg(test)]
 mod solar_tests {
+    #[test]
+    fn completion_cannot_clear_the_target_after_a_click_reads_the_old_theme() {
+        use std::sync::{Arc, Mutex, mpsc};
+        let queue = Arc::new(Mutex::new(super::ManualRequests {
+            pending: None,
+            target: Some(true), // First request is being applied in the worker.
+        }));
+        let (read, has_read) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let click_queue = queue.clone();
+        let click = std::thread::spawn(move || {
+            super::enqueue_manual_switch(&click_queue, || {
+                read.send(()).unwrap();
+                resumed.recv().unwrap();
+                false // Registry snapshot from just before the first write.
+            });
+        });
+        has_read
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let completion_blocked =
+            matches!(queue.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+        resume.send(()).unwrap();
+        click.join().unwrap();
+        let mut queue = queue.lock().unwrap();
+        queue.complete();
+        assert!(
+            completion_blocked,
+            "completion could invalidate the click's baseline"
+        );
+        assert_eq!(
+            queue.pending,
+            Some(false),
+            "second click must undo the first request"
+        );
+    }
+
+    #[test]
+    fn manual_requests_keep_latest_intent_while_a_switch_is_running() {
+        let mut requests = super::ManualRequests::default();
+        requests.toggle(false);
+        assert_eq!(requests.pending.take(), Some(true));
+        requests.toggle(false); // The first switch has not reached the registry yet.
+        assert_eq!(requests.pending, Some(false));
+        requests.complete();
+        assert_eq!(requests.target, Some(false));
+        assert_eq!(requests.pending.take(), Some(false));
+        requests.complete();
+        requests.toggle(true); // A later external theme change becomes the baseline.
+        assert_eq!(requests.pending, Some(false));
+    }
+
+    #[test]
+    fn manual_click_does_not_wait_for_the_background_operation_lock() {
+        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let previous = std::mem::take(&mut *super::MANUAL_REQUESTS.lock().unwrap());
+        let operation = super::THEME_OPERATION.lock().unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        let click = std::thread::spawn(move || {
+            super::manual_switch();
+            done.send(()).unwrap();
+        });
+        let responsive = result
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+        drop(operation);
+        click.join().unwrap();
+        *super::MANUAL_REQUESTS.lock().unwrap() = previous;
+        assert!(
+            responsive,
+            "button callback waited for the theme repair lock"
+        );
+    }
+
     #[test]
     fn preference_first_write_failure_does_not_restore_untouched_value() {
         use std::cell::RefCell;

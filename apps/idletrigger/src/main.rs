@@ -117,6 +117,32 @@ const WM_ACTION_SHOW: u32 = 0x8005;
 const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
 const WM_IPC_REQUEST: u32 = 0x8008;
+const WM_REFRESH_THEME: u32 = 0x8009;
+static THEME_REFRESH: theme_refresh::Requests = theme_refresh::Requests::new();
+
+pub(crate) fn request_theme_repair_refresh() {
+    enqueue_theme_refresh(true);
+}
+
+pub(crate) fn request_theme_refresh() {
+    enqueue_theme_refresh(false);
+}
+
+fn enqueue_theme_refresh(force: bool) {
+    if hwnd(&HIDDEN).is_invalid() {
+        return;
+    }
+    if THEME_REFRESH.request(force) {
+        post_theme_refresh();
+    }
+}
+
+fn post_theme_refresh() {
+    if unsafe { PostMessageW(Some(hwnd(&HIDDEN)), WM_REFRESH_THEME, WPARAM(0), LPARAM(0)) }.is_err()
+    {
+        THEME_REFRESH.post_failed();
+    }
+}
 
 mod accessibility;
 mod automation;
@@ -144,6 +170,7 @@ mod theme_com;
 mod theme_contrast;
 mod theme_engine;
 mod theme_recovery;
+mod theme_refresh;
 mod theme_repair;
 mod tooltips;
 mod viewport;
@@ -681,6 +708,22 @@ unsafe extern "system" fn hidden_proc(
             return LRESULT(0);
         }
         match msg {
+            WM_REFRESH_THEME => {
+                let force = THEME_REFRESH.begin();
+                if theme::refresh_from_registry() {
+                    log_line("system theme changed");
+                }
+                if force {
+                    theme::apply_to_all_after_repair();
+                } else {
+                    theme::apply_to_all();
+                }
+                refresh_status();
+                if THEME_REFRESH.finish() {
+                    post_theme_refresh();
+                }
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == POWER_STATUS_TIMER => {
                 // Coalesced power-status re-read (drivers broadcast before
                 // the status settles).
@@ -711,6 +754,7 @@ unsafe extern "system" fn hidden_proc(
             }
             WM_REFRESH_UI => {
                 settings_ui::refresh_location_status();
+                theme_engine::finish_manual_switch();
                 theme_engine::finish_repair();
                 automation::show_save_errors();
                 apply_stay_awake();
@@ -763,37 +807,14 @@ unsafe extern "system" fn hidden_proc(
             }
             windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {
                 dpi::refresh_text_scale();
-                if theme_contrast::refresh() {
-                    theme::apply_to_all();
-                    tooltips::retheme();
-                }
-                if theme::is_color_set_change(lparam.0) && theme::refresh_from_registry() {
-                    theme::apply_to_all();
-                    // Title-bar marks follow the theme (Go WindowIcons.Apply
-                    // on every form window).
-                    let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                        .unwrap_or_default();
-                    set_window_icons(hwnd_, instance);
-                    // Also refresh secondary window title icons.
-                    for w in [crate::hwnd(&crate::PANEL), crate::settings_ui::theme_hwnd()]
-                        .into_iter()
-                        .chain(crate::automation_ui::theme_hwnds())
-                    {
-                        if !w.is_invalid() {
-                            set_window_icons(w, instance);
-                        }
-                    }
-                    refresh_status();
-                    tooltips::retheme();
-                    log_line("system theme changed");
+                if theme_contrast::refresh() || theme::is_color_set_change(lparam.0) {
+                    request_theme_refresh();
                 }
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_SYSCOLORCHANGE
             | windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED => {
-                theme::refresh_from_registry();
-                theme::apply_to_all();
-                tooltips::retheme();
+                request_theme_refresh();
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY => {
@@ -1990,13 +2011,30 @@ fn tray_init() -> Option<Box<tray_icon::TrayIcon>> {
 }
 
 fn tray_menu() -> tray_icon::menu::Menu {
-    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{ContextMenu, Menu, MenuItem, PredefinedMenuItem};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMenuInfo, HMENU, MENUINFO, MIM_STYLE, MNS_NOCHECK, SetMenuInfo,
+    };
     let menu = Menu::new();
     let open = MenuItem::new(t("menu_open_panel"), true, None);
     let exit = MenuItem::new(t("menu_exit"), true, None);
     let _ = menu.append(&open);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&exit);
+    // These text-only actions need no checkmark gutter. Keep native text
+    // measurement so each language and DPI gets its own compact menu width.
+    unsafe {
+        let handle = HMENU(menu.hpopupmenu() as *mut _);
+        let mut info = MENUINFO {
+            cbSize: std::mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_STYLE,
+            ..Default::default()
+        };
+        if GetMenuInfo(handle, &mut info).is_ok() {
+            info.dwStyle |= MNS_NOCHECK;
+            let _ = SetMenuInfo(handle, &info);
+        }
+    }
     *MENU_OPEN_ID.lock().unwrap() = Some(open.id().clone());
     *MENU_EXIT_ID.lock().unwrap() = Some(exit.id().clone());
     menu
@@ -2059,15 +2097,7 @@ fn tray_refresh_theme_icon() {
         // Rebuild the tray menu so the native HMENU picks up the current
         // immersive theme (muda caches the rendering mode at creation).
         theme::set_process_menu_theme(dark);
-        let menu = tray_icon::menu::Menu::new();
-        let open = tray_icon::menu::MenuItem::new(t("menu_open_panel"), true, None);
-        let _ = menu.append(&open);
-        let _ = menu.append(&tray_icon::menu::PredefinedMenuItem::separator());
-        let exit = tray_icon::menu::MenuItem::new(t("menu_exit"), true, None);
-        let _ = menu.append(&exit);
-        *MENU_OPEN_ID.lock().unwrap() = Some(open.id().clone());
-        *MENU_EXIT_ID.lock().unwrap() = Some(exit.id().clone());
-        tray.set_menu(Some(Box::new(menu)));
+        tray.set_menu(Some(Box::new(tray_menu())));
     }
 }
 
@@ -2278,8 +2308,23 @@ pub struct FirstFrameGate {
 
 const DWMWA_TRANSITIONS_FORCED_DISABLED: u32 = 3;
 const DWMWA_CLOAK: u32 = 13;
+const FRAME_RECOVERY_TIMER: usize = 0x49544652;
+const FRAME_RECOVERY_PROP: PCWSTR = w!("IdleTrigger.FrameRecovery");
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_UNCLOAK: std::cell::Cell<(isize, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
 
 fn set_dwm_boolean(window: HWND, attribute: u32, enabled: bool) -> bool {
+    #[cfg(test)]
+    if attribute == DWMWA_CLOAK && !enabled {
+        let (target, remaining) = FAIL_UNCLOAK.get();
+        if target == window.0 as isize && remaining > 0 {
+            FAIL_UNCLOAK.set((target, remaining - 1));
+            return false;
+        }
+    }
     let value: u32 = if enabled { 1 } else { 0 };
     unsafe {
         windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
@@ -2290,6 +2335,50 @@ fn set_dwm_boolean(window: HWND, attribute: u32, enabled: bool) -> bool {
         )
         .is_ok()
     }
+}
+
+fn clear_frame_recovery(window: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(window), FRAME_RECOVERY_TIMER);
+        let _ = windows::Win32::UI::WindowsAndMessaging::RemovePropW(window, FRAME_RECOVERY_PROP);
+    }
+}
+
+fn schedule_frame_recovery(window: HWND) {
+    unsafe {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+        let _ = SetPropW(window, FRAME_RECOVERY_PROP, Some(HANDLE(window.0)));
+        if SetTimer(
+            Some(window),
+            FRAME_RECOVERY_TIMER,
+            500,
+            Some(frame_recovery_proc),
+        ) == 0
+        {
+            log_line("frame recovery timer failed; retrying on next window show");
+        }
+    }
+}
+
+fn recover_pending_frame(window: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetPropW, IsWindowVisible};
+        if GetPropW(window, FRAME_RECOVERY_PROP).is_invalid() {
+            return; // Ignore a timer message already queued before cancellation.
+        }
+        if set_dwm_boolean(window, DWMWA_CLOAK, false) {
+            clear_frame_recovery(window);
+            if IsWindowVisible(window).as_bool() {
+                present_layout(window);
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn frame_recovery_proc(window: HWND, _: u32, _: usize, _: u32) {
+    // USER32 removes this timer and its window properties at destruction.
+    recover_pending_frame(window);
 }
 
 /// Synchronous full-subtree paint (Go PresentFrame): invalidate the window
@@ -2341,8 +2430,13 @@ impl FirstFrameGate {
         unsafe {
             let _ = ShowWindow(self.window, SW_SHOW);
             present_frame(self.window);
-            if self.cloaked && set_dwm_boolean(self.window, DWMWA_CLOAK, false) {
-                present_frame(self.window);
+            if self.cloaked {
+                if set_dwm_boolean(self.window, DWMWA_CLOAK, false) {
+                    clear_frame_recovery(self.window);
+                    present_frame(self.window);
+                } else {
+                    schedule_frame_recovery(self.window);
+                }
             }
             if self.transitions_disabled {
                 set_dwm_boolean(self.window, DWMWA_TRANSITIONS_FORCED_DISABLED, false);
@@ -2352,9 +2446,64 @@ impl FirstFrameGate {
     }
 }
 
+/// Go BeginFrameTransition: repaint a visible form while DWM keeps the
+/// incomplete palette out of the presentation stream, without changing focus.
+pub struct FrameTransition(FirstFrameGate);
+
+impl FrameTransition {
+    pub fn begin(window: HWND) -> Option<Self> {
+        // A nested DPI/theme callback must not uncloak its caller's frame.
+        let mut cloaked = 0u32;
+        unsafe {
+            let _ = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                window,
+                windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                (&mut cloaked as *mut u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
+        if cloaked & 1 != 0 {
+            return None;
+        }
+        unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }
+            .as_bool()
+            .then(|| Self(FirstFrameGate::begin(window)))
+    }
+}
+
+impl Drop for FrameTransition {
+    fn drop(&mut self) {
+        let gate = &mut self.0;
+        if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(gate.window)) }
+            .as_bool()
+        {
+            return;
+        }
+        present_layout(gate.window);
+        if gate.cloaked {
+            for _ in 0..3 {
+                if set_dwm_boolean(gate.window, DWMWA_CLOAK, false) {
+                    gate.cloaked = false;
+                    clear_frame_recovery(gate.window);
+                    present_layout(gate.window);
+                    break;
+                }
+            }
+            if gate.cloaked {
+                log_line("theme frame uncloak failed");
+                schedule_frame_recovery(gate.window);
+            }
+        }
+        if gate.transitions_disabled {
+            set_dwm_boolean(gate.window, DWMWA_TRANSITIONS_FORCED_DISABLED, false);
+        }
+    }
+}
+
 fn show_panel() {
     unsafe {
         let target = active_modal_window().unwrap_or_else(|| hwnd(&PANEL));
+        recover_pending_frame(target);
         let command = if windows::Win32::UI::WindowsAndMessaging::IsIconic(target).as_bool() {
             windows::Win32::UI::WindowsAndMessaging::SW_RESTORE
         } else {
@@ -3213,6 +3362,162 @@ pub fn make_font_pub(size_px: i32, weight: i32) -> windows::Win32::Graphics::Gdi
 
 pub fn set_control_font_pub(control: HWND, font: windows::Win32::Graphics::Gdi::HFONT) -> bool {
     set_control_font(control, font)
+}
+
+#[cfg(test)]
+#[test]
+fn theme_changes_survive_native_messages() {
+    use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DestroyWindow, PM_REMOVE, PeekMessageW, WM_THEMECHANGED,
+    };
+    static NATIVE_REFRESHES: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "system" fn observe_theme(
+        window: HWND,
+        msg: u32,
+        wp: WPARAM,
+        lp: LPARAM,
+        _: usize,
+        _: usize,
+    ) -> LRESULT {
+        if msg == WM_THEMECHANGED {
+            NATIVE_REFRESHES.fetch_add(1, Ordering::SeqCst);
+            // Reentrant native notifications must not retheme the subtree again.
+            theme::apply_to_all();
+            request_theme_refresh();
+        }
+        unsafe { DefSubclassProc(window, msg, wp, lp) }
+    }
+    const CHILD: &str = "IDLETRIGGER_TEST_THEME_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "theme_changes_survive_native_messages",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "theme child failed: {status}");
+        return;
+    }
+    *CONFIG.lock().unwrap() = Some(Default::default());
+    *I18N.write().unwrap() = Some(I18n::load("en"));
+    create_windows();
+    let tray = tray_init().expect("test tray");
+    FirstFrameGate::begin(hwnd(&PANEL)).reveal();
+    {
+        let frame = FrameTransition::begin(hwnd(&PANEL)).expect("visible panel");
+        assert!(
+            FrameTransition::begin(hwnd(&PANEL)).is_none(),
+            "nested update must not own the outer cloak"
+        );
+        drop(frame);
+    }
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::GetPropW;
+        let panel = hwnd(&PANEL);
+        let frame = FrameTransition::begin(panel).unwrap();
+        FAIL_UNCLOAK.set((panel.0 as isize, 4));
+        drop(frame); // All three immediate attempts fail.
+        assert!(!GetPropW(panel, FRAME_RECOVERY_PROP).is_invalid());
+        frame_recovery_proc(panel, WM_TIMER, FRAME_RECOVERY_TIMER, 0);
+        assert!(!GetPropW(panel, FRAME_RECOVERY_PROP).is_invalid());
+        frame_recovery_proc(panel, WM_TIMER, FRAME_RECOVERY_TIMER, 0);
+        assert!(GetPropW(panel, FRAME_RECOVERY_PROP).is_invalid());
+        let mut cloaked = 1u32;
+        windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            panel,
+            windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+        .unwrap();
+        assert_eq!(cloaked, 0, "delayed recovery must restore visibility");
+        let frame = FrameTransition::begin(panel).unwrap();
+        frame_recovery_proc(panel, WM_TIMER, FRAME_RECOVERY_TIMER, 0);
+        windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            panel,
+            windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+        .unwrap();
+        assert_eq!(
+            cloaked & 1,
+            1,
+            "stale timers must not reveal a new transaction"
+        );
+        drop(frame);
+        let frame = FrameTransition::begin(panel).unwrap();
+        FAIL_UNCLOAK.set((panel.0 as isize, 3));
+        drop(frame);
+        show_panel(); // User-initiated recovery does not wait for the timer.
+        assert!(GetPropW(panel, FRAME_RECOVERY_PROP).is_invalid());
+    }
+    unsafe {
+        let button = GetDlgItem(Some(hwnd(&PANEL)), IDC_THEME_SWITCH as i32).unwrap();
+        assert!(SetWindowSubclass(button, Some(observe_theme), 1, 0).as_bool());
+    }
+    for dark in [true, false, true, false] {
+        theme::force_dark(dark);
+        theme::apply_to_all();
+        let refreshes = NATIVE_REFRESHES.load(Ordering::SeqCst);
+        assert!(refreshes > 0);
+        theme::apply_to_all();
+        assert_eq!(NATIVE_REFRESHES.load(Ordering::SeqCst), refreshes);
+        theme::apply_to_all_after_repair();
+        assert!(
+            NATIVE_REFRESHES.load(Ordering::SeqCst) > refreshes,
+            "system repair must refresh native styles even with the same palette"
+        );
+        refresh_status();
+        present_layout(hwnd(&PANEL));
+        unsafe {
+            let setting: Vec<u16> = "ImmersiveColorSet".encode_utf16().chain([0]).collect();
+            SendMessageW(
+                hwnd(&HIDDEN),
+                windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE,
+                None,
+                Some(LPARAM(setting.as_ptr() as isize)),
+            );
+            SendMessageW(
+                hwnd(&HIDDEN),
+                windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED,
+                None,
+                None,
+            );
+            let mut msg = msg_default();
+            while PeekMessageW(
+                &mut msg,
+                None,
+                WM_REFRESH_THEME,
+                WM_REFRESH_THEME,
+                PM_REMOVE,
+            )
+            .as_bool()
+            {
+                DispatchMessageW(&msg);
+            }
+            assert!(THEME_REFRESH.is_idle());
+            let mut cloaked = 1u32;
+            windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                hwnd(&PANEL),
+                windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                (&mut cloaked as *mut u32).cast(),
+                size_of::<u32>() as u32,
+            )
+            .unwrap();
+            assert_eq!(cloaked, 0, "completed frame must be visible to DWM");
+        }
+    }
+    TRAY_PTR.store(0, Ordering::SeqCst);
+    drop(tray);
+    unsafe {
+        DestroyWindow(hwnd(&PANEL)).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+    }
 }
 
 #[cfg(test)]
