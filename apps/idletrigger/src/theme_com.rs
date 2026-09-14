@@ -52,29 +52,38 @@ pub struct Session {
     _apartment: Apartment,
 }
 impl Session {
-    pub fn new() -> windows::core::Result<Self> {
+    pub fn new() -> std::io::Result<Self> {
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
             let apartment = Apartment;
-            let manager: ThemeManager = CoCreateInstance(
-                &GUID::from_u128(0x9324da94_50ec_4a14_a770_e90ca03e7c8f),
-                None,
-                CLSCTX_ALL,
-            )?;
-            (manager.vtable().init)(manager.as_raw(), 0).ok()?;
-            let legacy = CoCreateInstance(
-                &GUID::from_u128(0xc04b329e_5823_4415_9c93_ba44688947b0),
-                None,
-                CLSCTX_ALL,
-            )?;
-            let mut original = 0;
-            (manager.vtable().current)(manager.as_raw(), &mut original).ok()?;
-            let mut custom = 0;
-            if (manager.vtable().custom)(manager.as_raw(), &mut custom).is_ok()
-                && custom == original
-            {
-                (manager.vtable().update_custom)(manager.as_raw()).ok()?;
-            }
+            // COM error details may themselves own interfaces. Convert errors
+            // while the apartment is alive, just as we release the managers.
+            let result = (|| -> windows::core::Result<_> {
+                let manager: ThemeManager = CoCreateInstance(
+                    &GUID::from_u128(0x9324da94_50ec_4a14_a770_e90ca03e7c8f),
+                    None,
+                    CLSCTX_ALL,
+                )?;
+                (manager.vtable().init)(manager.as_raw(), 0).ok()?;
+                let legacy = CoCreateInstance(
+                    &GUID::from_u128(0xc04b329e_5823_4415_9c93_ba44688947b0),
+                    None,
+                    CLSCTX_ALL,
+                )?;
+                let mut original = 0;
+                (manager.vtable().current)(manager.as_raw(), &mut original).ok()?;
+                let mut custom = 0;
+                if (manager.vtable().custom)(manager.as_raw(), &mut custom).is_ok()
+                    && custom == original
+                {
+                    (manager.vtable().update_custom)(manager.as_raw()).ok()?;
+                }
+                Ok((manager, legacy, original))
+            })();
+            let (manager, legacy, original) =
+                result.map_err(|error| std::io::Error::other(error.to_string()))?;
             Ok(Self {
                 manager,
                 legacy,

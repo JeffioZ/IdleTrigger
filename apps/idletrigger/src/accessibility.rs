@@ -14,11 +14,12 @@ fn services(run: impl FnOnce(&IAccPropServices) -> windows::core::Result<()>) ->
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let result = CoCreateInstance(&CAccPropServices, None, CLSCTX_INPROC_SERVER)
-            .and_then(|service| run(&service));
+            .and_then(|service| run(&service))
+            .is_ok(); // Release COM-backed error details before CoUninitialize too.
         if initialized {
             CoUninitialize();
         }
-        result.is_ok()
+        result
     }
 }
 

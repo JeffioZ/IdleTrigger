@@ -18,20 +18,84 @@ pub fn text_percent() -> u32 {
     TEXT_PERCENT.load(Ordering::SeqCst)
 }
 fn query_text_percent() -> u32 {
+    let factor = query_text_factor().unwrap_or(1.0);
+    if factor.is_finite() && (1.0..=2.25).contains(&factor) {
+        (factor * 100.0).round() as u32
+    } else {
+        100
+    }
+}
+
+fn query_text_factor() -> Option<f64> {
     unsafe {
-        use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+        use windows::Win32::System::WinRT::{
+            RO_INIT_MULTITHREADED, RoActivateInstance, RoInitialize, RoUninitialize,
+        };
+        use windows::core::Interface;
         let initialized = RoInitialize(RO_INIT_MULTITHREADED).is_ok();
-        let factor = windows::UI::ViewManagement::UISettings::new()
-            .and_then(|s| s.TextScaleFactor())
-            .unwrap_or(1.0);
+        // UISettings::new caches its activation factory beyond this apartment's
+        // lifetime. Activate directly so every COM reference is released before
+        // RoUninitialize, including after repeated WM_SETTINGCHANGE broadcasts.
+        let factor = RoActivateInstance(&windows::core::HSTRING::from(
+            "Windows.UI.ViewManagement.UISettings",
+        ))
+        .and_then(|instance| instance.cast::<windows::UI::ViewManagement::UISettings>())
+        .and_then(|s| s.TextScaleFactor())
+        .ok(); // Drop any COM-backed error before closing the apartment too.
         if initialized {
             RoUninitialize();
         }
-        if factor.is_finite() && (1.0..=2.25).contains(&factor) {
-            (factor * 100.0).round() as u32
-        } else {
-            100
+        factor
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn text_scale_survives_repeated_runtime_shutdown() {
+    const CHILD: &str = "IDLETRIGGER_TEST_TEXT_SCALE_CHILD";
+    let mode = std::env::var(CHILD).ok();
+    if mode.is_none() {
+        for mode in ["uninitialized", "sta", "mta"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dpi::text_scale_survives_repeated_runtime_shutdown",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "text-scale child ({mode}) failed: {status}"
+            );
         }
+        return;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetErrorMode(mode: u32) -> u32;
+    }
+    unsafe { SetErrorMode(0x0002) };
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+    };
+    let apartment = match mode.as_deref() {
+        Some("sta") => Some(COINIT_APARTMENTTHREADED),
+        Some("mta") => Some(COINIT_MULTITHREADED),
+        _ => None,
+    };
+    if let Some(apartment) = apartment {
+        unsafe { CoInitializeEx(None, apartment).ok().unwrap() };
+    }
+    for _ in 0..32 {
+        let factor = query_text_factor().expect("native text-scale lookup must succeed");
+        assert!(factor.is_finite() && (1.0..=2.25).contains(&factor));
+        assert!((100..=225).contains(&query_text_percent()));
+        unsafe { windows::Win32::System::Com::CoFreeUnusedLibrariesEx(0, None) };
+    }
+    if apartment.is_some() {
+        unsafe { CoUninitialize() };
     }
 }
 pub fn refresh_text_scale() {

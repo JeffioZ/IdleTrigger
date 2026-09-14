@@ -21,7 +21,7 @@ fn wide(text: &str) -> Vec<u16> {
 
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {
-    let session = crate::theme_com::Session::new().map_err(|e| io::Error::other(e.to_string()))?;
+    let session = crate::theme_com::Session::new()?;
     let snapshot = current_theme_snapshot()?;
     let apps_light = read_registry_dword(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
