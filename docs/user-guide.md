@@ -56,12 +56,13 @@ Fullscreen/presentation and foreground game activity can pause automatic switchi
 | --- | --- |
 | `IdleTrigger.toml` | Settings and rules / 设置与规则 |
 | `IdleTrigger.state.json` | Occurrence checkpoints / 任务触发记录 |
+| `IdleTrigger.state.json.corrupt-*` | Backup kept when the state file could not be parsed / 状态文件无法解析时保留的备份 |
 | `IdleTrigger.log`, `IdleTrigger.log.1` | Optional rotating diagnostics / 可选轮转日志 |
 | `IdleTrigger-panic.txt` | Fatal-error details when available / 严重错误详情 |
 
-Files live beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. Invalid reloads retain the last valid runtime configuration: repair the file and save again. Back up both TOML and state files before restoring a setup.
+Files live beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. Invalid reloads retain the last valid runtime configuration: repair the file and save again. A field with the wrong type (for example, a number written as text) falls back to its default with a startup notice, and saving once rewrites it correctly. Back up both TOML and state files before restoring a setup.
 
-文件均位于 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，错误重载保留最近的有效运行配置，修正文件后重新保存即可。恢复配置前建议备份 TOML 和 state 文件。
+文件均位于 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，错误重载保留最近的有效运行配置，修正文件后重新保存即可。字段类型写错（如数字写成文本）时回退默认值并在启动时提示，保存一次即可改正。恢复配置前建议备份 TOML 和 state 文件。
 
 ## Command line / 命令行
 
