@@ -106,7 +106,7 @@ pub(super) fn discard(
     folder: &std::path::Path,
     prefix: &str,
 ) {
-    let baseline = format!("{:?}", CONFIG.lock().unwrap());
+    let baseline = format!("{:?}", crate::runtime::lock(&CONFIG));
     unsafe {
         SetWindowTextW(
             GetDlgItem(Some(window), edit).unwrap(),
@@ -134,7 +134,7 @@ pub(super) fn discard(
         } else {
             assert!(!unsafe { IsWindowVisible(window) }.as_bool());
         }
-        assert_eq!(format!("{:?}", CONFIG.lock().unwrap()), baseline);
+        assert_eq!(format!("{:?}", crate::runtime::lock(&CONFIG)), baseline);
     }
 }
 

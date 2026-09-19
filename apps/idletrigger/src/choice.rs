@@ -77,7 +77,7 @@ static BAR_HOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 static WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
 
 fn choices() -> std::sync::MutexGuard<'static, Option<HashMap<isize, ChoiceData>>> {
-    CHOICES.lock().unwrap()
+    crate::runtime::lock(&CHOICES)
 }
 
 fn scale() -> i32 {
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn captured_pointer_cannot_select_hidden_rows_and_button_destruction_cleans_registry() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             let owner = CreateWindowExW(
                 WINDOW_EX_STYLE(0),

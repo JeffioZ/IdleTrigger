@@ -28,7 +28,7 @@ idle_enabled = false
 idle_timeout_minutes = 30
 # 达到空闲时长后执行的动作 / Action to run after the idle time is reached: "sleep", "hibernate", "shutdown", "lock", "restart"
 idle_action = "sleep"
-# 触发前多少秒显示不抢焦点的应用内提醒；键鼠操作或关闭提醒会取消本次动作，设为 0 静默执行 / Seconds before trigger to show a non-activating in-app reminder; keyboard/mouse input or closing it cancels this action, 0 = silent
+# 触发前多少秒显示不抢焦点的应用内提醒；键鼠操作或关闭提醒会取消本次动作，最少 10 秒 / Seconds before trigger to show a non-activating in-app reminder; keyboard/mouse input or closing it cancels this action, 10 seconds minimum
 idle_warning_seconds = 30
 # 增强空闲监测：适合系统睡眠也被固定间隔空闲刷新干扰的机器；默认关闭，普通键鼠操作仍会重置计时 / Enhanced idle monitoring for machines where system sleep is disturbed by fixed-interval idle refreshes; off by default, and normal keyboard or mouse input still resets idle time
 idle_enhanced_monitor = false

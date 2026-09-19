@@ -41,7 +41,7 @@ fn resolve() -> Option<(f64, f64)> {
         return None;
     };
     let coordinates = location.coordinates;
-    *CACHE.lock().unwrap() = Some(location);
+    *crate::runtime::lock(&CACHE) = Some(location);
     LAST_SUCCESS.store(now, Ordering::SeqCst);
     Some(coordinates)
 }
@@ -59,7 +59,11 @@ pub fn request() -> Option<(f64, f64)> {
     if std::thread::Builder::new()
         .name("ip-location".into())
         .spawn(|| {
-            resolve();
+            // Reset outside the caught body: a panic must not leave the
+            // locator stuck in "querying" forever.
+            let _panicked = crate::runtime::catch_and_log("ip-location", || {
+                let _ = resolve();
+            });
             QUERYING.store(false, Ordering::SeqCst);
             crate::theme_engine::wake();
             unsafe {
@@ -110,7 +114,7 @@ pub fn status() -> Status {
 fn cached_location() -> Option<Location> {
     let now = now_secs();
     if now - LAST_SUCCESS.load(Ordering::SeqCst) < SUCCESS_TTL_SECS {
-        CACHE.lock().unwrap().clone()
+        crate::runtime::lock(&CACHE).clone()
     } else {
         None
     }
@@ -287,8 +291,8 @@ mod tests {
 
     #[test]
     fn status_distinguishes_unrequested_inflight_failure_and_cached_success() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let previous = CACHE.lock().unwrap().take();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous = crate::runtime::lock(&CACHE).take();
         let success = LAST_SUCCESS.swap(0, Ordering::SeqCst);
         let failure = LAST_FAILURE.swap(0, Ordering::SeqCst);
         let querying = QUERYING.swap(false, Ordering::SeqCst);
@@ -300,14 +304,14 @@ mod tests {
         LAST_FAILURE.store(now_secs(), Ordering::SeqCst);
         assert!(matches!(status(), Status::Failed));
         assert!(request().is_none()); // Preserve the failure retry interval.
-        *CACHE.lock().unwrap() = Some(Location {
+        *crate::runtime::lock(&CACHE) = Some(Location {
             coordinates: (22.28, 114.17),
             label: "Hong Kong, China".into(),
         });
         LAST_SUCCESS.store(now_secs(), Ordering::SeqCst);
         assert!(matches!(status(), Status::Resolved(label) if label == "Hong Kong, China"));
         assert_eq!(request(), Some((22.28, 114.17)));
-        *CACHE.lock().unwrap() = previous;
+        *crate::runtime::lock(&CACHE) = previous;
         LAST_SUCCESS.store(success, Ordering::SeqCst);
         LAST_FAILURE.store(failure, Ordering::SeqCst);
         QUERYING.store(querying, Ordering::SeqCst);

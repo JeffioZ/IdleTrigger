@@ -155,7 +155,7 @@ static FONTS: LazyLock<Mutex<HashMap<String, isize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 fn cached_font(font: &LOGFONTW) -> HFONT {
     let key = format!("{font:?}");
-    let mut fonts = FONTS.lock().unwrap();
+    let mut fonts = crate::runtime::lock(&FONTS);
     HFONT(
         *fonts
             .entry(key)
@@ -348,7 +348,7 @@ mod tests {
     use super::*;
     #[test]
     fn dpi_change_keeps_window_draft_and_modal_owner_alive() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             let owner = CreateWindowExW(
                 WINDOW_EX_STYLE(0),

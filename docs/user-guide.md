@@ -13,12 +13,12 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 ## Power management / 电源管理
 
 - **Stay Awake** prevents automatic system sleep. Display-on is a separate option. Battery restrictions pause the effective state without changing your saved switch.
-- **Idle Monitoring** uses Windows keyboard/mouse inactivity and starts a fresh countdown when enabled. Input, cancellation, or a changed action invalidates an existing warning. Zero warning seconds disables the warning, not the action.
+- **Idle Monitoring** uses Windows keyboard/mouse inactivity and starts a fresh countdown when enabled. Input, cancellation, or a changed action invalidates an existing warning. The warning countdown runs at least 10 seconds and can always cancel the action.
 - Stay Awake takes precedence when both features are requested. The panel shows the effective state after task overrides and pauses.
 - Enhanced monitoring is optional, for periodic resets of the Windows idle counter; ordinary input still resets the timer.
 
 - **保持唤醒**阻止系统自动睡眠；屏幕常亮是单独选项。电池限制暂停实际状态，不改写已保存开关。
-- **空闲监测**读取 Windows 键鼠空闲状态，启用时重新计时。输入、取消或修改动作会使已有提醒失效；提醒秒数为 0 时仍会执行动作。
+- **空闲监测**读取 Windows 键鼠空闲状态，启用时重新计时。输入、取消或修改动作会使已有提醒失效；提醒倒计时最少 10 秒，且始终可取消本次动作。
 - 两项功能同时收到启用请求时，保持唤醒优先。面板显示合并任务覆盖和暂停条件后的状态。
 - 增强监测用于空闲计数被周期性重置的情况，默认关闭；普通输入仍重置计时。
 

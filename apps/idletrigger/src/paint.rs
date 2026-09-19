@@ -272,7 +272,7 @@ pub fn fill_rounded_rect(
     if !ensure_started() || bounds.right - bounds.left <= 2 || bounds.bottom - bounds.top <= 2 {
         return DrawResult::NotStarted;
     }
-    let _guard = DRAW_LOCK.lock().unwrap();
+    let _guard = crate::runtime::lock(&DRAW_LOCK);
     unsafe {
         let Some(graphics) = GraphicsGuard::new(hdc) else {
             return DrawResult::NotStarted;
@@ -312,7 +312,7 @@ pub fn fill_polygon(hdc: HDC, points: &[GpPoint], color: u32) -> DrawResult {
     if !ensure_started() || points.len() < 3 {
         return DrawResult::NotStarted;
     }
-    let _guard = DRAW_LOCK.lock().unwrap();
+    let _guard = crate::runtime::lock(&DRAW_LOCK);
     unsafe {
         let Some(graphics) = GraphicsGuard::new(hdc) else {
             return DrawResult::NotStarted;

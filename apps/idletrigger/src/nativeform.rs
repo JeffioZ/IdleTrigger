@@ -161,7 +161,7 @@ unsafe extern "system" fn cue_proc(
 }
 
 fn with_map<R>(f: impl FnOnce(&mut HashMap<isize, Tracked>) -> R) -> R {
-    let mut guard = CONTROLS.lock().unwrap();
+    let mut guard = crate::runtime::lock(&CONTROLS);
     f(guard.get_or_insert_with(HashMap::new))
 }
 

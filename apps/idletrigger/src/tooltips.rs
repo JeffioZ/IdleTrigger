@@ -144,6 +144,11 @@ pub fn retheme() {
 }
 
 /// Updates every tool's text (language change / runtime state change).
+/// Called every second from `refresh_status`, so the final rendered text of
+/// each tool is cached and `TTM_UPDATETIPTEXTW` is only sent on change —
+/// comparing the rendered string (not the i18n key) means a language switch
+/// naturally invalidates the cache. The tools are HWND-keyed and live for
+/// the panel's lifetime, so an unchanged text never needs re-sending.
 pub fn refresh_all(panel: HWND) {
     unsafe {
         let tip = HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _);
@@ -177,16 +182,24 @@ pub fn refresh_all(panel: HWND) {
             ),
             (crate::IDC_EXIT_BUTTON, crate::t_pub("tip_exit")),
         ];
-        for (id, key_or_text) in tools {
-            let target = get_panel_child(panel, id);
-            if target.is_invalid() {
-                continue;
-            }
+        static LAST: std::sync::Mutex<[Option<String>; 10]> =
+            std::sync::Mutex::new([const { None }; 10]);
+        let mut last = crate::runtime::lock(&LAST);
+        for (slot, (id, key_or_text)) in tools.iter().enumerate() {
             let text = if key_or_text.starts_with("tip_") || key_or_text.starts_with("automation") {
-                crate::t_pub(&key_or_text)
+                crate::t_pub(key_or_text)
             } else {
                 key_or_text.to_string()
             };
+            if last[slot].as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            let target = get_panel_child(panel, *id);
+            if target.is_invalid() {
+                // Cache only after a successful send: a skipped slot must
+                // stay pending so a later refresh populates it.
+                continue;
+            }
             let mut tool = TTTOOLINFOW {
                 cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
                 uFlags: TTF_IDISHWND,
@@ -202,6 +215,7 @@ pub fn refresh_all(panel: HWND) {
                 Some(WPARAM(0)),
                 Some(LPARAM(&tool as *const _ as isize)),
             );
+            last[slot] = Some(text);
         }
     }
 }

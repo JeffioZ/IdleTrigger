@@ -40,7 +40,7 @@ pub fn refresh() -> bool {
                 COLOR_INFOTEXT,
             ]
             .map(|index| GetSysColor(index));
-            let mut cache = CACHE.lock().unwrap();
+            let mut cache = crate::runtime::lock(&CACHE);
             let value = cache
                 .entry(colors)
                 .or_insert_with(|| Box::leak(Box::new(from_colors(colors))));

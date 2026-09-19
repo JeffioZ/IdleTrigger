@@ -190,7 +190,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
     if std::env::var_os(CHILD).is_none() {
         // Process isolation protects globals, not desktop focus. Serialize
         // the complete child lifetime with other native UI tests.
-        let _ui_test = CONFIG_TEST_LOCK.lock().unwrap();
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
         for language in ["en", "zh-CN"] {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -222,7 +222,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
     }
     let record = std::env::var_os("IDLETRIGGER_TEST_RECORD_FRAMES").is_some();
     let language = std::env::var("IDLETRIGGER_TEST_LANGUAGE").unwrap_or_else(|_| "en".into());
-    *CONFIG.lock().unwrap() = Some(config::Config {
+    *crate::runtime::lock(&CONFIG) = Some(config::Config {
         language: language.clone(),
         ..Default::default()
     });
@@ -500,7 +500,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
                 &format!("{language}-editor-{dark}"),
             );
             automation_ui::devtools_seed_demo_rule();
-            let baseline = automation::RULES.lock().unwrap().clone();
+            let baseline = crate::runtime::lock(&automation::RULES).clone();
             unsafe {
                 SendMessageW(
                     GetDlgItem(Some(manager), 300).unwrap(),
@@ -519,8 +519,8 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
                     SendMessageW(manager, WM_COMMAND, Some(WPARAM(303)), None);
                 },
             );
-            assert_eq!(*automation::RULES.lock().unwrap(), baseline);
-            automation::RULES.lock().unwrap().clear();
+            assert_eq!(*crate::runtime::lock(&automation::RULES), baseline);
+            crate::runtime::lock(&automation::RULES).clear();
             unsafe {
                 DestroyWindow(manager).unwrap();
             }
@@ -534,7 +534,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
             .unwrap();
             hide_warning("audit preview");
             popups::create();
-            *automation::PENDING_ACTION.lock().unwrap() = Some(automation::PendingAction {
+            *crate::runtime::lock(&automation::PENDING_ACTION) = Some(automation::PendingAction {
                 rule: None,
                 action: "restart".into(),
                 seconds: 600,

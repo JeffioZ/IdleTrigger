@@ -83,7 +83,11 @@ impl Config {
             self.idle_action = "lock".into();
         }
         self.idle_timeout_minutes = self.idle_timeout_minutes.clamp(1, 7 * 24 * 60);
-        self.idle_warning_seconds = self.idle_warning_seconds.clamp(0, 3600);
+        // System actions always carry a cancellable countdown: the idle path
+        // shares the automation rules' minimum instead of allowing 0 (silent).
+        self.idle_warning_seconds = self
+            .idle_warning_seconds
+            .clamp(crate::automation::MIN_WARNING_SECONDS, 3600);
         self.nosleep_battery_threshold = self.nosleep_battery_threshold.clamp(0, 100);
         if !matches!(self.theme_mode.as_str(), "fixed" | "sunrise") {
             self.theme_mode = "sunrise".into();
@@ -350,6 +354,20 @@ fn save_candidate(
 #[cfg(test)]
 mod save_tests {
     use super::*;
+    #[test]
+    fn idle_warning_below_minimum_sanitizes_upward() {
+        // 0 used to mean "silent execution"; the idle path now shares the
+        // automation rules' cancellable-countdown minimum.
+        let config = Config {
+            idle_warning_seconds: 0,
+            ..Config::default()
+        }
+        .sanitized();
+        assert_eq!(
+            config.idle_warning_seconds,
+            crate::automation::MIN_WARNING_SECONDS
+        );
+    }
     #[test]
     fn save_load_preserves_comments_and_ui_limits() {
         let path = std::env::temp_dir().join(format!(

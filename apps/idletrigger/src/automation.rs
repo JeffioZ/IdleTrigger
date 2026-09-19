@@ -26,7 +26,12 @@ static OVERRIDES: Mutex<auto::EffectiveState> = Mutex::new(auto::EffectiveState 
 static ACTIVE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 
 pub fn overrides() -> auto::EffectiveState {
-    OVERRIDES.lock().unwrap().clone()
+    crate::runtime::lock(&OVERRIDES).clone()
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_overrides(state: auto::EffectiveState) {
+    *crate::runtime::lock(&OVERRIDES) = state;
 }
 
 pub static RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
@@ -35,6 +40,8 @@ pub static RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 /// marks the affected rows as invalid instead of hiding them.
 pub static ISSUES: Mutex<Vec<auto::RuleIssue>> = Mutex::new(Vec::new());
 pub static STATE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+// Recovering lock: a torn record inserts a duplicate occurrence at worst —
+// the same-day dedup absorbs it and the next persist rewrites whole state.
 pub static RUNTIME_STATE: Mutex<auto::RuntimeState> = Mutex::new(auto::RuntimeState {
     last_occurrences: BTreeMap::new(),
 });
@@ -58,9 +65,7 @@ impl PendingAction {
         }
         crate::cfg_map(|c| c.automation_enabled)
             && self.rule.as_ref().is_some_and(|expected| {
-                RULES
-                    .lock()
-                    .unwrap()
+                crate::runtime::lock(&RULES)
                     .iter()
                     .any(|rule| rule.enabled && rule == expected)
             })
@@ -79,22 +84,37 @@ struct ProcessTracker {
 }
 #[derive(Default)]
 struct Presence {
-    present: bool,
+    /// Last confirmed observation; `None` until the first resolvable scan.
+    known: Option<bool>,
     absent_since: Option<std::time::Instant>,
+    /// The latest scan could not query every same-name instance.
+    uncertain: bool,
 }
 impl Presence {
-    fn update(&mut self, present: bool, now: std::time::Instant) -> bool {
-        if present {
-            self.present = true;
-            self.absent_since = None;
-        } else if self.present {
-            let since = self.absent_since.get_or_insert(now);
-            if now.saturating_duration_since(*since) >= EXIT_GRACE {
-                self.present = false;
+    /// `None` means absence is not confirmable (a same-name instance could
+    /// not be queried): hold the last known state instead of manufacturing
+    /// an exit. Confirmed absence still travels the exit grace window.
+    fn update(&mut self, observed: Option<bool>, now: std::time::Instant) -> bool {
+        match observed {
+            Some(true) => {
+                self.known = Some(true);
                 self.absent_since = None;
             }
+            Some(false) => {
+                if self.known == Some(true) {
+                    let since = self.absent_since.get_or_insert(now);
+                    if now.saturating_duration_since(*since) >= EXIT_GRACE {
+                        self.known = Some(false);
+                        self.absent_since = None;
+                    }
+                } else {
+                    self.known = Some(false);
+                }
+            }
+            None => {}
         }
-        self.present
+        self.uncertain = observed.is_none();
+        self.known.unwrap_or(false)
     }
 }
 impl ProcessTracker {
@@ -114,19 +134,20 @@ impl ProcessTracker {
             .collect();
         self.targets.retain(|key, _| targets.contains_key(key));
         let snapshot = snapshot?;
-        Some(
-            targets
-                .into_iter()
-                .map(|(key, target)| {
-                    let present = self
-                        .targets
-                        .entry(key.clone())
-                        .or_default()
-                        .update(target_present(target, snapshot), now);
-                    (key, present)
-                })
-                .collect(),
-        )
+        let mut observations = BTreeMap::new();
+        for (key, target) in targets {
+            let entry = self.targets.entry(key.clone()).or_default();
+            let was_uncertain = entry.uncertain;
+            let present = entry.update(target_present(target, snapshot), now);
+            if entry.uncertain && !was_uncertain {
+                crate::log_line(&format!(
+                    "automation: could not query every {} instance; holding last state",
+                    target.executable
+                ));
+            }
+            observations.insert(key, present);
+        }
+        Some(observations)
     }
 
     fn edge(&mut self, rule: &auto::Rule, present: bool) -> bool {
@@ -142,6 +163,8 @@ impl ProcessTracker {
             }
     }
 }
+// Recovering lock: a torn update costs at most one extra or missed
+// process-start/exit edge; the next 5s scan rebuilds the baseline.
 static PROCESS_TRACKER: Mutex<ProcessTracker> = Mutex::new(ProcessTracker {
     targets: BTreeMap::new(),
     edges: BTreeMap::new(),
@@ -151,6 +174,8 @@ struct WaitingEvent {
     occurrence: String,
     deadline: std::time::Instant,
 }
+// Recovering lock: a torn take-and-reinsert drops a pending event that was
+// already en route — the same outcome as the deadline expiring.
 static WAITING_EVENTS: Mutex<BTreeMap<String, WaitingEvent>> = Mutex::new(BTreeMap::new());
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
@@ -180,9 +205,9 @@ pub fn reload_rules() {
             )
         }
     };
-    *ISSUES.lock().unwrap() = issues.clone();
+    *crate::runtime::lock(&ISSUES) = issues.clone();
     let enabled = crate::cfg_map(|c| c.automation_enabled);
-    let mut active = ACTIVE_RULES.lock().unwrap();
+    let mut active = crate::runtime::lock(&ACTIVE_RULES);
     active.retain(|rule| {
         enabled
             && runtime
@@ -192,13 +217,13 @@ pub fn reload_rules() {
     publish_overrides(auto::aggregate_state(active.iter()));
     drop(active);
     if !enabled {
-        WAITING_EVENTS.lock().unwrap().clear();
-        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
+        crate::runtime::lock(&WAITING_EVENTS).clear();
+        *crate::runtime::lock(&PROCESS_TRACKER) = ProcessTracker::default();
     }
-    *RULES.lock().unwrap() = runtime;
+    *crate::runtime::lock(&RULES) = runtime;
     crate::log_line(&format!(
         "automation rules loaded: {} ({} issues)",
-        RULES.lock().unwrap().len(),
+        crate::runtime::lock(&RULES).len(),
         issues.len()
     ));
 }
@@ -209,8 +234,8 @@ pub fn spawn(config_dir: PathBuf) {
     if let Some(err) = err {
         crate::log_line(&format!("automation state: {err}"));
     }
-    *RUNTIME_STATE.lock().unwrap() = state;
-    *STATE_PATH.lock().unwrap() = Some(state_path);
+    *crate::runtime::lock(&RUNTIME_STATE) = state;
+    *crate::runtime::lock(&STATE_PATH) = Some(state_path);
 
     std::thread::Builder::new()
         .name("automation".into())
@@ -220,9 +245,11 @@ pub fn spawn(config_dir: PathBuf) {
                 if crate::EXITING.load(Ordering::SeqCst) {
                     return;
                 }
-                if let Err(err) = tick(first_tick) {
-                    crate::log_line(&format!("automation tick error: {err}"));
-                }
+                crate::runtime::catch_and_log("automation", || {
+                    if let Err(err) = tick(first_tick) {
+                        crate::log_line(&format!("automation tick error: {err}"));
+                    }
+                });
                 first_tick = false;
                 std::thread::sleep(SCAN_INTERVAL);
             }
@@ -249,18 +276,15 @@ fn tick_with_snapshot(
     // not publish obsolete overrides or queue an event after a rule edit.
     let _configuration = crate::runtime::lock(&crate::CONFIG_WRITER);
     let enabled = crate::cfg_map(|c| c.automation_enabled);
-    let rules = RULES.lock().unwrap().clone();
+    let rules = crate::runtime::lock(&RULES).clone();
     if !enabled {
-        WAITING_EVENTS.lock().unwrap().clear();
-        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
+        crate::runtime::lock(&WAITING_EVENTS).clear();
+        *crate::runtime::lock(&PROCESS_TRACKER) = ProcessTracker::default();
         clear_overrides();
         return Ok(());
     }
     let observations =
-        PROCESS_TRACKER
-            .lock()
-            .unwrap()
-            .observe(&rules, snapshot.as_ref(), monotonic_now);
+        crate::runtime::lock(&PROCESS_TRACKER).observe(&rules, snapshot.as_ref(), monotonic_now);
     let condition = |rule: &auto::Rule| {
         rule.processes.is_empty()
             || observations
@@ -269,7 +293,7 @@ fn tick_with_snapshot(
     };
 
     let mut active = Vec::new();
-    let waiting = std::mem::take(&mut *WAITING_EVENTS.lock().unwrap());
+    let waiting = std::mem::take(&mut *crate::runtime::lock(&WAITING_EVENTS));
     for (id, pending) in waiting {
         let rule = &pending.rule;
         if !rules
@@ -283,7 +307,7 @@ fn tick_with_snapshot(
         } else if condition(rule) {
             fire_event(rule, Some(pending.occurrence.clone()));
         } else {
-            WAITING_EVENTS.lock().unwrap().insert(id, pending);
+            crate::runtime::lock(&WAITING_EVENTS).insert(id, pending);
         }
     }
     for rule in &rules {
@@ -302,14 +326,12 @@ fn tick_with_snapshot(
                 }
             }
             auto::TRIGGER_ONCE | auto::TRIGGER_DAILY | auto::TRIGGER_WEEKLY => {
-                if first_tick || WAITING_EVENTS.lock().unwrap().contains_key(&rule.id) {
+                if first_tick || crate::runtime::lock(&WAITING_EVENTS).contains_key(&rule.id) {
                     continue; // Establish the first observation before scheduling events.
                 }
                 if day_matches(rule, &now) && schedule_due(&now, &rule.time) {
                     let occurrence = format!("{}T{}", now.date, rule.time);
-                    let already = RUNTIME_STATE
-                        .lock()
-                        .unwrap()
+                    let already = crate::runtime::lock(&RUNTIME_STATE)
                         .has_scheduled_occurrence(&rule.id, &occurrence);
                     if !already {
                         if condition(rule) {
@@ -317,7 +339,7 @@ fn tick_with_snapshot(
                         } else if rule.blocked_policy == auto::BLOCKED_WAIT
                             && rule.max_wait_minutes > 0
                         {
-                            WAITING_EVENTS.lock().unwrap().insert(
+                            crate::runtime::lock(&WAITING_EVENTS).insert(
                                 rule.id.clone(),
                                 WaitingEvent {
                                     rule: rule.clone(),
@@ -340,7 +362,7 @@ fn tick_with_snapshot(
                     .processes
                     .iter()
                     .any(|t| present.get(&t.key()) == Some(&true));
-                let fire = PROCESS_TRACKER.lock().unwrap().edge(rule, any);
+                let fire = crate::runtime::lock(&PROCESS_TRACKER).edge(rule, any);
                 if fire {
                     fire_event(rule, None);
                 }
@@ -348,7 +370,7 @@ fn tick_with_snapshot(
             _ => {}
         }
     }
-    *ACTIVE_RULES.lock().unwrap() = active.iter().map(|rule| (*rule).clone()).collect();
+    *crate::runtime::lock(&ACTIVE_RULES) = active.iter().map(|rule| (*rule).clone()).collect();
     publish_overrides(auto::aggregate_state(active));
     if snapshot.is_none() {
         Err("process snapshot failed".into())
@@ -358,12 +380,12 @@ fn tick_with_snapshot(
 }
 
 fn clear_overrides() {
-    ACTIVE_RULES.lock().unwrap().clear();
+    crate::runtime::lock(&ACTIVE_RULES).clear();
     publish_overrides(auto::EffectiveState::default());
 }
 
 fn publish_overrides(state: auto::EffectiveState) {
-    let mut current = OVERRIDES.lock().unwrap();
+    let mut current = crate::runtime::lock(&OVERRIDES);
     let changed = *current != state;
     *current = state;
     drop(current);
@@ -415,7 +437,7 @@ fn dispatch_event(rule: &auto::Rule, occurrence: Option<String>, notify: impl Fn
         return;
     }
     let seconds = rule.warning_seconds.max(auto::MIN_WARNING_SECONDS);
-    let mut pending = PENDING_ACTION.lock().unwrap();
+    let mut pending = crate::runtime::lock(&PENDING_ACTION);
     *pending = Some(PendingAction {
         rule: Some(rule.clone()),
         action: rule.action.clone(),
@@ -439,10 +461,7 @@ static SAVE_ERRORS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new()
 fn record_occurrence(rule: &auto::Rule, occurrence: String) -> bool {
     // Remember cancelled occurrences in this process too: do not retry the
     // same action or show another error on every scan during its grace window.
-    RUNTIME_STATE
-        .lock()
-        .unwrap()
-        .record_scheduled_occurrence(&rule.id, occurrence);
+    crate::runtime::lock(&RUNTIME_STATE).record_scheduled_occurrence(&rule.id, occurrence);
     match persist_state() {
         Ok(()) => true,
         Err(error) => {
@@ -450,7 +469,7 @@ fn record_occurrence(rule: &auto::Rule, occurrence: String) -> bool {
                 "automation event {} cancelled: state save failed: {error}",
                 rule.id
             ));
-            SAVE_ERRORS.lock().unwrap().insert(
+            crate::runtime::lock(&SAVE_ERRORS).insert(
                 rule.id.clone(),
                 crate::t_args(
                     "automation_checkpoint_failed",
@@ -465,26 +484,24 @@ fn record_occurrence(rule: &auto::Rule, occurrence: String) -> bool {
 
 /// Display worker failures on the UI thread, with no scheduler locks held.
 pub fn show_save_errors() {
-    let errors = std::mem::take(&mut *SAVE_ERRORS.lock().unwrap());
+    let errors = std::mem::take(&mut *crate::runtime::lock(&SAVE_ERRORS));
     if !errors.is_empty() {
         crate::warn_dialog("", &errors.into_values().collect::<Vec<_>>().join("\n\n"));
     }
 }
 
 fn persist_state() -> std::io::Result<()> {
-    let path = STATE_PATH
-        .lock()
-        .unwrap()
+    let path = crate::runtime::lock(&STATE_PATH)
         .clone()
         .ok_or_else(|| std::io::Error::other("automation state path unavailable"))?;
-    let state = RUNTIME_STATE.lock().unwrap().clone();
+    let state = crate::runtime::lock(&RUNTIME_STATE).clone();
     auto::save_runtime_state(&path, &state)
 }
 
 /// Cancelling a one-shot rule disables only that specific rule (identified
 /// by the rule_id carried in the pending action), not every once rule.
 pub fn disable_rule_after_cancel(rule_id: &str) {
-    let base = RULES.lock().unwrap().clone();
+    let base = crate::runtime::lock(&RULES).clone();
     let mut rules = base.clone();
     let Some(rule) = rules
         .iter_mut()
@@ -578,7 +595,7 @@ pub fn next_scheduled() -> Option<String> {
             .unwrap_or(1),
     );
     let mut best: Option<(i64, i32)> = None; // (days, minutes)
-    let rules = RULES.lock().unwrap().clone();
+    let rules = crate::runtime::lock(&RULES).clone();
     for rule in &rules {
         if !rule.enabled
             || !auto::is_event_action(&rule.action)
@@ -678,10 +695,15 @@ fn in_time_window(rule: &auto::Rule, now: &LocalNow) -> bool {
     }
 }
 
-fn target_present(target: &auto::ProcessTarget, snapshot: &Snapshot) -> bool {
+/// `Some(true)` when a same-name instance resolved to the expected path and
+/// `Some(false)` when absence is confirmed (no same-name instances at all,
+/// or every one resolved and none matched). `None` when at least one
+/// same-name instance could not be queried: a failed query is not evidence
+/// of absence, so the caller holds the last state.
+fn target_present(target: &auto::ProcessTarget, snapshot: &Snapshot) -> Option<bool> {
     match target.kind.as_str() {
         auto::MATCH_PATH => snapshot.matches_path(target, query_process_path),
-        _ => snapshot.names().contains(&target.executable.to_lowercase()),
+        _ => Some(snapshot.names().contains(&target.executable.to_lowercase())),
     }
 }
 
@@ -808,12 +830,32 @@ impl Snapshot {
         &self,
         target: &auto::ProcessTarget,
         resolve: impl Fn(u32) -> Option<String>,
-    ) -> bool {
+    ) -> Option<bool> {
         let expected = normalize(&target.path);
-        self.pids_by_name
-            .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case(&target.executable))
-            .any(|(_, pid)| resolve(*pid).is_some_and(|path| normalize(&path) == expected))
+        let mut same_name = false;
+        let mut unresolvable = false;
+        let mut matched = false;
+        for (name, pid) in &self.pids_by_name {
+            if !name.eq_ignore_ascii_case(&target.executable) {
+                continue;
+            }
+            same_name = true;
+            match resolve(*pid) {
+                Some(path) => {
+                    if normalize(&path) == expected {
+                        matched = true;
+                    }
+                }
+                None => unresolvable = true,
+            }
+        }
+        if matched {
+            Some(true)
+        } else if same_name && unresolvable {
+            None
+        } else {
+            Some(false)
+        }
     }
 
     /// Absolute lowercase path of the first process with this executable
@@ -883,10 +925,10 @@ mod runtime_tests {
     use super::*;
     #[test]
     fn checkpoint_failure_blocks_dispatch_and_success_is_saved_before_notification() {
-        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let old_state = std::mem::take(&mut *RUNTIME_STATE.lock().unwrap());
-        let old_path = STATE_PATH.lock().unwrap().take();
-        let old_errors = std::mem::take(&mut *SAVE_ERRORS.lock().unwrap());
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let old_state = std::mem::take(&mut *crate::runtime::lock(&RUNTIME_STATE));
+        let old_path = crate::runtime::lock(&STATE_PATH).take();
+        let old_errors = std::mem::take(&mut *crate::runtime::lock(&SAVE_ERRORS));
         let directory = std::env::temp_dir().join(format!(
             "IdleTrigger-checkpoint-{}-{}",
             std::process::id(),
@@ -898,7 +940,7 @@ mod runtime_tests {
         let path = directory.join("IdleTrigger.state.json");
         // A directory at the destination makes the atomic replacement fail.
         std::fs::create_dir_all(&path).unwrap();
-        *STATE_PATH.lock().unwrap() = Some(path.clone());
+        *crate::runtime::lock(&STATE_PATH) = Some(path.clone());
         let rule = auto::Rule {
             id: "checkpoint-test".into(),
             name: "Checkpoint test".into(),
@@ -911,14 +953,11 @@ mod runtime_tests {
             panic!("failed save must not dispatch")
         });
         assert!(!ACTION_BUSY.load(Ordering::SeqCst));
-        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
         assert!(
-            RUNTIME_STATE
-                .lock()
-                .unwrap()
-                .has_scheduled_occurrence(&rule.id, occurrence)
+            crate::runtime::lock(&RUNTIME_STATE).has_scheduled_occurrence(&rule.id, occurrence)
         );
-        assert!(SAVE_ERRORS.lock().unwrap().contains_key(&rule.id));
+        assert!(crate::runtime::lock(&SAVE_ERRORS).contains_key(&rule.id));
         assert!(path.is_dir());
 
         std::fs::remove_dir(&path).unwrap();
@@ -933,20 +972,18 @@ mod runtime_tests {
         });
         assert!(notified);
         assert!(!ACTION_BUSY.load(Ordering::SeqCst));
-        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
-        *RUNTIME_STATE.lock().unwrap() = old_state;
-        *STATE_PATH.lock().unwrap() = old_path;
-        *SAVE_ERRORS.lock().unwrap() = old_errors;
+        *crate::runtime::lock(&RUNTIME_STATE) = old_state;
+        *crate::runtime::lock(&STATE_PATH) = old_path;
+        *crate::runtime::lock(&SAVE_ERRORS) = old_errors;
     }
 
     #[test]
     fn scheduled_process_conditions_wait_and_expire_without_dispatch() {
-        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let previous_config = crate::CONFIG
-            .lock()
-            .unwrap()
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous_config = crate::runtime::lock(&crate::CONFIG)
             .replace(idletrigger_core::config::Config::default());
         crate::cfg_edit(|c| c.automation_enabled = true);
         let rule: auto::Rule = toml_edit::de::from_str(
@@ -966,7 +1003,7 @@ executable = "missing.exe"
 "#,
         )
         .unwrap();
-        *RULES.lock().unwrap() = vec![rule.clone()];
+        *crate::runtime::lock(&RULES) = vec![rule.clone()];
         let now = || LocalNow {
             date: "2026-09-13".into(),
             minutes: 720,
@@ -980,23 +1017,27 @@ executable = "missing.exe"
         };
         let instant = std::time::Instant::now();
         tick_with_snapshot(false, snapshot(), now(), instant).unwrap();
-        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
         assert!(!ACTION_BUSY.load(Ordering::SeqCst));
-        assert_eq!(WAITING_EVENTS.lock().unwrap().len(), 1);
-        assert!(RUNTIME_STATE.lock().unwrap().last_occurrences.is_empty());
+        assert_eq!(crate::runtime::lock(&WAITING_EVENTS).len(), 1);
+        assert!(
+            crate::runtime::lock(&RUNTIME_STATE)
+                .last_occurrences
+                .is_empty()
+        );
         tick_with_snapshot(false, snapshot(), now(), instant + Duration::from_secs(60)).unwrap();
         assert_eq!(
-            WAITING_EVENTS.lock().unwrap()["condition-test"].deadline,
+            crate::runtime::lock(&WAITING_EVENTS)["condition-test"].deadline,
             instant + Duration::from_secs(300)
         );
         // A failed scan cannot postpone an elapsed waiting deadline.
         assert!(
             tick_with_snapshot(false, None, now(), instant + Duration::from_secs(300)).is_err()
         );
-        assert!(WAITING_EVENTS.lock().unwrap().is_empty());
-        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(crate::runtime::lock(&WAITING_EVENTS).is_empty());
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
         assert_eq!(
-            RUNTIME_STATE.lock().unwrap().last_occurrences["condition-test"],
+            crate::runtime::lock(&RUNTIME_STATE).last_occurrences["condition-test"],
             "2026-09-13T12:00"
         );
 
@@ -1004,14 +1045,14 @@ executable = "missing.exe"
         // reserve the slot; a busy action never overwrites its payload.
         dispatch_event(&rule, None, || false);
         assert!(!ACTION_BUSY.load(Ordering::SeqCst));
-        assert!(PENDING_ACTION.lock().unwrap().is_none());
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
         dispatch_event(&rule, None, || true);
         assert!(ACTION_BUSY.load(Ordering::SeqCst));
-        let pending = PENDING_ACTION.lock().unwrap().clone().unwrap();
+        let pending = crate::runtime::lock(&PENDING_ACTION).clone().unwrap();
         assert!(pending.is_current());
-        RULES.lock().unwrap()[0].name = "changed".into();
+        crate::runtime::lock(&RULES)[0].name = "changed".into();
         assert!(!pending.is_current());
-        RULES.lock().unwrap()[0] = rule.clone();
+        crate::runtime::lock(&RULES)[0] = rule.clone();
         crate::cfg_edit(|c| c.automation_enabled = false);
         assert!(!pending.is_current());
         crate::cfg_edit(|c| c.automation_enabled = true);
@@ -1019,10 +1060,13 @@ executable = "missing.exe"
         second.id = "second".into();
         dispatch_event(&second, None, || panic!("busy dispatch must not notify"));
         assert_eq!(
-            PENDING_ACTION.lock().unwrap().as_ref().unwrap().rule_id,
+            crate::runtime::lock(&PENDING_ACTION)
+                .as_ref()
+                .unwrap()
+                .rule_id,
             "condition-test"
         );
-        *PENDING_ACTION.lock().unwrap() = None;
+        *crate::runtime::lock(&PENDING_ACTION) = None;
         ACTION_BUSY.store(false, Ordering::SeqCst);
 
         // Time-only work still evaluates while the process scanner is unknown.
@@ -1031,27 +1075,27 @@ executable = "missing.exe"
         second.trigger = auto::TRIGGER_TIME_WINDOW.into();
         second.time = "00:00".into();
         second.end_time = "23:59".into();
-        *RULES.lock().unwrap() = vec![second.clone()];
+        *crate::runtime::lock(&RULES) = vec![second.clone()];
         assert!(tick_with_snapshot(false, None, now(), instant).is_err());
         assert!(overrides().stay_awake);
         second.action = auto::ACTION_LOCK.into();
         second.trigger = auto::TRIGGER_DAILY.into();
         second.time = "12:00".into();
-        *RULES.lock().unwrap() = vec![second];
+        *crate::runtime::lock(&RULES) = vec![second];
         assert!(tick_with_snapshot(false, None, now(), instant).is_err());
         assert!(
-            RUNTIME_STATE
-                .lock()
-                .unwrap()
+            crate::runtime::lock(&RUNTIME_STATE)
                 .has_scheduled_occurrence("second", "2026-09-13T12:00")
         );
         assert!(!ACTION_BUSY.load(Ordering::SeqCst)); // Null recipient is a failed dispatch.
-        RULES.lock().unwrap().clear();
-        *PROCESS_TRACKER.lock().unwrap() = ProcessTracker::default();
+        crate::runtime::lock(&RULES).clear();
+        *crate::runtime::lock(&PROCESS_TRACKER) = ProcessTracker::default();
         clear_overrides();
-        RUNTIME_STATE.lock().unwrap().last_occurrences.clear();
-        SAVE_ERRORS.lock().unwrap().clear();
-        *crate::CONFIG.lock().unwrap() = previous_config;
+        crate::runtime::lock(&RUNTIME_STATE)
+            .last_occurrences
+            .clear();
+        crate::runtime::lock(&SAVE_ERRORS).clear();
+        *crate::runtime::lock(&crate::CONFIG) = previous_config;
     }
 
     #[test]
@@ -1129,15 +1173,38 @@ executable = "app.exe"
             executable: "App.EXE".into(),
             path: "D:/chosen/app.exe".into(),
         };
-        assert!(snapshot.matches_path(&target, |pid| match pid {
-            1 => Some("C:\\wrong\\app.exe".into()),
-            2 => Some("D:\\CHOSEN\\APP.EXE".into()),
-            _ => panic!("unrelated executable must not be queried"),
-        }));
-        assert!(snapshot.matches_path(&target, |pid| {
-            (pid == 2).then(|| "D:\\chosen\\app.exe".into())
-        }));
-        assert!(!snapshot.matches_path(&target, |_| None));
+        assert_eq!(
+            snapshot.matches_path(&target, |pid| match pid {
+                1 => Some("C:\\wrong\\app.exe".into()),
+                2 => Some("D:\\CHOSEN\\APP.EXE".into()),
+                _ => panic!("unrelated executable must not be queried"),
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            snapshot.matches_path(&target, |pid| {
+                (pid == 2).then(|| "D:\\chosen\\app.exe".into())
+            }),
+            Some(true)
+        );
+        // Every same-name query failing is uncertainty, not confirmed
+        // absence: the caller must hold its previous state.
+        assert_eq!(snapshot.matches_path(&target, |_| None), None);
+    }
+
+    #[test]
+    fn unresolvable_paths_hold_presence_instead_of_exiting() {
+        let mut presence = Presence::default();
+        let now = std::time::Instant::now();
+        // An uncertain first observation is a conservative absent baseline
+        // (no retroactive process-start event once it resolves).
+        assert!(!presence.update(None, now));
+        assert!(presence.update(Some(true), now));
+        // Query failures are not evidence of absence: hold past the grace.
+        assert!(presence.update(None, now + Duration::from_secs(60)));
+        // Confirmed absence still exits through the normal grace window.
+        assert!(presence.update(Some(false), now + Duration::from_secs(61)));
+        assert!(!presence.update(Some(false), now + Duration::from_secs(70)));
     }
 
     #[test]

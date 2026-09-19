@@ -142,6 +142,8 @@ const PK_PREVIEW: usize = 409;
 const PK_REFRESH: usize = 412;
 const PK_BROWSE: usize = 413;
 const PK_EMPTY: usize = 344;
+/// Window-scoped debounce timer id for the search box filter.
+const PK_FILTER_TIMER: usize = 1;
 const PK_SEARCH_SURFACE: usize = 420;
 const PK_LIST_SURFACE: usize = 421;
 const PK_PREVIEW_SURFACE: usize = 422;
@@ -183,7 +185,7 @@ static EDIT_SESSION: Mutex<Option<EditorSession>> = Mutex::new(None);
 /// Opens a session when a rule is chosen for editing; the snapshot and
 /// original rule are filled in later by complete_edit at populate time.
 fn begin_edit(index: i32, procs: Vec<auto::ProcessTarget>) {
-    *EDIT_SESSION.lock().unwrap() = Some(EditorSession {
+    *crate::runtime::lock(&EDIT_SESSION) = Some(EditorSession {
         index,
         procs,
         ..Default::default()
@@ -191,7 +193,7 @@ fn begin_edit(index: i32, procs: Vec<auto::ProcessTarget>) {
 }
 
 fn complete_edit(index: i32, base_rules: Vec<auto::Rule>, orig: auto::Rule) {
-    let mut guard = EDIT_SESSION.lock().unwrap();
+    let mut guard = crate::runtime::lock(&EDIT_SESSION);
     let session = guard.get_or_insert_with(Default::default);
     session.index = index;
     session.base_rules = base_rules;
@@ -199,38 +201,30 @@ fn complete_edit(index: i32, base_rules: Vec<auto::Rule>, orig: auto::Rule) {
 }
 
 fn end_edit() {
-    *EDIT_SESSION.lock().unwrap() = None;
+    *crate::runtime::lock(&EDIT_SESSION) = None;
 }
 
 fn edit_index() -> i32 {
-    EDIT_SESSION
-        .lock()
-        .unwrap()
+    crate::runtime::lock(&EDIT_SESSION)
         .as_ref()
         .map_or(-1, |s| s.index)
 }
 
 fn edit_orig() -> Option<auto::Rule> {
-    EDIT_SESSION
-        .lock()
-        .unwrap()
+    crate::runtime::lock(&EDIT_SESSION)
         .as_ref()
         .and_then(|s| s.orig.clone())
 }
 
 fn edit_procs() -> Vec<auto::ProcessTarget> {
-    EDIT_SESSION
-        .lock()
-        .unwrap()
+    crate::runtime::lock(&EDIT_SESSION)
         .as_ref()
         .map(|s| s.procs.clone())
         .unwrap_or_default()
 }
 
 fn set_edit_procs(procs: Vec<auto::ProcessTarget>) {
-    EDIT_SESSION
-        .lock()
-        .unwrap()
+    crate::runtime::lock(&EDIT_SESSION)
         .get_or_insert_with(Default::default)
         .procs = procs;
 }
@@ -240,7 +234,7 @@ fn set_edit_procs(procs: Vec<auto::ProcessTarget>) {
 static EDIT_CHECKS: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
 
 fn edit_checks() -> std::sync::MutexGuard<'static, Option<HashMap<usize, bool>>> {
-    EDIT_CHECKS.lock().unwrap()
+    crate::runtime::lock(&EDIT_CHECKS)
 }
 
 fn edit_is_checked(id: usize) -> bool {
@@ -675,7 +669,7 @@ pub fn ensure_created() {
 
         let _ = mk_static(
             MGR_TITLE,
-            &t_pub("automation_rules_title"),
+            &t_pub(caption_key(MANAGER_TEXTS, MGR_TITLE)),
             section_font,
             MGR_PAD,
             MGR_TITLE_Y,
@@ -748,7 +742,7 @@ pub fn ensure_created() {
         let empty_y = MGR_LIST_Y + (MGR_LIST_H - (2 * MGR_TEXT_H + 12)) / 2;
         let _ = mk_static(
             MGR_EMPTY_TITLE,
-            &t_pub("automation_empty_title"),
+            &t_pub(caption_key(MANAGER_TEXTS, MGR_EMPTY_TITLE)),
             section_font,
             MGR_PAD + 24,
             empty_y,
@@ -757,7 +751,7 @@ pub fn ensure_created() {
         );
         let _ = mk_static(
             MGR_EMPTY_BODY,
-            &t_pub("automation_empty_body"),
+            &t_pub(caption_key(MANAGER_TEXTS, MGR_EMPTY_BODY)),
             font,
             MGR_PAD + 24,
             empty_y + MGR_TEXT_H + 12,
@@ -777,12 +771,19 @@ pub fn ensure_created() {
         );
 
         // Button row: Go 116/116/116/192 grid (the wide one toggles).
+        // MGR_TOGGLE's caption is state-managed (enable/disable wording);
+        // the registry covers the static captions.
         for (id, label_key, x, w) in [
-            (MGR_NEW, "automation_new", MGR_PAD, 116),
-            (MGR_EDIT, "automation_edit", MGR_PAD + 116 + 8, 116),
+            (MGR_NEW, caption_key(MANAGER_TEXTS, MGR_NEW), MGR_PAD, 116),
+            (
+                MGR_EDIT,
+                caption_key(MANAGER_TEXTS, MGR_EDIT),
+                MGR_PAD + 116 + 8,
+                116,
+            ),
             (
                 MGR_DELETE,
-                "automation_delete",
+                caption_key(MANAGER_TEXTS, MGR_DELETE),
                 MGR_PAD + 2 * (116 + 8),
                 116,
             ),
@@ -840,7 +841,7 @@ pub fn show() {
         crate::FirstFrameGate::begin(mgr).reveal();
         let _ = SetForegroundWindow(mgr);
         // Go focuses the list (or New when empty) after showing the manager.
-        let empty = crate::automation::RULES.lock().unwrap().is_empty();
+        let empty = crate::runtime::lock(&crate::automation::RULES).is_empty();
         let target = if empty {
             get_dlg_item(mgr, MGR_NEW)
         } else {
@@ -909,18 +910,16 @@ fn refresh_list() {
 
         // Keep the previous selection and top index across the reset (Go
         // populateRules remembers both before clearing).
-        let rules = crate::automation::RULES.lock().unwrap().clone();
-        let issues = crate::automation::ISSUES.lock().unwrap().clone();
+        let rules = crate::runtime::lock(&crate::automation::RULES).clone();
+        let issues = crate::runtime::lock(&crate::automation::ISSUES).clone();
 
         let had_selection = SendMessageW(list, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0;
         let selected_id = usize::try_from(had_selection).ok().and_then(|index| {
-            MGR_DISPLAYED_RULES
-                .lock()
-                .unwrap()
+            crate::runtime::lock(&MGR_DISPLAYED_RULES)
                 .get(index)
                 .map(|r| r.id.clone())
         });
-        *MGR_DISPLAYED_RULES.lock().unwrap() = rules.clone();
+        *crate::runtime::lock(&MGR_DISPLAYED_RULES) = rules.clone();
         let top = SendMessageW(list, LB_GETTOPINDEX, Some(WPARAM(0)), Some(LPARAM(0))).0;
         let _ = SendMessageW(list, LB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
 
@@ -1106,7 +1105,7 @@ fn selected_index() -> Option<usize> {
 
 fn edit_selected() {
     if let Some(idx) = selected_index() {
-        let rules = MGR_DISPLAYED_RULES.lock().unwrap();
+        let rules = crate::runtime::lock(&MGR_DISPLAYED_RULES);
         if let Some(rule) = rules.get(idx) {
             let procs = rule.processes.clone();
             drop(rules);
@@ -1121,7 +1120,7 @@ fn toggle_selected(mgr: HWND) {
     let Some(idx) = selected_index() else {
         return;
     };
-    let base = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+    let base = crate::runtime::lock(&MGR_DISPLAYED_RULES).clone();
     let mut rules = base.clone();
     if idx >= rules.len() {
         return;
@@ -1138,7 +1137,7 @@ fn delete_selected(mgr: HWND) {
     let Some(idx) = selected_index() else {
         return;
     };
-    let base = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+    let base = crate::runtime::lock(&MGR_DISPLAYED_RULES).clone();
     let rules = &base;
     let Some(rule) = rules.get(idx).cloned() else {
         return;
@@ -1187,7 +1186,7 @@ unsafe extern "system" fn mgr_proc(
                         MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(hwnd),
                         MGR_LIST if hi == LBN_DBLCLK => edit_selected(),
                         MGR_LIST if hi == LBN_SELCHANGE => {
-                            let rules = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+                            let rules = crate::runtime::lock(&MGR_DISPLAYED_RULES).clone();
                             let sel = selected_index().map(|s| s as isize).unwrap_or(-1);
                             update_manager_actions(hwnd, &rules, sel);
                         }
@@ -1257,7 +1256,7 @@ unsafe extern "system" fn mgr_proc(
                 WM_DESTROY => {
                     MGR_HWND.store(0, Ordering::SeqCst);
                     MGR_LIST_HWND.store(0, Ordering::SeqCst);
-                    MGR_DISPLAYED_RULES.lock().unwrap().clear();
+                    crate::runtime::lock(&MGR_DISPLAYED_RULES).clear();
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                         crate::hwnd(&crate::PANEL),
                         true,
@@ -1671,32 +1670,92 @@ fn create_editor() {
         };
 
         // Section titles + labels (Go editor.go build order).
-        mk_label(ED_BASICS_TITLE, &t_pub("automation_basics"), section_font);
+        mk_label(
+            ED_BASICS_TITLE,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_BASICS_TITLE)),
+            section_font,
+        );
         mk_label(
             ED_TRIGGER_TITLE,
-            &t_pub("automation_trigger_conditions"),
+            &t_pub(caption_key(EDITOR_TEXTS, ED_TRIGGER_TITLE)),
             section_font,
         );
         mk_label(
             ED_OPTIONS_TITLE,
-            &t_pub("automation_action_options"),
+            &t_pub(caption_key(EDITOR_TEXTS, ED_OPTIONS_TITLE)),
             section_font,
         );
-        mk_label(ED_NAME_LBL, &t_pub("automation_name"), font);
-        mk_label(ED_ACTION_LBL, &t_pub("automation_action"), font);
-        mk_label(ED_TRIGGER_LBL, &t_pub("automation_trigger"), font);
-        mk_label(ED_TIME_LBL, &t_pub("automation_time"), font);
-        mk_label(ED_DATE_LBL, &t_pub("automation_date"), font);
-        mk_label(ED_END_LBL, &t_pub("automation_end_time"), font);
-        mk_label(ED_LOGIC_LBL, &t_pub("automation_process_logic"), font);
-        mk_label(ED_WARN_LBL, &t_pub("automation_warning_seconds"), font);
-        mk_label(ED_IDLE_LBL, &t_pub("automation_idle_minutes"), font);
-        mk_label(ED_MAX_LBL, &t_pub("automation_max_wait"), font);
-        mk_label(ED_DAYS_LBL, &t_pub("automation_days"), font);
-        mk_label(ED_BLOCKED_LBL, &t_pub("automation_blocked_policy"), font);
-        mk_label(ED_NAME_HINT, &t_pub("automation_name_hint"), font);
+        mk_label(
+            ED_NAME_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_NAME_LBL)),
+            font,
+        );
+        mk_label(
+            ED_ACTION_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_ACTION_LBL)),
+            font,
+        );
+        mk_label(
+            ED_TRIGGER_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_TRIGGER_LBL)),
+            font,
+        );
+        mk_label(
+            ED_TIME_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_TIME_LBL)),
+            font,
+        );
+        mk_label(
+            ED_DATE_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_DATE_LBL)),
+            font,
+        );
+        mk_label(
+            ED_END_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_END_LBL)),
+            font,
+        );
+        mk_label(
+            ED_LOGIC_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_LOGIC_LBL)),
+            font,
+        );
+        mk_label(
+            ED_WARN_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_WARN_LBL)),
+            font,
+        );
+        mk_label(
+            ED_IDLE_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_IDLE_LBL)),
+            font,
+        );
+        mk_label(
+            ED_MAX_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_MAX_LBL)),
+            font,
+        );
+        mk_label(
+            ED_DAYS_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_DAYS_LBL)),
+            font,
+        );
+        mk_label(
+            ED_BLOCKED_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_BLOCKED_LBL)),
+            font,
+        );
+        mk_label(
+            ED_NAME_HINT,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_NAME_HINT)),
+            font,
+        );
         mk_label(ED_PROC_SUMMARY, "", font);
-        mk_label(ED_NO_OPTIONS, &t_pub("automation_no_action_options"), font);
+        mk_label(
+            ED_NO_OPTIONS,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_NO_OPTIONS)),
+            font,
+        );
         mk_label(ED_VALIDATION, &t_pub("automation_runtime_note"), font);
 
         // Fields (Go: date/time edits, numeric edits).
@@ -1739,31 +1798,55 @@ fn create_editor() {
             font,
         );
 
-        mk_button(ED_CHOOSE, &t_pub("automation_choose_processes"), ED_FIELD_H);
-        mk_button(ED_DAYS_WORKDAYS, &t_pub("automation_days_workdays"), 24);
-        mk_button(ED_DAYS_EVERYDAY, &t_pub("automation_days_everyday"), 24);
-        mk_button(ED_KEEP_SCREEN, &t_pub("automation_keep_screen"), ED_CHECK_H);
+        mk_button(
+            ED_CHOOSE,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_CHOOSE)),
+            ED_FIELD_H,
+        );
+        mk_button(
+            ED_DAYS_WORKDAYS,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_DAYS_WORKDAYS)),
+            24,
+        );
+        mk_button(
+            ED_DAYS_EVERYDAY,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_DAYS_EVERYDAY)),
+            24,
+        );
+        mk_button(
+            ED_KEEP_SCREEN,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_KEEP_SCREEN)),
+            ED_CHECK_H,
+        );
         mk_button(
             ED_PROC_INFO,
-            &t_pub("automation_process_info_accessible"),
+            &t_pub(caption_key(EDITOR_TEXTS, ED_PROC_INFO)),
             ED_SUMMARY_H,
         );
 
-        for (id, key) in [
-            (ED_DAYS_MON, "automation_day_mon"),
-            (ED_DAYS_TUE, "automation_day_tue"),
-            (ED_DAYS_WED, "automation_day_wed"),
-            (ED_DAYS_THU, "automation_day_thu"),
-            (ED_DAYS_FRI, "automation_day_fri"),
-            (ED_DAYS_SAT, "automation_day_sat"),
-            (ED_DAYS_SUN, "automation_day_sun"),
+        for id in [
+            ED_DAYS_MON,
+            ED_DAYS_TUE,
+            ED_DAYS_WED,
+            ED_DAYS_THU,
+            ED_DAYS_FRI,
+            ED_DAYS_SAT,
+            ED_DAYS_SUN,
         ] {
-            mk_button(id, &t_pub(key), ED_FIELD_H);
+            mk_button(id, &t_pub(caption_key(EDITOR_TEXTS, id)), ED_FIELD_H);
         }
 
         // Footer: Save (accent) + Cancel, owner-drawn.
-        mk_button(ED_SAVE, &t_pub("automation_save"), BUTTON_H);
-        mk_button(ED_CANCEL, &t_pub("automation_cancel"), BUTTON_H);
+        mk_button(
+            ED_SAVE,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_SAVE)),
+            BUTTON_H,
+        );
+        mk_button(
+            ED_CANCEL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_CANCEL)),
+            BUTTON_H,
+        );
     }
 }
 
@@ -1826,9 +1909,9 @@ fn populate_editor() {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let idx = edit_index();
         let rules = if idx >= 0 {
-            MGR_DISPLAYED_RULES.lock().unwrap().clone()
+            crate::runtime::lock(&MGR_DISPLAYED_RULES).clone()
         } else {
-            crate::automation::RULES.lock().unwrap().clone()
+            crate::runtime::lock(&crate::automation::RULES).clone()
         };
         let rule = if idx >= 0 && (idx as usize) < rules.len() {
             Some(rules[idx as usize].clone())
@@ -1864,7 +1947,7 @@ fn populate_editor() {
         );
 
         // Validation row: runtime note, or the rule's issue (Go issueForRule).
-        let issues = crate::automation::ISSUES.lock().unwrap().clone();
+        let issues = crate::runtime::lock(&crate::automation::ISSUES).clone();
         let issue = issues
             .iter()
             .find(|i| i.index as i32 == idx || (!i.rule_id.is_empty() && i.rule_id == rule.id));
@@ -2049,9 +2132,7 @@ fn save_rule(ed: HWND) {
     let draft = normalized.remove(0);
 
     // One lock: index and snapshot must describe the same session.
-    let (idx, base) = EDIT_SESSION
-        .lock()
-        .unwrap()
+    let (idx, base) = crate::runtime::lock(&EDIT_SESSION)
         .as_ref()
         .map_or((-1, Vec::new()), |s| (s.index, s.base_rules.clone()));
     let mut candidate = base.clone();
@@ -2784,7 +2865,7 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // editor state so a recreated window cannot inherit stale
                     // checkbox marks on reused control ids.
                     EDIT_ERROR.store(false, Ordering::SeqCst);
-                    *EDIT_CHECKS.lock().unwrap() = None;
+                    *crate::runtime::lock(&EDIT_CHECKS) = None;
                     end_edit();
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                         HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
@@ -3044,8 +3125,8 @@ fn show_picker(owner: HWND) {
         refresh_tooltips();
 
         // Seed the selection from the editor draft (Go Show Selected).
-        *PK_SELECTED.lock().unwrap() = edit_procs();
-        *PK_SORT.lock().unwrap() = (0, true);
+        *crate::runtime::lock(&PK_SELECTED) = edit_procs();
+        *crate::runtime::lock(&PK_SORT) = (0, true);
         set_text(get_dlg_item(pk, PK_SEARCH), "");
 
         picker_load();
@@ -3156,13 +3237,13 @@ fn create_picker(owner: HWND) {
         // Section-title header via the shared owner-draw path.
         mk_static(
             PK_HEADING,
-            &t_pub("process_picker_heading"),
+            &t_pub(caption_key(PICKER_TEXTS, PK_HEADING)),
             font,
             PK_HEADING_Y,
         );
         mk_static(
             PK_HELPER,
-            &t_pub("process_picker_helper"),
+            &t_pub(caption_key(PICKER_TEXTS, PK_HELPER)),
             font,
             PK_HELPER_Y,
         );
@@ -3233,13 +3314,13 @@ fn create_picker(owner: HWND) {
         for (id, key, x, w) in [
             (
                 PK_REFRESH,
-                "process_picker_refresh",
+                caption_key(PICKER_TEXTS, PK_REFRESH),
                 PK_PAD + 370 + ED_GAP,
                 132,
             ),
             (
                 PK_BROWSE,
-                "process_picker_browse",
+                caption_key(PICKER_TEXTS, PK_BROWSE),
                 PK_PAD + 370 + ED_GAP + 132 + ED_GAP,
                 146,
             ),
@@ -3433,7 +3514,7 @@ fn create_picker(owner: HWND) {
 
         mk_static(
             PK_PRIVACY,
-            &t_pub("process_picker_privacy"),
+            &t_pub(caption_key(PICKER_TEXTS, PK_PRIVACY)),
             font,
             PK_PRIVACY_Y,
         );
@@ -3442,8 +3523,8 @@ fn create_picker(owner: HWND) {
         let confirm_x = PK_W - PK_PAD - PK_BUTTON_W;
         let cancel_x = confirm_x - ED_GAP - PK_BUTTON_W;
         for (id, key, x) in [
-            (PK_CANCEL, "automation_cancel", cancel_x),
-            (PK_CONFIRM, "process_picker_confirm", confirm_x),
+            (PK_CANCEL, caption_key(PICKER_TEXTS, PK_CANCEL), cancel_x),
+            (PK_CONFIRM, caption_key(PICKER_TEXTS, PK_CONFIRM), confirm_x),
         ] {
             let wide_text: Vec<u16> = t_pub(key).encode_utf16().chain([0]).collect();
             let btn = CreateWindowExW(
@@ -3652,7 +3733,7 @@ static DESCRIPTIONS: std::sync::LazyLock<Mutex<std::collections::HashMap<String,
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 fn described_target(target: &auto::ProcessTarget) -> String {
-    let descriptions = DESCRIPTIONS.lock().unwrap();
+    let descriptions = crate::runtime::lock(&DESCRIPTIONS);
     match descriptions
         .get(&target.key())
         .filter(|value| !value.is_empty())
@@ -3668,7 +3749,7 @@ fn publish_picker(
     complete: bool,
     result: Result<Vec<PickItem>, String>,
 ) {
-    let mut slot = PK_RESULT.lock().unwrap();
+    let mut slot = crate::runtime::lock(&PK_RESULT);
     if PK_GENERATION.load(Ordering::SeqCst) == generation {
         *slot = Some((generation, complete, result));
         unsafe {
@@ -3686,78 +3767,81 @@ fn picker_load() {
     let generation = PK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     PK_LOADING.store(true, Ordering::SeqCst);
     PK_ENRICHING.store(false, Ordering::SeqCst);
-    let selected = PK_SELECTED.lock().unwrap().clone();
+    let selected = crate::runtime::lock(&PK_SELECTED).clone();
     let pk = PICKER_HWND.load(Ordering::SeqCst);
     let spawn = std::thread::Builder::new()
         .name("picker-load".into())
         .spawn(move || {
-            let result = (|| {
-                let snapshot = crate::automation::Snapshot::take()
-                    .ok_or_else(|| "snapshot unavailable".to_string())?;
-                let mut targets: Vec<auto::ProcessTarget> = snapshot
-                    .names()
-                    .iter()
-                    .filter(|name| {
-                        snapshot
-                            .pid_names()
-                            .iter()
-                            .any(|(n, pid)| n == *name && *pid != std::process::id())
-                    })
-                    .map(|name| auto::ProcessTarget {
-                        kind: "name".into(),
-                        executable: name.clone(),
-                        path: String::new(),
-                    })
-                    .collect();
-                for target in selected {
-                    if !targets.iter().any(|t| t.key() == target.key()) {
-                        targets.push(target);
+            // On a panic the default error still reaches publish_picker, so
+            // the picker cannot get stuck on "loading" forever.
+            let mut result = Err("picker load failed".to_string());
+            crate::runtime::catch_and_log("picker-load", || {
+                result = (|| {
+                    let snapshot = crate::automation::Snapshot::take()
+                        .ok_or_else(|| "snapshot unavailable".to_string())?;
+                    let mut targets: Vec<auto::ProcessTarget> = snapshot
+                        .names()
+                        .iter()
+                        .filter(|name| {
+                            snapshot
+                                .pid_names()
+                                .iter()
+                                .any(|(n, pid)| n == *name && *pid != std::process::id())
+                        })
+                        .map(|name| auto::ProcessTarget {
+                            kind: "name".into(),
+                            executable: name.clone(),
+                            path: String::new(),
+                        })
+                        .collect();
+                    for target in selected {
+                        if !targets.iter().any(|t| t.key() == target.key()) {
+                            targets.push(target);
+                        }
                     }
-                }
-                let mut items = Vec::new();
-                for target in targets {
-                    if PK_GENERATION.load(Ordering::SeqCst) != generation {
-                        return Ok(items);
+                    let mut items = Vec::new();
+                    for target in targets {
+                        if PK_GENERATION.load(Ordering::SeqCst) != generation {
+                            return Ok(items);
+                        }
+                        let count = snapshot.count_target(&target);
+                        let description = crate::runtime::lock(&DESCRIPTIONS)
+                            .get(&target.key())
+                            .cloned()
+                            .unwrap_or_default();
+                        let name = if target.kind == "path" {
+                            target.path.clone()
+                        } else {
+                            target.executable.clone()
+                        };
+                        let search = format!("{name} {description}").to_lowercase();
+                        items.push(PickItem {
+                            target,
+                            name,
+                            description,
+                            count,
+                            search,
+                        });
                     }
-                    let count = snapshot.count_target(&target);
-                    let description = DESCRIPTIONS
-                        .lock()
-                        .unwrap()
-                        .get(&target.key())
-                        .cloned()
-                        .unwrap_or_default();
-                    let name = if target.kind == "path" {
-                        target.path.clone()
-                    } else {
-                        target.executable.clone()
-                    };
-                    let search = format!("{name} {description}").to_lowercase();
-                    items.push(PickItem {
-                        target,
-                        name,
-                        description,
-                        count,
-                        search,
-                    });
-                }
-                publish_picker(pk, generation, false, Ok(items.clone()));
-                for item in &mut items {
-                    if PK_GENERATION.load(Ordering::SeqCst) != generation {
-                        return Ok(items);
+                    publish_picker(pk, generation, false, Ok(items.clone()));
+                    for item in &mut items {
+                        if PK_GENERATION.load(Ordering::SeqCst) != generation {
+                            return Ok(items);
+                        }
+                        let path = if item.target.kind == "path" {
+                            Some(item.target.path.clone())
+                        } else {
+                            snapshot.path_of(&item.target.executable.to_lowercase())
+                        };
+                        item.description = path
+                            .as_deref()
+                            .and_then(file_description)
+                            .unwrap_or_default();
+                        item.search = format!("{} {}", item.name, item.description).to_lowercase();
                     }
-                    let path = if item.target.kind == "path" {
-                        Some(item.target.path.clone())
-                    } else {
-                        snapshot.path_of(&item.target.executable.to_lowercase())
-                    };
-                    item.description = path
-                        .as_deref()
-                        .and_then(file_description)
-                        .unwrap_or_default();
-                    item.search = format!("{} {}", item.name, item.description).to_lowercase();
-                }
-                Ok(items)
-            })();
+                    Ok(items)
+                })();
+            });
             publish_picker(pk, generation, true, result);
         });
     if let Err(error) = spawn {
@@ -3771,7 +3855,7 @@ fn picker_load() {
 }
 
 fn finish_picker_load(pk: HWND) {
-    let result = PK_RESULT.lock().unwrap().take();
+    let result = crate::runtime::lock(&PK_RESULT).take();
     let Some((generation, complete, result)) = result else {
         return;
     };
@@ -3783,8 +3867,8 @@ fn finish_picker_load(pk: HWND) {
     match result {
         Ok(items) => {
             if complete {
-                *PK_UPDATED.lock().unwrap() = Some(std::time::Instant::now());
-                let mut descriptions = DESCRIPTIONS.lock().unwrap();
+                *crate::runtime::lock(&PK_UPDATED) = Some(std::time::Instant::now());
+                let mut descriptions = crate::runtime::lock(&DESCRIPTIONS);
                 if descriptions.len() > 2048 {
                     descriptions.clear();
                 }
@@ -3792,7 +3876,7 @@ fn finish_picker_load(pk: HWND) {
                     descriptions.insert(item.target.key(), item.description.clone());
                 }
             }
-            *PK_ITEMS.lock().unwrap() = items;
+            *crate::runtime::lock(&PK_ITEMS) = items;
             apply_filter();
         }
         Err(error) => {
@@ -3893,8 +3977,8 @@ fn apply_filter() {
         let filter = window_text(get_dlg_item(pk, PK_SEARCH))
             .trim()
             .to_lowercase();
-        let (column, ascending) = *PK_SORT.lock().unwrap();
-        let old_visible = PK_VISIBLE.lock().unwrap().clone();
+        let (column, ascending) = *crate::runtime::lock(&PK_SORT);
+        let old_visible = crate::runtime::lock(&PK_VISIBLE).clone();
         let old_top = SendMessageW(
             list,
             windows::Win32::UI::Controls::LVM_GETTOPINDEX,
@@ -3917,8 +4001,8 @@ fn apply_filter() {
         let top_key = key_at(old_top);
         let focus_key = key_at(old_focus);
 
-        let mut items = PK_ITEMS.lock().unwrap().clone();
-        for target in PK_SELECTED.lock().unwrap().iter() {
+        let mut items = crate::runtime::lock(&PK_ITEMS).clone();
+        for target in crate::runtime::lock(&PK_SELECTED).iter() {
             if !items.iter().any(|item| item.target.key() == target.key()) {
                 let name = if target.kind == "path" {
                     target.path.clone()
@@ -3962,7 +4046,7 @@ fn apply_filter() {
                 ordering.reverse()
             }
         });
-        *PK_VISIBLE.lock().unwrap() = items.clone();
+        *crate::runtime::lock(&PK_VISIBLE) = items.clone();
 
         let _ = SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), Some(LPARAM(0)));
         PK_POPULATING.store(true, Ordering::SeqCst);
@@ -4065,7 +4149,7 @@ unsafe fn lv_insert(list: HWND, index: usize, item: &PickItem) {
                 Some(LPARAM(&mut cell as *mut _ as isize)),
             );
         }
-        let selected = PK_SELECTED.lock().unwrap();
+        let selected = crate::runtime::lock(&PK_SELECTED);
         let checked = selected.iter().any(|t| t.key() == item.target.key());
         lv_set_check(list, index, checked);
     }
@@ -4110,10 +4194,8 @@ unsafe fn lv_is_checked(list: HWND, index: usize) -> bool {
 unsafe fn capture_selection() {
     unsafe {
         let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        let visible = PK_VISIBLE.lock().unwrap().clone();
-        let mut selected: Vec<auto::ProcessTarget> = PK_SELECTED
-            .lock()
-            .unwrap()
+        let visible = crate::runtime::lock(&PK_VISIBLE).clone();
+        let mut selected: Vec<auto::ProcessTarget> = crate::runtime::lock(&PK_SELECTED)
             .iter()
             .filter(|t| !visible.iter().any(|item| item.target.key() == t.key()))
             .cloned()
@@ -4123,13 +4205,13 @@ unsafe fn capture_selection() {
                 selected.push(item.target.clone());
             }
         }
-        *PK_SELECTED.lock().unwrap() = auto::normalize_targets(selected);
+        *crate::runtime::lock(&PK_SELECTED) = auto::normalize_targets(selected);
         sync_check_states();
     }
 }
 
 fn selected_count() -> usize {
-    PK_SELECTED.lock().unwrap().len()
+    crate::runtime::lock(&PK_SELECTED).len()
 }
 
 fn picker_requires_process() -> bool {
@@ -4141,7 +4223,7 @@ fn picker_requires_process() -> bool {
 
 /// Go updateSelectionStatus: limit warning or "shown N · selected M".
 fn update_selection_status(pk: HWND) {
-    let visible = PK_VISIBLE.lock().unwrap().len();
+    let visible = crate::runtime::lock(&PK_VISIBLE).len();
     let selected = selected_count();
     let status = if PK_LOADING.load(Ordering::SeqCst) {
         t_pub("process_picker_loading")
@@ -4175,7 +4257,7 @@ fn update_selection_status(pk: HWND) {
 fn update_preview(pk: HWND) {
     unsafe {
         let preview = get_dlg_item(pk, PK_PREVIEW);
-        let selected = PK_SELECTED.lock().unwrap().clone();
+        let selected = crate::runtime::lock(&PK_SELECTED).clone();
         let _ = SendMessageW(preview, LB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
         if selected.is_empty() {
             let text = wide(&t_pub("process_picker_preview_empty"));
@@ -4217,7 +4299,7 @@ fn update_preview(pk: HWND) {
 fn update_header_captions(pk: HWND) {
     unsafe {
         let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        let (column, ascending) = *PK_SORT.lock().unwrap();
+        let (column, ascending) = *crate::runtime::lock(&PK_SORT);
         let keys = [
             "process_picker_column_process",
             "process_picker_column_description",
@@ -4249,7 +4331,7 @@ fn update_header_captions(pk: HWND) {
 fn picker_confirm() {
     unsafe {
         capture_selection();
-        let selected = PK_SELECTED.lock().unwrap().clone();
+        let selected = crate::runtime::lock(&PK_SELECTED).clone();
         if selected.len() > auto::MAX_PROCESSES_PER_RULE
             || (selected.is_empty() && picker_requires_process())
         {
@@ -4339,9 +4421,7 @@ fn browse_executable(pk: HWND) {
             path: path.clone(),
         };
         // A path target replaces the equivalent name target (Go parity).
-        let mut selected: Vec<auto::ProcessTarget> = PK_SELECTED
-            .lock()
-            .unwrap()
+        let mut selected: Vec<auto::ProcessTarget> = crate::runtime::lock(&PK_SELECTED)
             .iter()
             .filter(|t| {
                 !(t.kind == "name" && t.executable.eq_ignore_ascii_case(&target.executable))
@@ -4362,7 +4442,7 @@ fn browse_executable(pk: HWND) {
         }
         selected.retain(|t| t.key() != target.key());
         selected.push(target);
-        *PK_SELECTED.lock().unwrap() = selected;
+        *crate::runtime::lock(&PK_SELECTED) = selected;
         picker_load();
         apply_filter();
     }
@@ -4373,8 +4453,8 @@ unsafe fn sync_check_states() {
     unsafe {
         PK_POPULATING.store(true, Ordering::SeqCst);
         let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        let visible = PK_VISIBLE.lock().unwrap().clone();
-        let selected = PK_SELECTED.lock().unwrap().clone();
+        let visible = crate::runtime::lock(&PK_VISIBLE).clone();
+        let selected = crate::runtime::lock(&PK_SELECTED).clone();
         for (index, item) in visible.iter().enumerate() {
             let checked = selected.iter().any(|t| t.key() == item.target.key());
             lv_set_check(list, index, checked);
@@ -4400,7 +4480,7 @@ unsafe extern "system" fn picker_proc(
                 WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
                     if !PK_LOADING.load(Ordering::SeqCst)
                         && !PK_ENRICHING.load(Ordering::SeqCst)
-                        && PK_UPDATED.lock().unwrap().is_some_and(|last| {
+                        && crate::runtime::lock(&PK_UPDATED).is_some_and(|last| {
                             last.elapsed() >= std::time::Duration::from_secs(30)
                         })
                     {
@@ -4422,12 +4502,19 @@ unsafe extern "system" fn picker_proc(
                         }
                         PK_BROWSE if hi == BN_CLICKED => browse_executable(hwnd),
                         PK_SEARCH if hi == EN_CHANGE => {
-                            // Go debounces 120ms; in-memory filtering is fast
-                            // enough to run directly.
-                            apply_filter();
+                            // Go debounces the search box by 120ms; IME
+                            // composition fires EN_CHANGE per candidate, and
+                            // each filter rebuilds the whole list view.
+                            let _ = KillTimer(Some(hwnd), PK_FILTER_TIMER);
+                            let _ = SetTimer(Some(hwnd), PK_FILTER_TIMER, 120, None);
                         }
                         _ => {}
                     }
+                    LRESULT(0)
+                }
+                WM_TIMER if wparam.0 == PK_FILTER_TIMER => {
+                    let _ = KillTimer(Some(hwnd), PK_FILTER_TIMER);
+                    apply_filter();
                     LRESULT(0)
                 }
                 WM_NOTIFY => {
@@ -4498,19 +4585,20 @@ unsafe extern "system" fn picker_proc(
                     LRESULT(pair.0.0 as isize)
                 }
                 WM_DESTROY => {
+                    let _ = KillTimer(Some(hwnd), PK_FILTER_TIMER);
                     PK_GENERATION.fetch_add(1, Ordering::SeqCst);
                     PICKER_HWND.store(0, Ordering::SeqCst);
                     PK_LIST_HWND.store(0, Ordering::SeqCst);
                     // Same rule as the editor: drop picker caches on a real
                     // destroy so recreation starts clean. PK_GENERATION above
                     // already invalidates any in-flight background load.
-                    PK_ITEMS.lock().unwrap().clear();
-                    PK_VISIBLE.lock().unwrap().clear();
-                    PK_SELECTED.lock().unwrap().clear();
-                    *PK_SORT.lock().unwrap() = (0, true);
-                    DESCRIPTIONS.lock().unwrap().clear();
-                    *PK_RESULT.lock().unwrap() = None;
-                    *PK_UPDATED.lock().unwrap() = None;
+                    crate::runtime::lock(&PK_ITEMS).clear();
+                    crate::runtime::lock(&PK_VISIBLE).clear();
+                    crate::runtime::lock(&PK_SELECTED).clear();
+                    *crate::runtime::lock(&PK_SORT) = (0, true);
+                    crate::runtime::lock(&DESCRIPTIONS).clear();
+                    *crate::runtime::lock(&PK_RESULT) = None;
+                    *crate::runtime::lock(&PK_UPDATED) = None;
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                         HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
                         true,
@@ -4554,11 +4642,11 @@ unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
             if notification.uNewState & 0x0000_F000 != notification.uOldState & 0x0000_F000 {
                 // Go rejects over-limit checks here (canAddSelection) and
                 // resets the row to unchecked with the limit message.
-                let visible = PK_VISIBLE.lock().unwrap().clone();
+                let visible = crate::runtime::lock(&PK_VISIBLE).clone();
                 let index = notification.iItem as usize;
                 let over_limit =
                     notification.uNewState & 0x0000_F000 == 2 << 12 && index < visible.len() && {
-                        let selected = PK_SELECTED.lock().unwrap().clone();
+                        let selected = crate::runtime::lock(&PK_SELECTED).clone();
                         let target = &visible[index].target;
                         !selected.iter().any(|t| t.key() == target.key())
                             && selected_count() >= auto::MAX_PROCESSES_PER_RULE
@@ -4585,7 +4673,7 @@ unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
         } else if code == LVN_COLUMNCLICK {
             let notification = &*(lparam.0 as *const NMLISTVIEW);
             let column = notification.iSubItem;
-            let mut sort = PK_SORT.lock().unwrap();
+            let mut sort = crate::runtime::lock(&PK_SORT);
             if sort.0 == column {
                 sort.1 = !sort.1;
             } else {
@@ -4625,16 +4713,14 @@ unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
             // Toggling by clicking the label keeps the checkbox affordance
             // discoverable (Go nmClick handler).
             let index = notification.iItem as usize;
-            let visible = PK_VISIBLE.lock().unwrap().clone();
+            let visible = crate::runtime::lock(&PK_VISIBLE).clone();
             if index >= visible.len() {
                 return;
             }
             let checked = lv_is_checked(list, index);
             let target = &visible[index].target;
             let can_add = checked
-                || PK_SELECTED
-                    .lock()
-                    .unwrap()
+                || crate::runtime::lock(&PK_SELECTED)
                     .iter()
                     .any(|t| t.key() == target.key())
                 || selected_count() < auto::MAX_PROCESSES_PER_RULE;
@@ -4829,7 +4915,7 @@ pub fn devtools_seed_demo_rule() {
         blocked_policy: String::new(),
         max_wait_minutes: 0,
     };
-    let mut rules = crate::automation::RULES.lock().unwrap();
+    let mut rules = crate::runtime::lock(&crate::automation::RULES);
     rules.push(rule);
     rules.push(auto::Rule {
         id: "devtools-demo2".into(),
@@ -4879,19 +4965,78 @@ pub fn theme_hwnds() -> [HWND; 3] {
 }
 
 /// Relabel existing forms without repopulating edits or changing their save baseline.
+/// Single (control id -> caption key) registries: window creation and
+/// refresh_language must render the same captions - before these existed
+/// the picker's Cancel button was created from `automation_cancel` but
+/// refreshed from `common_cancel`. State-managed captions (MGR_TOGGLE,
+/// ED_VALIDATION, ED_PROC_SUMMARY) deliberately stay out.
+const MANAGER_TEXTS: &[(usize, &str)] = &[
+    (MGR_TITLE, "automation_rules_title"),
+    (MGR_EMPTY_TITLE, "automation_empty_title"),
+    (MGR_EMPTY_BODY, "automation_empty_body"),
+    (MGR_NEW, "automation_new"),
+    (MGR_EDIT, "automation_edit"),
+    (MGR_DELETE, "automation_delete"),
+];
+
+const EDITOR_TEXTS: &[(usize, &str)] = &[
+    (ED_BASICS_TITLE, "automation_basics"),
+    (ED_TRIGGER_TITLE, "automation_trigger_conditions"),
+    (ED_OPTIONS_TITLE, "automation_action_options"),
+    (ED_NAME_LBL, "automation_name"),
+    (ED_ACTION_LBL, "automation_action"),
+    (ED_TRIGGER_LBL, "automation_trigger"),
+    (ED_TIME_LBL, "automation_time"),
+    (ED_DATE_LBL, "automation_date"),
+    (ED_END_LBL, "automation_end_time"),
+    (ED_LOGIC_LBL, "automation_process_logic"),
+    (ED_WARN_LBL, "automation_warning_seconds"),
+    (ED_IDLE_LBL, "automation_idle_minutes"),
+    (ED_MAX_LBL, "automation_max_wait"),
+    (ED_DAYS_LBL, "automation_days"),
+    (ED_BLOCKED_LBL, "automation_blocked_policy"),
+    (ED_NAME_HINT, "automation_name_hint"),
+    (ED_NO_OPTIONS, "automation_no_action_options"),
+    (ED_CHOOSE, "automation_choose_processes"),
+    (ED_PROC_INFO, "automation_process_info_accessible"),
+    (ED_DAYS_WORKDAYS, "automation_days_workdays"),
+    (ED_DAYS_EVERYDAY, "automation_days_everyday"),
+    (ED_KEEP_SCREEN, "automation_keep_screen"),
+    (ED_SAVE, "automation_save"),
+    (ED_CANCEL, "automation_cancel"),
+    (ED_DAYS_MON, "automation_day_mon"),
+    (ED_DAYS_TUE, "automation_day_tue"),
+    (ED_DAYS_WED, "automation_day_wed"),
+    (ED_DAYS_THU, "automation_day_thu"),
+    (ED_DAYS_FRI, "automation_day_fri"),
+    (ED_DAYS_SAT, "automation_day_sat"),
+    (ED_DAYS_SUN, "automation_day_sun"),
+];
+
+const PICKER_TEXTS: &[(usize, &str)] = &[
+    (PK_HEADING, "process_picker_heading"),
+    (PK_HELPER, "process_picker_helper"),
+    (PK_PRIVACY, "process_picker_privacy"),
+    (PK_REFRESH, "process_picker_refresh"),
+    (PK_BROWSE, "process_picker_browse"),
+    (PK_CONFIRM, "process_picker_confirm"),
+    (PK_CANCEL, "common_cancel"),
+];
+
+fn caption_key(registry: &'static [(usize, &'static str)], id: usize) -> &'static str {
+    registry
+        .iter()
+        .find(|(candidate, _)| *candidate == id)
+        .map(|(_, key)| *key)
+        .unwrap_or("")
+}
+
 pub fn refresh_language() {
     refresh_tooltips();
     let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
     if !mgr.is_invalid() {
         set_text(mgr, &t_pub("automation_title"));
-        for (id, key) in [
-            (MGR_TITLE, "automation_rules_title"),
-            (MGR_EMPTY_TITLE, "automation_empty_title"),
-            (MGR_EMPTY_BODY, "automation_empty_body"),
-            (MGR_NEW, "automation_new"),
-            (MGR_EDIT, "automation_edit"),
-            (MGR_DELETE, "automation_delete"),
-        ] {
+        for &(id, key) in MANAGER_TEXTS {
             set_text(get_dlg_item(mgr, id), &t_pub(key));
         }
         refresh_list();
@@ -4908,39 +5053,7 @@ pub fn refresh_language() {
                 "automation_new_title"
             }),
         );
-        for (id, key) in [
-            (ED_BASICS_TITLE, "automation_basics"),
-            (ED_TRIGGER_TITLE, "automation_trigger_conditions"),
-            (ED_OPTIONS_TITLE, "automation_action_options"),
-            (ED_NAME_LBL, "automation_name"),
-            (ED_ACTION_LBL, "automation_action"),
-            (ED_TRIGGER_LBL, "automation_trigger"),
-            (ED_TIME_LBL, "automation_time"),
-            (ED_DATE_LBL, "automation_date"),
-            (ED_END_LBL, "automation_end_time"),
-            (ED_LOGIC_LBL, "automation_process_logic"),
-            (ED_WARN_LBL, "automation_warning_seconds"),
-            (ED_IDLE_LBL, "automation_idle_minutes"),
-            (ED_MAX_LBL, "automation_max_wait"),
-            (ED_DAYS_LBL, "automation_days"),
-            (ED_BLOCKED_LBL, "automation_blocked_policy"),
-            (ED_NAME_HINT, "automation_name_hint"),
-            (ED_NO_OPTIONS, "automation_no_action_options"),
-            (ED_CHOOSE, "automation_choose_processes"),
-            (ED_PROC_INFO, "automation_process_info_accessible"),
-            (ED_DAYS_WORKDAYS, "automation_days_workdays"),
-            (ED_DAYS_EVERYDAY, "automation_days_everyday"),
-            (ED_KEEP_SCREEN, "automation_keep_screen"),
-            (ED_SAVE, "automation_save"),
-            (ED_CANCEL, "automation_cancel"),
-            (ED_DAYS_MON, "automation_day_mon"),
-            (ED_DAYS_TUE, "automation_day_tue"),
-            (ED_DAYS_WED, "automation_day_wed"),
-            (ED_DAYS_THU, "automation_day_thu"),
-            (ED_DAYS_FRI, "automation_day_fri"),
-            (ED_DAYS_SAT, "automation_day_sat"),
-            (ED_DAYS_SUN, "automation_day_sun"),
-        ] {
+        for &(id, key) in EDITOR_TEXTS {
             set_text(get_dlg_item(ed, id), &t_pub(key));
         }
         let action = choice_value(ed, ED_ACTION);
@@ -4961,15 +5074,7 @@ pub fn refresh_language() {
     if !pk.is_invalid() {
         set_text(pk, &t_pub("process_picker_title"));
         crate::nativeform::cue_banner(get_dlg_item(pk, PK_SEARCH), "process_picker_search_hint");
-        for (id, key) in [
-            (PK_HEADING, "process_picker_heading"),
-            (PK_HELPER, "process_picker_helper"),
-            (PK_PRIVACY, "process_picker_privacy"),
-            (PK_REFRESH, "process_picker_refresh"),
-            (PK_BROWSE, "process_picker_browse"),
-            (PK_CONFIRM, "process_picker_confirm"),
-            (PK_CANCEL, "common_cancel"),
-        ] {
+        for &(id, key) in PICKER_TEXTS {
             set_text(get_dlg_item(pk, id), &t_pub(key));
         }
         update_header_captions(pk);
@@ -5004,8 +5109,8 @@ mod surface_tests {
                 DefSubclassProc(hwnd, msg, wp, lp)
             }
         }
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let previous = crate::CONFIG.lock().unwrap().replace(Default::default());
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous = crate::runtime::lock(&crate::CONFIG).replace(Default::default());
         create_editor();
         populate_editor();
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
@@ -5042,7 +5147,7 @@ mod surface_tests {
             let _ = RemoveWindowSubclass(name, Some(track), 992);
             DestroyWindow(ed).unwrap();
         }
-        *crate::CONFIG.lock().unwrap() = previous;
+        *crate::runtime::lock(&crate::CONFIG) = previous;
     }
     #[test]
     fn background_is_lowered_after_content_children_are_created() {

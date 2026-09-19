@@ -690,7 +690,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_list_scrolls_with_client_bar_and_releases_subclasses() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             InitCommonControlsEx(&INITCOMMONCONTROLSEX {
                 dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn listbox_uses_the_same_scrollbar_without_losing_selection() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             let parent = CreateWindowExW(
                 WINDOW_EX_STYLE(0),

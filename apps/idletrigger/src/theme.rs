@@ -197,9 +197,7 @@ fn cached_brush(color: u32) -> HBRUSH {
     static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u32, isize>>> =
         std::sync::LazyLock::new(Default::default);
     HBRUSH(
-        *CACHE
-            .lock()
-            .unwrap()
+        *crate::runtime::lock(&CACHE)
             .entry(color)
             .or_insert_with(|| unsafe { CreateSolidBrush(COLORREF(color)).0 as isize })
             as *mut _,

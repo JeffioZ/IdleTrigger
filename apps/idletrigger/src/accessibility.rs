@@ -36,7 +36,9 @@ pub fn check(hwnd: HWND, checked: bool) {
                 0
             }
             | if GetFocus() == hwnd { 4 } else { 0 };
-        let previous = CHECKS.lock().unwrap().get(&(hwnd.0 as isize)).copied();
+        let previous = crate::runtime::lock(&CHECKS)
+            .get(&(hwnd.0 as isize))
+            .copied();
         if previous == Some((checked, state)) {
             return;
         }
@@ -56,19 +58,14 @@ pub fn check(hwnd: HWND, checked: bool) {
                 &VARIANT::from(state),
             )
         }) {
-            CHECKS
-                .lock()
-                .unwrap()
-                .insert(hwnd.0 as isize, (checked, state));
+            crate::runtime::lock(&CHECKS).insert(hwnd.0 as isize, (checked, state));
             NotifyWinEvent(EVENT_OBJECT_STATECHANGE, hwnd, OBJID_CLIENT.0, 0);
         }
     }
 }
 
 pub fn refresh(hwnd: HWND) {
-    let checked = CHECKS
-        .lock()
-        .unwrap()
+    let checked = crate::runtime::lock(&CHECKS)
         .get(&(hwnd.0 as isize))
         .map(|entry| entry.0);
     if let Some(checked) = checked {
@@ -77,7 +74,9 @@ pub fn refresh(hwnd: HWND) {
 }
 
 pub fn clear(hwnd: HWND) {
-    let existed = CHECKS.lock().unwrap().remove(&(hwnd.0 as isize)).is_some();
+    let existed = crate::runtime::lock(&CHECKS)
+        .remove(&(hwnd.0 as isize))
+        .is_some();
     if existed {
         services(|service| unsafe {
             service.ClearHwndProps(
@@ -96,7 +95,7 @@ mod tests {
     use windows::core::Interface;
     #[test]
     fn native_accessible_object_reports_check_state_and_disable_changes() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::*;
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
@@ -142,7 +141,7 @@ mod tests {
             );
             drop(accessible);
             DestroyWindow(button).unwrap();
-            assert!(!CHECKS.lock().unwrap().contains_key(&(button.0 as isize)));
+            assert!(!crate::runtime::lock(&CHECKS).contains_key(&(button.0 as isize)));
             CoUninitialize();
         }
     }

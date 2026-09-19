@@ -141,7 +141,7 @@ pub fn maybe_show_warning_preview() {
             rule_id: "devtools-preview".into(),
         };
         pending.seconds = 10;
-        *crate::automation::PENDING_ACTION.lock().unwrap() = Some(pending);
+        *crate::runtime::lock(&crate::automation::PENDING_ACTION) = Some(pending);
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                 Some(crate::hwnd(&crate::HIDDEN)),

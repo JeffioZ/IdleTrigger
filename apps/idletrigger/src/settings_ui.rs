@@ -77,7 +77,7 @@ const ID_NOTIFICATIONS_BEHAVIOR: i32 = 176;
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
-const CLIENT_H: i32 = 524;
+const CLIENT_H: i32 = 580;
 const CONTENT_X: i32 = 208;
 const CONTENT_RIGHT: i32 = 676;
 const SECTION_TOP: i32 = 90;
@@ -87,6 +87,9 @@ const FUNCTION_GAP: i32 = 8;
 const SECTION_GAP: i32 = 16;
 const CHECK_H: i32 = 28;
 const BTN_H: i32 = 36;
+// Two-line validation row above the footer buttons: the English conflict
+// message measures ~491px and Go's inline 236px label clipped it mid-sentence.
+const VALIDATION_H: i32 = 48;
 const FIELD_H: i32 = 34;
 const DIALOG_BTN_W: i32 = 104;
 const FOOTER_Y: i32 = CLIENT_H - 18 - BTN_H;
@@ -103,7 +106,7 @@ static CHECKS: std::sync::Mutex<Option<std::collections::HashMap<i32, bool>>> =
     std::sync::Mutex::new(None);
 
 fn checks() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i32, bool>>> {
-    CHECKS.lock().unwrap()
+    crate::runtime::lock(&CHECKS)
 }
 
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -706,13 +709,14 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             (CONTENT_X, 406, 160, BTN_H),
         );
 
-        // Footer: inline validation + Save/Cancel (Go footer geometry).
+        // Footer: full-width two-line validation above the buttons (Go kept
+        // it inline next to them and truncated long bilingual messages).
         label(
             hwnd,
             ID_VALIDATION,
             "",
             font,
-            (CONTENT_X, FOOTER_Y + 8, 236, 24),
+            (CONTENT_X, FOOTER_Y - VALIDATION_H - 8, 468, VALIDATION_H),
             false,
         );
         push_button(
@@ -986,7 +990,7 @@ fn populate(hwnd: HWND) {
         autostart,
         logging,
     ) = crate::cfg_map(|c| {
-        *DRAFT_BASE.lock().unwrap() = Some(c.clone());
+        *crate::runtime::lock(&DRAFT_BASE) = Some(c.clone());
         (
             c.keep_screen_on,
             c.nosleep_on_battery,
@@ -1303,7 +1307,7 @@ fn validate_draft(draft: &Draft) -> Option<(i32, i32, &'static str)> {
         _ => return Some((0, ID_IDLE_TIMEOUT, "settings_error_idle_timeout")),
     }
     match draft.warning {
-        Some(v) if (0..=3600).contains(&v) => {}
+        Some(v) if (idletrigger_core::automation::MIN_WARNING_SECONDS..=3600).contains(&v) => {}
         _ => return Some((0, ID_WARNING_SECONDS, "settings_error_warning_seconds")),
     }
     if !valid_time(&draft.light_time) {
@@ -1330,9 +1334,7 @@ fn valid_time(value: &str) -> bool {
 
 /// Whether the open draft differs from the live config (Go cancel() check).
 fn draft_differs(hwnd: HWND, draft: &Draft) -> bool {
-    let base = DRAFT_BASE
-        .lock()
-        .unwrap()
+    let base = crate::runtime::lock(&DRAFT_BASE)
         .clone()
         .unwrap_or_else(|| crate::cfg_map(Clone::clone));
 
@@ -1425,7 +1427,7 @@ fn save() {
         }
 
         let autostart_was = crate::system::autostart_is_enabled();
-        let base = DRAFT_BASE.lock().unwrap().clone();
+        let base = crate::runtime::lock(&DRAFT_BASE).clone();
         if let Err(err) = crate::commit_config(|c, _| {
             if base.as_ref() != Some(c) {
                 return Err(t_pub("settings_save_conflict"));
@@ -1461,7 +1463,7 @@ fn save() {
             set_text(hwnd, ID_VALIDATION, &err);
             return;
         }
-        *DRAFT_BASE.lock().unwrap() = Some(crate::cfg_map(Clone::clone));
+        *crate::runtime::lock(&DRAFT_BASE) = Some(crate::cfg_map(Clone::clone));
         let mut failures = Vec::new();
         crate::log_line("settings changed");
         crate::apply_stay_awake();
@@ -2097,6 +2099,79 @@ pub fn refresh_language() {
         ID_THEME_LOCATION_STATUS,
         &location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1),
     );
+    // Language-dependent geometry must follow the new text: the theme hint
+    // is two lines in English but one in Chinese, which shifts the behavior
+    // group, and the project-home row is measured from the label. Like the
+    // panel's own refresh_language, this only moves windows — drafts live in
+    // control state, not geometry.
+    let theme_hint_h = if is_chinese() { 22 } else { 40 };
+    let behavior_top = 234 + theme_hint_h + SECTION_GAP;
+    for (id, x, y, w, h) in [
+        (ID_THEME_HINT, CONTENT_X, 234, 468, theme_hint_h),
+        (
+            ID_THEME_BEHAVIOR_TITLE,
+            CONTENT_X,
+            behavior_top,
+            468,
+            SECTION_TITLE_H,
+        ),
+        (
+            ID_THEME_BATTERY,
+            CONTENT_X,
+            behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP,
+            468,
+            CHECK_H,
+        ),
+        (
+            ID_THEME_FULLSCREEN,
+            CONTENT_X,
+            behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP + CHECK_H + FUNCTION_GAP,
+            468,
+            CHECK_H,
+        ),
+    ] {
+        unsafe {
+            let _ = SetWindowPos(
+                get(hwnd, id),
+                None,
+                s(x),
+                s(y),
+                s(w),
+                s(h),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+    let project_label = t_pub("settings_project_home_label");
+    let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
+    let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
+    let mut link_x = CONTENT_X + label_w + FUNCTION_GAP;
+    if is_chinese() {
+        // CJK advance boxes carry extra trailing space (Go optical fix).
+        link_x -= 10;
+    }
+    for (control, x, y, w, h) in [
+        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 310, label_w, 24),
+        (
+            get(hwnd, ID_PROJECT_HOME),
+            link_x,
+            308,
+            url_w.min(CONTENT_RIGHT - link_x),
+            24,
+        ),
+    ] {
+        unsafe {
+            let _ = SetWindowPos(
+                control,
+                None,
+                s(x),
+                s(y),
+                s(w),
+                s(h),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
     unsafe {
         create_tooltip(hwnd);
     }
@@ -2108,8 +2183,8 @@ mod locale_tests {
     use super::*;
     #[test]
     fn relabeling_preserves_native_edits_choice_and_save_baseline() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let old_config = crate::CONFIG.lock().unwrap().replace(Default::default());
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let old_config = crate::runtime::lock(&crate::CONFIG).replace(Default::default());
         let old_locale = crate::I18N
             .write()
             .unwrap()
@@ -2119,14 +2194,14 @@ mod locale_tests {
         let edit = get(window, ID_IDLE_TIMEOUT);
         set_text(window, ID_IDLE_TIMEOUT, "073");
         crate::choice::select_index(get(window, ID_LANGUAGE), 2);
-        let baseline = DRAFT_BASE.lock().unwrap().clone();
+        let baseline = crate::runtime::lock(&DRAFT_BASE).clone();
         *crate::I18N.write().unwrap() = Some(idletrigger_core::i18n::I18n::load("zh-CN"));
         refresh_language();
         assert_eq!(get(window, ID_IDLE_TIMEOUT), edit);
         assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
         assert_eq!(control_text(window, ID_TITLE), "设置");
         assert_eq!(combo_sel(window, ID_LANGUAGE), 2);
-        assert_eq!(*DRAFT_BASE.lock().unwrap(), baseline);
+        assert_eq!(*crate::runtime::lock(&DRAFT_BASE), baseline);
         PAGE.store(1, Ordering::SeqCst);
         crate::choice::select_index(get(window, ID_THEME_MODE), 1);
         crate::choice::select_index(get(window, ID_LOCATION_SOURCE), 1);
@@ -2148,7 +2223,7 @@ mod locale_tests {
         unsafe {
             DestroyWindow(window).unwrap();
         }
-        *crate::CONFIG.lock().unwrap() = old_config;
+        *crate::runtime::lock(&crate::CONFIG) = old_config;
         *crate::I18N.write().unwrap() = old_locale;
     }
 }

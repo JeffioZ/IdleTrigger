@@ -184,6 +184,7 @@ mod viewport;
 const PANEL_TIMER: usize = 1;
 const WARN_TIMER: usize = 2;
 const POWER_STATUS_TIMER: usize = 3;
+const LOCK_POLL_TIMER: usize = 4;
 const BATTERY_POLL_TICKS: u32 = 120; // 250ms * 120 = 30s
 
 // ---- Shared runtime state ------------------------------------------------
@@ -218,6 +219,9 @@ static MENU_EXIT_ID: Mutex<Option<tray_icon::menu::MenuId>> = Mutex::new(None);
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
 static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WARN_SECONDS_LEFT: AtomicI32 = AtomicI32::new(0);
+// Recovering lock: a torn mid-update clock reads as stale, and the next
+// 250ms sample self-heals — the worst case is a cancelled warning, never a
+// spurious one (a deadline is always set after the flag that guards it).
 static IDLE_CLOCK: std::sync::LazyLock<Mutex<idle_monitor::Clock>> =
     std::sync::LazyLock::new(|| Mutex::new(idle_monitor::Clock::default()));
 static WARNING_PREVIEW_SESSION: AtomicBool = AtomicBool::new(false);
@@ -647,14 +651,17 @@ unsafe extern "system" fn hidden_proc(
                 refresh_status();
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == LOCK_POLL_TIMER => {
+                // Lock-key sampling must stay on this message-pumping thread.
+                popups::poll();
+                LRESULT(0)
+            }
             WM_IDLE_WARN => {
                 show_warning();
                 LRESULT(0)
             }
             WM_IDLE_CANCEL => {
-                let cancelled = IDLE_CLOCK
-                    .lock()
-                    .unwrap()
+                let cancelled = crate::runtime::lock(&IDLE_CLOCK)
                     .countdown(std::time::Instant::now())
                     .is_none();
                 if cancelled && !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
@@ -789,12 +796,10 @@ fn guarded_proc(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(result) => result,
         Err(payload) => {
-            let detail = payload
-                .downcast_ref::<&str>()
-                .map(|value| (*value).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "opaque panic payload".into());
-            log_line(&format!("panic in {name} proc (msg 0x{msg:04X}): {detail}"));
+            log_line(&format!(
+                "panic in {name} proc (msg 0x{msg:04X}): {}",
+                runtime::panic_message(payload)
+            ));
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
     }
@@ -1249,6 +1254,9 @@ fn create_windows() {
             )
             .expect("hidden window");
             HIDDEN.store(hidden.0 as isize, Ordering::SeqCst);
+            // Lock-key polling lives here on the UI thread; Go used a 50ms
+            // timer on the notification window itself.
+            let _ = SetTimer(Some(hidden), LOCK_POLL_TIMER, 50, None);
         }
 
         // Floating-panel shell copied from Go: a topmost popup with a slim
@@ -2030,8 +2038,8 @@ fn tray_menu() -> tray_icon::menu::Menu {
             let _ = SetMenuInfo(handle, &info);
         }
     }
-    *MENU_OPEN_ID.lock().unwrap() = Some(open.id().clone());
-    *MENU_EXIT_ID.lock().unwrap() = Some(exit.id().clone());
+    *crate::runtime::lock(&MENU_OPEN_ID) = Some(open.id().clone());
+    *crate::runtime::lock(&MENU_EXIT_ID) = Some(exit.id().clone());
     menu
 }
 
@@ -2156,9 +2164,12 @@ unsafe fn hicon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) ->
 
 /// Go buildTooltip parity: title + 保持唤醒/空闲监测/主题/自动任务 lines,
 /// "%s：%s" per line, joined by newlines, capped at 120 UTF-16 units.
-fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
+fn build_tray_tooltip(
+    effective_nosleep: bool,
+    idle_running: bool,
+    power: &EffectivePowerState,
+) -> String {
     let line = |key: &str, value: String| t_args("status_line", &[&t(key), &value]);
-    let overrides = automation::overrides();
 
     let mut lines = vec![if APP_VERSION.is_empty() || APP_VERSION == "dev" {
         "IdleTrigger".to_string()
@@ -2169,13 +2180,7 @@ fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
     // Stay awake: effective state, paused wording under battery block.
     let stay_awake = if effective_nosleep {
         t("status_short_on")
-    } else if cfg_map(|c| {
-        (c.nosleep_enabled || overrides.stay_awake)
-            && (overrides.pause_stay_awake
-                || (!ON_AC.load(Ordering::SeqCst)
-                    && (!c.nosleep_on_battery
-                        || BATTERY_PERCENT.load(Ordering::SeqCst) < c.nosleep_battery_threshold)))
-    }) {
+    } else if power.requested && !power.awake {
         t("status_paused")
     } else {
         t("status_short_off")
@@ -2184,25 +2189,16 @@ fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
 
     // Idle monitor: paused by stay-awake, or "Nm 动作" when running.
     if idle_running {
-        let (minutes, action) = cfg_map(|c| {
-            (
-                if overrides.enable_idle {
-                    overrides.idle_minutes
-                } else {
-                    c.idle_timeout_minutes
-                },
-                c.idle_action.clone(),
-            )
-        });
         let unit = if crate::i18n_is_chinese() { "分" } else { "m" };
-        let action_label = t(&format!("menu_action_{action}"));
+        let action_label = t(&format!(
+            "menu_action_{}",
+            cfg_map(|c| c.idle_action.clone())
+        ));
         lines.push(line(
             "tooltip_idle",
-            format!("{minutes}{unit} {action_label}"),
+            format!("{}{unit} {action_label}", power.idle_minutes),
         ));
-    } else if (cfg_map(|c| c.idle_enabled) || overrides.enable_idle)
-        && (effective_nosleep || overrides.pause_idle)
-    {
+    } else if power.idle_requested && (effective_nosleep || power.idle_paused) {
         lines.push(line("tooltip_idle", t("status_paused")));
     } else {
         lines.push(line("tooltip_idle", t("status_short_off")));
@@ -2210,9 +2206,7 @@ fn build_tray_tooltip(effective_nosleep: bool, idle_running: bool) -> String {
 
     lines.push(line("tooltip_theme", theme_tooltip_value_short()));
 
-    let enabled_count = automation::RULES
-        .lock()
-        .unwrap()
+    let enabled_count = crate::runtime::lock(&automation::RULES)
         .iter()
         .filter(|r| r.enabled)
         .count();
@@ -2271,8 +2265,11 @@ fn theme_schedule_text_short() -> String {
 }
 
 /// Updates the tray tooltip with a status line capped like Go's 120 UTF-16
-/// units. Only call on the UI thread.
+/// units. Only call on the UI thread. Skips the `Shell_NotifyIconW` round
+/// trip when the truncated text is unchanged: this runs every second from
+/// `refresh_status`, and tray-icon always forwards the modify.
 fn tray_update_tooltip(line: &str) {
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
     let ptr = TRAY_PTR.load(Ordering::SeqCst);
     if ptr == 0 {
         return;
@@ -2283,9 +2280,17 @@ fn tray_update_tooltip(line: &str) {
         wide.extend_from_slice("…".encode_utf16().collect::<Vec<u16>>().as_slice());
     }
     let text = String::from_utf16_lossy(&wide);
+    let mut last = runtime::lock(&LAST);
+    if last.as_deref() == Some(text.as_str()) {
+        return;
+    }
     unsafe {
         let tray = &*(ptr as *const tray_icon::TrayIcon);
-        let _ = tray.set_tooltip(Some(&text));
+        // Cache only after the modify succeeds, so a failed round trip
+        // retries on the next refresh.
+        if tray.set_tooltip(Some(&text)).is_ok() {
+            *last = Some(text);
+        }
     }
 }
 
@@ -2599,9 +2604,7 @@ fn warn_dialog(heading: &str, body: &str) {
 /// Publish a valid external configuration and apply its UI/platform settings.
 fn hot_reload_config() -> Result<(), String> {
     let writer = lock(&CONFIG_WRITER);
-    let config_path = CONFIG_PATH
-        .lock()
-        .unwrap()
+    let config_path = crate::runtime::lock(&CONFIG_PATH)
         .clone()
         .ok_or("configuration path unavailable")?;
     let loaded = config::load(&config_path);
@@ -2655,26 +2658,28 @@ fn spawn_config_watcher() {
             let mut observed = lock(&CONFIG_SOURCE).clone();
             while !EXITING.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(3));
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                if observed.as_ref() == Some(&text) {
-                    continue;
-                }
-                if lock(&CONFIG_SOURCE).as_ref() != Some(&text) {
-                    let posted = unsafe {
-                        PostMessageW(
-                            Some(hwnd(&HIDDEN)),
-                            WM_EXTERNAL_RELOAD,
-                            WPARAM(0),
-                            LPARAM(0),
-                        )
+                runtime::catch_and_log("config-watch", || {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        return;
                     };
-                    if posted.is_err() {
-                        continue;
+                    if observed.as_ref() == Some(&text) {
+                        return;
                     }
-                }
-                observed = Some(text);
+                    if lock(&CONFIG_SOURCE).as_ref() != Some(&text) {
+                        let posted = unsafe {
+                            PostMessageW(
+                                Some(hwnd(&HIDDEN)),
+                                WM_EXTERNAL_RELOAD,
+                                WPARAM(0),
+                                LPARAM(0),
+                            )
+                        };
+                        if posted.is_err() {
+                            return;
+                        }
+                    }
+                    observed = Some(text);
+                });
             }
         })
         .expect("spawn config watcher");
@@ -2699,44 +2704,88 @@ fn refresh_checkboxes() {
     invalidate_control(IDC_THEME_ENABLE);
 }
 
-fn power_status() -> (String, String) {
+/// Single derivation of the effective power-management state, consumed by
+/// the panel status text, the tray tooltip, the execution-state flags, and
+/// the idle monitor settings. Low battery is a runtime pause layered over
+/// the manual toggles (Go battery.go contract); automation overrides layer
+/// on top without rewriting them.
+pub(crate) struct EffectivePowerState {
+    /// Manual toggle or automation override requested Stay Awake.
+    pub requested: bool,
+    /// Automation asked to pause Stay Awake.
+    pub paused: bool,
+    /// Battery allows Stay Awake right now.
+    pub battery_allowed: bool,
+    /// Stay Awake is actually in effect.
+    pub awake: bool,
+    /// Screen keep-awake accompanies Stay Awake.
+    pub keep_screen: bool,
+    /// Idle monitoring is requested (manual or override).
+    pub idle_requested: bool,
+    /// Automation paused the idle monitor.
+    pub idle_paused: bool,
+    /// Idle monitor minutes in effect (an override wins over the config).
+    pub idle_minutes: i32,
+}
+
+impl EffectivePowerState {
+    /// Idle monitor actually runs: requested, not paused, and Stay Awake —
+    /// which outranks it — is off.
+    pub fn idle_running(&self) -> bool {
+        self.idle_requested && !self.idle_paused && !self.awake
+    }
+}
+
+pub(crate) fn effective_power_state() -> EffectivePowerState {
     let overrides = automation::overrides();
     let config = cfg_map(Clone::clone);
     let requested = config.nosleep_enabled || overrides.stay_awake;
     let battery_allowed = ON_AC.load(Ordering::SeqCst)
         || (config.nosleep_on_battery
             && BATTERY_PERCENT.load(Ordering::SeqCst) >= config.nosleep_battery_threshold);
-    let awake = requested && !overrides.pause_stay_awake && battery_allowed;
-    let screen = (config.nosleep_enabled && config.keep_screen_on)
-        || (overrides.stay_awake && overrides.keep_screen_on);
-    let awake_status = t(if !requested {
+    EffectivePowerState {
+        requested,
+        paused: overrides.pause_stay_awake,
+        battery_allowed,
+        awake: requested && !overrides.pause_stay_awake && battery_allowed,
+        keep_screen: (config.nosleep_enabled && config.keep_screen_on)
+            || (overrides.stay_awake && overrides.keep_screen_on),
+        idle_requested: config.idle_enabled || overrides.enable_idle,
+        idle_paused: overrides.pause_idle,
+        idle_minutes: if overrides.enable_idle {
+            overrides.idle_minutes
+        } else {
+            config.idle_timeout_minutes
+        },
+    }
+}
+
+fn power_status() -> (String, String) {
+    let power = effective_power_state();
+    let idle_action = cfg_map(|c| c.idle_action.clone());
+    let awake_status = t(if !power.requested {
         "status_disabled"
-    } else if overrides.pause_stay_awake {
+    } else if power.paused {
         "status_paused_by_automation"
-    } else if !battery_allowed {
+    } else if !power.battery_allowed {
         "status_paused_by_battery"
-    } else if screen {
+    } else if power.keep_screen {
         "status_enabled_keep_screen"
     } else {
         "status_enabled"
     });
-    let idle_status = if !(config.idle_enabled || overrides.enable_idle) {
+    let idle_status = if !power.idle_requested {
         t("status_disabled")
-    } else if awake {
+    } else if power.awake {
         t("status_paused_by_nosleep")
-    } else if overrides.pause_idle {
+    } else if power.idle_paused {
         t("status_paused_by_automation")
     } else {
-        let minutes = if overrides.enable_idle {
-            overrides.idle_minutes
-        } else {
-            config.idle_timeout_minutes
-        };
         t_args(
             "status_monitor_active",
             &[
-                &minutes.to_string(),
-                &t(&format!("menu_action_{}", config.idle_action)),
+                &power.idle_minutes.to_string(),
+                &t(&format!("menu_action_{idle_action}")),
             ],
         )
     };
@@ -2744,7 +2793,6 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
-    let overrides = automation::overrides();
     let (nosleep_status, idle_status) = power_status();
     let overview = format!(
         "{}{}{}{}",
@@ -2757,11 +2805,9 @@ fn refresh_status() {
 
     let (automation_on, rule_count) = (
         cfg_map(|c| c.automation_enabled),
-        automation::RULES.lock().unwrap().len(),
+        crate::runtime::lock(&automation::RULES).len(),
     );
-    let enabled_count = automation::RULES
-        .lock()
-        .unwrap()
+    let enabled_count = crate::runtime::lock(&automation::RULES)
         .iter()
         .filter(|r| r.enabled)
         .count();
@@ -2782,12 +2828,13 @@ fn refresh_status() {
     set_text(&LBL_AUTOMATION_SUMMARY, &automation);
     set_text(&LBL_THEME_SCHEDULE, &theme_schedule_text());
 
-    // Tray tooltip mirrors the effective power-management state.
+    // Tray tooltip mirrors the effective power-management state. The tray
+    // line reads the latched execution flag (apply_stay_awake owns it), the
+    // paused wording reads the recomputed derivation.
+    let power = effective_power_state();
     let effective_nosleep = NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst);
-    let idle_running = (cfg_map(|c| c.idle_enabled) || overrides.enable_idle)
-        && !overrides.pause_idle
-        && !effective_nosleep;
-    tray_update_tooltip(&build_tray_tooltip(effective_nosleep, idle_running));
+    let idle_running = power.idle_requested && !power.idle_paused && !effective_nosleep;
+    tray_update_tooltip(&build_tray_tooltip(effective_nosleep, idle_running, &power));
     tray_refresh_theme_icon();
     tooltips::refresh_all(hwnd(&PANEL));
 }
@@ -2846,22 +2893,9 @@ fn theme_schedule_text() -> String {
 // ---- Stay awake ----------------------------------------------------------
 
 fn apply_stay_awake() {
-    let overrides = automation::overrides();
-    // Low battery is a runtime pause, not a config rewrite: the manual
-    // toggle survives and resumes when AC returns (Go battery.go contract).
-    let manual = cfg_map(|c| c.nosleep_enabled);
-    // Runtime overrides from automatic tasks layer on top of the manual
-    // toggles without rewriting them.
-    let auto_on = overrides.stay_awake;
-    let auto_keep_screen = overrides.keep_screen_on;
-    let paused = overrides.pause_stay_awake;
-    let battery_allowed = ON_AC.load(Ordering::SeqCst)
-        || cfg_map(|c| {
-            c.nosleep_on_battery
-                && BATTERY_PERCENT.load(Ordering::SeqCst) >= c.nosleep_battery_threshold
-        });
-    let effective = (manual || auto_on) && !paused && battery_allowed;
-    let keep_screen = (manual && cfg_map(|c| c.keep_screen_on)) || (auto_on && auto_keep_screen);
+    let power = effective_power_state();
+    let effective = power.awake;
+    let keep_screen = power.keep_screen;
 
     unsafe {
         let mut flags = ES_CONTINUOUS.0;
@@ -2885,34 +2919,28 @@ fn apply_stay_awake() {
 // ---- Idle monitor --------------------------------------------------------
 
 fn idle_settings() -> idle_monitor::Settings {
-    let overrides = automation::overrides();
-    cfg_map(|c| {
-        let battery_allowed = ON_AC.load(Ordering::SeqCst)
-            || (c.nosleep_on_battery
-                && BATTERY_PERCENT.load(Ordering::SeqCst) >= c.nosleep_battery_threshold);
-        let awake = (c.nosleep_enabled || overrides.stay_awake)
-            && !overrides.pause_stay_awake
-            && battery_allowed;
-        let minutes = if overrides.enable_idle {
-            overrides.idle_minutes
-        } else {
-            c.idle_timeout_minutes
-        };
-        let threshold = Duration::from_secs(minutes as u64 * 60);
-        #[cfg(feature = "devtools")]
-        let threshold = if devtools::IDLE_MONITOR_TEST.load(Ordering::SeqCst) {
-            Duration::from_secs(devtools::IDLE_TEST_SECONDS.load(Ordering::SeqCst) as u64)
-        } else {
-            threshold
-        };
-        idle_monitor::Settings {
-            enabled: (c.idle_enabled || overrides.enable_idle) && !overrides.pause_idle && !awake,
-            threshold,
-            warning: Duration::from_secs(c.idle_warning_seconds as u64),
-            action: c.idle_action.clone(),
-            enhanced: c.idle_enhanced_monitor,
-        }
-    })
+    let power = effective_power_state();
+    let (warning, action, enhanced) = cfg_map(|c| {
+        (
+            c.idle_warning_seconds,
+            c.idle_action.clone(),
+            c.idle_enhanced_monitor,
+        )
+    });
+    let threshold = Duration::from_secs(power.idle_minutes as u64 * 60);
+    #[cfg(feature = "devtools")]
+    let threshold = if devtools::IDLE_MONITOR_TEST.load(Ordering::SeqCst) {
+        Duration::from_secs(devtools::IDLE_TEST_SECONDS.load(Ordering::SeqCst) as u64)
+    } else {
+        threshold
+    };
+    idle_monitor::Settings {
+        enabled: power.idle_running(),
+        threshold,
+        warning: Duration::from_secs(warning as u64),
+        action,
+        enhanced,
+    }
 }
 
 fn input_sample() -> Option<(u32, Duration)> {
@@ -2939,10 +2967,7 @@ fn sample_idle_clock() -> idle_monitor::Update {
         input.map_or(0, |(_, idle)| idle.as_millis() as i64),
         Ordering::SeqCst,
     );
-    IDLE_CLOCK
-        .lock()
-        .unwrap()
-        .sample(std::time::Instant::now(), input, settings)
+    crate::runtime::lock(&IDLE_CLOCK).sample(std::time::Instant::now(), input, settings)
 }
 
 fn spawn_idle_thread() {
@@ -2950,36 +2975,30 @@ fn spawn_idle_thread() {
         .name("idle-monitor".into())
         .spawn(|| {
             let mut tick: u32 = 0;
-            let mut lock_states = [
-                (popups::VK_CAPITAL, 0),
-                (popups::VK_NUMLOCK, 0),
-                (popups::VK_SCROLL, 0),
-            ];
-            for (vk, last) in &mut lock_states {
-                *last = popups::poll_state(*vk);
-            }
             while !EXITING.load(Ordering::SeqCst) {
-                let update = sample_idle_clock();
-                unsafe {
-                    if update.cancel {
-                        let _ =
-                            PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_CANCEL, WPARAM(0), LPARAM(0));
+                runtime::catch_and_log("idle-monitor", || {
+                    let update = sample_idle_clock();
+                    unsafe {
+                        if update.cancel {
+                            let _ = PostMessageW(
+                                Some(hwnd(&HIDDEN)),
+                                WM_IDLE_CANCEL,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                        if update.show
+                            && PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_WARN, WPARAM(0), LPARAM(0))
+                                .is_err()
+                        {
+                            crate::runtime::lock(&IDLE_CLOCK).restart(std::time::Instant::now());
+                        }
                     }
-                    if update.show
-                        && PostMessageW(Some(hwnd(&HIDDEN)), WM_IDLE_WARN, WPARAM(0), LPARAM(0))
-                            .is_err()
-                    {
-                        IDLE_CLOCK
-                            .lock()
-                            .unwrap()
-                            .restart(std::time::Instant::now());
+                    tick = tick.wrapping_add(1);
+                    if tick.is_multiple_of(BATTERY_POLL_TICKS) {
+                        refresh_battery();
                     }
-                }
-                popups::poll(&mut lock_states);
-                tick = tick.wrapping_add(1);
-                if tick.is_multiple_of(BATTERY_POLL_TICKS) {
-                    refresh_battery();
-                }
+                });
                 std::thread::sleep(Duration::from_millis(250));
             }
         })
@@ -3028,15 +3047,12 @@ fn refresh_battery() {
 fn show_warning() {
     if !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
         sample_idle_clock();
-        let countdown = IDLE_CLOCK
-            .lock()
-            .unwrap()
-            .countdown(std::time::Instant::now());
+        let countdown = crate::runtime::lock(&IDLE_CLOCK).countdown(std::time::Instant::now());
         let Some((seconds, action)) = countdown else {
             return;
         };
         WARN_SECONDS_LEFT.store(seconds as i32, Ordering::SeqCst);
-        *WARN_ACTION.lock().unwrap() = action;
+        *crate::runtime::lock(&WARN_ACTION) = action;
     }
     WARNING_ACTIVE.store(true, Ordering::SeqCst);
     if WARN_SECONDS_LEFT.load(Ordering::SeqCst) == 0 {
@@ -3061,7 +3077,7 @@ fn show_warning() {
 fn update_warning_text(seconds: i32) {
     let action = t(&format!(
         "menu_action_{}",
-        WARN_ACTION.lock().unwrap().clone()
+        crate::runtime::lock(&WARN_ACTION).clone()
     ));
     let text = t("msg_idle_warning")
         .replace("%s", &action)
@@ -3090,14 +3106,11 @@ fn tick_warning() {
     let (left, action) = if WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
         (
             WARN_SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1,
-            WARN_ACTION.lock().unwrap().clone(),
+            crate::runtime::lock(&WARN_ACTION).clone(),
         )
     } else {
         sample_idle_clock();
-        let countdown = IDLE_CLOCK
-            .lock()
-            .unwrap()
-            .countdown(std::time::Instant::now());
+        let countdown = crate::runtime::lock(&IDLE_CLOCK).countdown(std::time::Instant::now());
         let Some((seconds, action)) = countdown else {
             hide_warning("session no longer active");
             return;
@@ -3110,16 +3123,13 @@ fn tick_warning() {
         execute_system_action(&action);
     } else {
         WARN_SECONDS_LEFT.store(left, Ordering::SeqCst);
-        *WARN_ACTION.lock().unwrap() = action;
+        *crate::runtime::lock(&WARN_ACTION) = action;
         update_warning_text(left);
     }
 }
 
 fn cancel_warning(reason: &str) {
-    IDLE_CLOCK
-        .lock()
-        .unwrap()
-        .restart(std::time::Instant::now());
+    crate::runtime::lock(&IDLE_CLOCK).restart(std::time::Instant::now());
     WARNING_PREVIEW_SESSION.store(false, Ordering::SeqCst);
     hide_warning(reason);
 }
@@ -3279,7 +3289,7 @@ pub fn t_args(key: &str, arguments: &[&str]) -> String {
 #[cfg(feature = "devtools")]
 pub fn popups_show_warning_preview() {
     WARNING_PREVIEW_SESSION.store(true, Ordering::SeqCst);
-    *WARN_ACTION.lock().unwrap() = cfg_map(|c| c.idle_action.clone());
+    *crate::runtime::lock(&WARN_ACTION) = cfg_map(|c| c.idle_action.clone());
     WARNING_ACTIVE.store(true, Ordering::SeqCst);
     WARN_SECONDS_LEFT.store(10, Ordering::SeqCst);
     show_warning();
@@ -3379,7 +3389,7 @@ fn theme_changes_survive_native_messages() {
     if std::env::var_os(CHILD).is_none() {
         // Separate processes still share USER32's foreground window. Hold
         // the UI test lock until the child exits, just like in-process tests.
-        let _ui_test = CONFIG_TEST_LOCK.lock().unwrap();
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -3406,7 +3416,7 @@ fn theme_changes_survive_native_messages() {
         assert!(status.success(), "theme child failed: {status}");
         return;
     }
-    *CONFIG.lock().unwrap() = Some(Default::default());
+    *crate::runtime::lock(&CONFIG) = Some(Default::default());
     *I18N.write().unwrap() = Some(I18n::load("en"));
     create_windows();
     let tray = tray_init().expect("test tray");
@@ -3560,12 +3570,99 @@ fn theme_changes_survive_native_messages() {
 }
 
 #[cfg(test)]
+mod power_state_tests {
+    use super::*;
+
+    /// Locks the truth table of the single power derivation shared by the
+    /// panel status, tray tooltip, execution flags, and idle settings.
+    #[test]
+    fn effective_power_state_truth_table() {
+        let _test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let previous_config = crate::runtime::lock(&CONFIG).replace(Default::default());
+        let previous_overrides = automation::overrides();
+        let previous_ac = ON_AC.swap(true, Ordering::SeqCst);
+        let previous_battery = BATTERY_PERCENT.swap(100, Ordering::SeqCst);
+
+        let set_config = |nosleep: bool, on_battery: bool, keep_screen: bool, idle: bool| {
+            *crate::runtime::lock(&CONFIG) = Some(idletrigger_core::config::Config {
+                nosleep_enabled: nosleep,
+                nosleep_on_battery: on_battery,
+                keep_screen_on: keep_screen,
+                idle_enabled: idle,
+                ..Default::default()
+            });
+        };
+        let set_overrides = |stay_awake: bool,
+                             pause_stay_awake: bool,
+                             enable_idle: bool,
+                             keep_screen_on: bool,
+                             idle_minutes: i32| {
+            automation::set_test_overrides(idletrigger_core::automation::EffectiveState {
+                stay_awake,
+                pause_stay_awake,
+                enable_idle,
+                keep_screen_on,
+                idle_minutes,
+                ..Default::default()
+            });
+        };
+
+        // Manual off, idle on: idle runs, nothing requested.
+        set_config(false, true, false, true);
+        set_overrides(false, false, false, false, 0);
+        let state = effective_power_state();
+        assert!(!state.requested && !state.awake && state.idle_running());
+
+        // Manual on: awake outranks and pauses the idle monitor.
+        set_config(true, true, false, true);
+        let state = effective_power_state();
+        assert!(state.requested && state.awake && !state.keep_screen && !state.idle_running());
+
+        // Battery below the threshold pauses Stay Awake at runtime only.
+        ON_AC.store(false, Ordering::SeqCst);
+        BATTERY_PERCENT.store(19, Ordering::SeqCst);
+        let state = effective_power_state();
+        assert!(state.requested && !state.awake && state.idle_running());
+        // The pause is a runtime state; the config toggle stays untouched.
+        assert!(
+            crate::runtime::lock(&CONFIG)
+                .as_ref()
+                .is_some_and(|c| c.nosleep_enabled)
+        );
+
+        // Automation override keeps the screen awake alongside.
+        ON_AC.store(true, Ordering::SeqCst);
+        set_overrides(true, false, false, true, 0);
+        let state = effective_power_state();
+        assert!(state.awake && state.keep_screen);
+
+        // Automation pause beats the override request.
+        set_overrides(true, true, false, false, 0);
+        let state = effective_power_state();
+        assert!(state.requested && state.paused && !state.awake);
+
+        // Idle override supplies its own minutes.
+        set_config(false, true, false, false);
+        set_overrides(false, false, true, false, 42);
+        let state = effective_power_state();
+        assert!(state.idle_requested && state.idle_running());
+        // The override wins over the config's idle timeout minutes.
+        assert_eq!(state.idle_minutes, 42);
+
+        ON_AC.store(previous_ac, Ordering::SeqCst);
+        BATTERY_PERCENT.store(previous_battery, Ordering::SeqCst);
+        automation::set_test_overrides(previous_overrides);
+        *crate::runtime::lock(&CONFIG) = previous_config;
+    }
+}
+
+#[cfg(test)]
 mod config_transaction_tests {
     use super::*;
 
     #[test]
     fn failed_or_stale_saves_leave_runtime_and_document_unchanged() {
-        let _test = CONFIG_TEST_LOCK.lock().unwrap();
+        let _test = crate::runtime::lock(&CONFIG_TEST_LOCK);
         let dir = std::env::temp_dir().join(format!(
             "idletrigger-transaction-{}-{}",
             std::process::id(),
@@ -3576,19 +3673,16 @@ mod config_transaction_tests {
         ));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("config.toml");
-        let old_config = CONFIG.lock().unwrap().replace(config::Config::default());
-        let old_doc = CONFIG_DOC
-            .lock()
-            .unwrap()
-            .replace("custom = 42\n".parse().unwrap());
-        let old_path = CONFIG_PATH.lock().unwrap().replace(path.clone());
-        let old_source = CONFIG_SOURCE.lock().unwrap().take();
+        let old_config = crate::runtime::lock(&CONFIG).replace(config::Config::default());
+        let old_doc = crate::runtime::lock(&CONFIG_DOC).replace("custom = 42\n".parse().unwrap());
+        let old_path = crate::runtime::lock(&CONFIG_PATH).replace(path.clone());
+        let old_source = crate::runtime::lock(&CONFIG_SOURCE).take();
         let old_failed = CONFIG_LOAD_FAILED.swap(false, Ordering::SeqCst);
         edit_config(|c| c.nosleep_enabled = true).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(cfg_map(|c| c.nosleep_enabled));
         assert_eq!(
-            CONFIG_DOC.lock().unwrap().as_ref().unwrap()["custom"].as_integer(),
+            crate::runtime::lock(&CONFIG_DOC).as_ref().unwrap()["custom"].as_integer(),
             Some(42)
         );
 
@@ -3596,7 +3690,10 @@ mod config_transaction_tests {
         assert!(edit_config(|c| c.nosleep_enabled = false).is_err());
         assert!(cfg_map(|c| c.nosleep_enabled));
         assert_eq!(
-            CONFIG_DOC.lock().unwrap().as_ref().unwrap().to_string(),
+            crate::runtime::lock(&CONFIG_DOC)
+                .as_ref()
+                .unwrap()
+                .to_string(),
             saved
         );
         std::fs::write(&path, &saved).unwrap();
@@ -3613,7 +3710,10 @@ mod config_transaction_tests {
         assert!(cfg_map(|c| c.nosleep_enabled));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
         assert_eq!(
-            CONFIG_DOC.lock().unwrap().as_ref().unwrap().to_string(),
+            crate::runtime::lock(&CONFIG_DOC)
+                .as_ref()
+                .unwrap()
+                .to_string(),
             saved
         );
 
@@ -3623,10 +3723,10 @@ mod config_transaction_tests {
         std::fs::remove_file(&path).unwrap();
         assert!(hot_reload_config().is_err());
         assert!(cfg_map(|c| c.nosleep_enabled));
-        *CONFIG.lock().unwrap() = old_config;
-        *CONFIG_DOC.lock().unwrap() = old_doc;
-        *CONFIG_PATH.lock().unwrap() = old_path;
-        *CONFIG_SOURCE.lock().unwrap() = old_source;
+        *crate::runtime::lock(&CONFIG) = old_config;
+        *crate::runtime::lock(&CONFIG_DOC) = old_doc;
+        *crate::runtime::lock(&CONFIG_PATH) = old_path;
+        *crate::runtime::lock(&CONFIG_SOURCE) = old_source;
         CONFIG_LOAD_FAILED.store(old_failed, Ordering::SeqCst);
         std::fs::remove_dir_all(&dir).unwrap();
     }

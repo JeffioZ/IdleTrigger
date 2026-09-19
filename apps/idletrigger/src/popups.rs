@@ -153,14 +153,14 @@ use crate::wide;
 
 /// Shows the countdown for the pending action, if any.
 pub fn show_pending() {
-    let Some(pending) = PENDING_ACTION.lock().unwrap().take() else {
+    let Some(pending) = crate::runtime::lock(&PENDING_ACTION).take() else {
         return;
     };
     if !pending.is_current() {
         ACTION_BUSY.store(false, Ordering::SeqCst);
         return;
     }
-    *CURRENT.lock().unwrap() = Some(Countdown {
+    *crate::runtime::lock(&CURRENT) = Some(Countdown {
         pending: pending.clone(),
         deadline: std::time::Instant::now()
             + std::time::Duration::from_secs(pending.seconds as u64),
@@ -302,7 +302,7 @@ unsafe fn center(hwnd: HWND) {
 }
 
 fn tick() {
-    let current = CURRENT.lock().unwrap().clone();
+    let current = crate::runtime::lock(&CURRENT).clone();
     let Some(current) = current else {
         return;
     };
@@ -323,7 +323,7 @@ fn tick() {
 }
 
 fn close(cancelled: bool) {
-    let current = CURRENT.lock().unwrap().take();
+    let current = crate::runtime::lock(&CURRENT).take();
     if current.is_none() {
         return;
     }
@@ -345,7 +345,7 @@ fn close(cancelled: bool) {
 }
 
 fn execute_now() {
-    let current = CURRENT.lock().unwrap().clone();
+    let current = crate::runtime::lock(&CURRENT).clone();
     let Some(current) = current else {
         return;
     };
@@ -395,7 +395,7 @@ unsafe extern "system" fn action_wnd_proc(
             WM_DESTROY => {
                 // A queued action can own the slot before this window shows
                 // it. Destroying an idle window must not release that slot.
-                if CURRENT.lock().unwrap().take().is_some() {
+                if crate::runtime::lock(&CURRENT).take().is_some() {
                     ACTION_BUSY.store(false, Ordering::SeqCst);
                 }
                 WINDOW.store(0, Ordering::SeqCst);
@@ -532,7 +532,7 @@ struct NoticeState {
 static NOTICE: Mutex<Option<NoticeState>> = Mutex::new(None);
 
 fn notice() -> std::sync::MutexGuard<'static, Option<NoticeState>> {
-    NOTICE.lock().unwrap()
+    crate::runtime::lock(&NOTICE)
 }
 
 pub fn lock_create() {
@@ -660,8 +660,10 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
         let title = text_bounds(dc, title_font, symbol);
         let label = text_bounds(dc, label_font, text);
         let (gap, pad) = (scale(4), scale(SHADOW_INSET));
-        let width = (CARD_H * scale(1) / 88 * 140).max(title.width.max(label.width) + scale(28));
-        let width = width.max(scale(CARD_W));
+        // Default footprint stays CARD_W logical px; larger text grows the
+        // card (Go parity). Do not scale CARD_W through CARD_H: the rounded
+        // division below inflates fractional DPI (e.g. 150% -> scale(1)=2).
+        let width = (title.width.max(label.width) + scale(28)).max(scale(CARD_W));
         let content_h = title.height + gap + label.height;
         let height = scale(CARD_H).max(content_h + scale(22));
         let (sw, sh) = (width + 2 * pad, height + 2 * pad);
@@ -1102,7 +1104,24 @@ unsafe extern "system" fn lock_wnd_proc(
 }
 
 /// Polls the three lock keys; posts `WM_LOCK_NOTIFY` on transitions.
-pub fn poll(last_states: &mut [(i32, i16)]) {
+///
+/// Must run on the message-pumping UI thread (hidden-window WM_TIMER):
+/// `GetKeyState`'s toggle bit only updates for a thread that reads keyboard
+/// messages from its own queue, so a worker thread would see a frozen
+/// snapshot. Go sampled from the notification window's own timer.
+pub fn poll() {
+    static LAST_STATES: std::sync::Mutex<[(i32, i16); 3]> =
+        std::sync::Mutex::new([(VK_CAPITAL, 0), (VK_NUMLOCK, 0), (VK_SCROLL, 0)]);
+    static SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let mut last_states = crate::runtime::lock(&LAST_STATES);
+    if !SEEDED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Seed the history once so keys already toggled at startup do not
+        // fire a notice (Go baseline=false).
+        for (vk, last) in last_states.iter_mut() {
+            *last = key_toggled(*vk);
+        }
+        return;
+    }
     let (enabled, caps, num, scroll) = crate::cfg_map(|c| {
         (
             c.lock_keys_enabled,
@@ -1156,17 +1175,12 @@ fn key_toggled(vk: i32) -> i16 {
     unsafe { (GetKeyState(vk) as u16 & 1) as i16 }
 }
 
-/// Reads one lock key's toggle state (for seeding the poll history).
-pub fn poll_state(vk: i32) -> i16 {
-    key_toggled(vk)
-}
-
 #[cfg(test)]
 mod layout_tests {
     use super::*;
     #[test]
     fn lock_notice_restores_topmost_without_activating() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
             use windows::Win32::UI::WindowsAndMessaging::*;
@@ -1245,7 +1259,7 @@ mod layout_tests {
     }
     #[test]
     fn long_warning_keeps_buttons_below_the_complete_body() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::*;
             let form = CreateWindowExW(

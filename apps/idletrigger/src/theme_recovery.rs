@@ -168,7 +168,7 @@ fn needs_full_repair(switched: bool, events: u32, displays: usize, recent: bool)
 }
 
 pub fn transition_applied() {
-    HISTORY.lock().unwrap().0 = Some(Instant::now());
+    crate::runtime::lock(&HISTORY).0 = Some(Instant::now());
     // Retain the post-transition check if preparation is cancelled or unstable.
     EVENTS.fetch_or(4, Ordering::SeqCst);
 }
@@ -179,7 +179,7 @@ pub fn finish(prepared: Prepared, switched: bool) {
     if !prepared.current() {
         return;
     }
-    let mut history = HISTORY.lock().unwrap();
+    let mut history = crate::runtime::lock(&HISTORY);
     let recent = history
         .0
         .is_some_and(|time| time.elapsed() <= Duration::from_secs(15));
@@ -211,7 +211,7 @@ pub fn finish(prepared: Prepared, switched: bool) {
 }
 
 pub fn manual_repair_completed() {
-    HISTORY.lock().unwrap().1 = Some(Instant::now());
+    crate::runtime::lock(&HISTORY).1 = Some(Instant::now());
 }
 
 #[cfg(test)]

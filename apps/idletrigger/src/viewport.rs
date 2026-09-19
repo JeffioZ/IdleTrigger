@@ -558,7 +558,7 @@ mod tests {
     use super::*;
     #[test]
     fn work_area_change_at_same_dpi_preserves_content_and_restores_size() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             let work = crate::display::work_area_for(HWND::default());
             let width = (work.right - work.left).min(600);
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn oversized_form_scrolls_both_axes_and_preserves_draft_through_dpi_change() {
-        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         unsafe {
             let work = crate::display::work_area_for(HWND::default());
             let height = (work.bottom - work.top) * 2;

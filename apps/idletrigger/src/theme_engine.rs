@@ -48,7 +48,7 @@ static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// Coalesces configuration, power, and location changes without doing work on the UI thread.
 pub fn wake() {
     crate::theme_recovery::changed();
-    *WAKE.0.lock().unwrap() = true;
+    *crate::runtime::lock(&WAKE.0) = true;
     WAKE.1.notify_one();
 }
 /// Manual mode and its absolute local-time expiration minute.
@@ -409,12 +409,12 @@ fn tick() {
         crate::log_line("theme engine: paused by foreground GPU activity");
         return;
     }
-    let operation = THEME_OPERATION.lock().unwrap();
+    let operation = crate::runtime::lock(&THEME_OPERATION);
     if !crate::cfg_map(|c| c.theme_switch_enabled) {
         return;
     }
     let manual = {
-        let mut manual = MANUAL_OVERRIDE.lock().unwrap();
+        let mut manual = crate::runtime::lock(&MANUAL_OVERRIDE);
         if manual.is_some_and(|(_, expiry)| local_time().absolute_minutes >= expiry) {
             *manual = None;
         }
@@ -442,7 +442,7 @@ fn tick() {
     let Some(prepared) = crate::theme_recovery::prepare(generation) else {
         return;
     };
-    let operation = THEME_OPERATION.lock().unwrap();
+    let operation = crate::runtime::lock(&THEME_OPERATION);
     if !prepared.current() || !crate::cfg_map(|c| c.theme_switch_enabled) {
         return;
     }
@@ -459,7 +459,7 @@ fn tick() {
     drop(operation);
     notify_theme();
     std::thread::sleep(Duration::from_millis(1200));
-    let operation = THEME_OPERATION.lock().unwrap();
+    let operation = crate::runtime::lock(&THEME_OPERATION);
     if prepared.current() && crate::cfg_map(|c| c.theme_switch_enabled) {
         crate::theme_recovery::finish(prepared, !matches_target);
     }
@@ -479,31 +479,35 @@ pub fn spawn() {
                 if crate::EXITING.load(Ordering::SeqCst) {
                     return;
                 }
-                let manual = MANUAL_REQUESTS.lock().unwrap().pending.take();
-                if let Some(dark) = manual {
-                    let result = set_manual_override(dark);
-                    MANUAL_REQUESTS.lock().unwrap().complete();
-                    if let Err(error) = result {
-                        *MANUAL_ERROR.lock().unwrap() = Some(error);
-                        unsafe {
-                            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                                Some(crate::hwnd(&crate::HIDDEN)),
-                                crate::WM_REFRESH_UI,
-                                WPARAM(0),
-                                LPARAM(0),
-                            );
+                crate::runtime::catch_and_log("theme-engine", || {
+                    let manual = crate::runtime::lock(&MANUAL_REQUESTS).pending.take();
+                    if let Some(dark) = manual {
+                        let result = set_manual_override(dark);
+                        crate::runtime::lock(&MANUAL_REQUESTS).complete();
+                        if let Err(error) = result {
+                            *crate::runtime::lock(&MANUAL_ERROR) = Some(error);
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                    Some(crate::hwnd(&crate::HIDDEN)),
+                                    crate::WM_REFRESH_UI,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        } else {
+                            notify_theme();
                         }
-                    } else {
-                        notify_theme();
                     }
-                }
-                tick();
-                let pending = WAKE.0.lock().unwrap();
-                let (mut pending, _) = WAKE
-                    .1
-                    .wait_timeout_while(pending, Duration::from_secs(60), |pending| !*pending)
-                    .unwrap();
-                *pending = false;
+                    tick();
+                    let pending = crate::runtime::lock(&WAKE.0);
+                    // Recover from poisoning like every other lock: a dead
+                    // engine thread is worse than one more 60s poll cycle.
+                    let (mut pending, _) = WAKE
+                        .1
+                        .wait_timeout_while(pending, Duration::from_secs(60), |pending| !*pending)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *pending = false;
+                });
             }
         })
         .expect("spawn theme engine");
@@ -512,11 +516,11 @@ pub fn spawn() {
 /// Sets a manual dark/light override until the next scheduled transition.
 fn set_manual_override(dark: bool) -> Result<(), String> {
     crate::theme_recovery::changed();
-    let operation = THEME_OPERATION.lock().unwrap();
+    let operation = crate::runtime::lock(&THEME_OPERATION);
     let now = local_time();
     let expiry = next_transition(now.absolute_minutes, now.minutes, light_window());
     apply_windows_theme(dark)?;
-    *MANUAL_OVERRIDE.lock().unwrap() = Some((dark, expiry));
+    *crate::runtime::lock(&MANUAL_OVERRIDE) = Some((dark, expiry));
     drop(operation);
     crate::request_theme_refresh();
     crate::log_line(&format!(
@@ -550,7 +554,7 @@ pub fn manual_switch() {
 fn enqueue_manual_switch(requests: &Mutex<ManualRequests>, read_current: impl FnOnce() -> bool) {
     // Keep completion from clearing target between reading the registry and
     // choosing the next request. This lock never covers a theme operation.
-    let mut requests = requests.lock().unwrap();
+    let mut requests = crate::runtime::lock(requests);
     let current = read_current();
     // Only enqueue here: the scheduler/repair lock can cover a slow Windows
     // theme-file operation, and must never be acquired by a button callback.
@@ -558,7 +562,7 @@ fn enqueue_manual_switch(requests: &Mutex<ManualRequests>, read_current: impl Fn
 }
 
 pub fn finish_manual_switch() {
-    let error = MANUAL_ERROR.lock().unwrap().take();
+    let error = crate::runtime::lock(&MANUAL_ERROR).take();
     if let Some(error) = error {
         crate::log_line(&format!("manual theme switch failed: {error}"));
         crate::warn_dialog("", &error);
@@ -576,25 +580,30 @@ pub fn repair() {
     if let Err(error) = std::thread::Builder::new()
         .name("theme-repair".into())
         .spawn(|| {
-            let operation = THEME_OPERATION.lock().unwrap();
-            let result = if crate::theme_repair::full_dwm_refresh_available() {
-                crate::theme_repair::refresh_dwm_colorization().map_err(|e| e.to_string())
-            } else {
-                Ok(())
-            };
-            crate::theme_recovery::manual_repair_completed();
-            drop(operation);
-            crate::theme_repair::notify_theme_changed();
-            *REPAIR_RESULT.lock().unwrap() = Some(result);
+            crate::runtime::catch_and_log("theme-repair", || {
+                let operation = crate::runtime::lock(&THEME_OPERATION);
+                let result = if crate::theme_repair::full_dwm_refresh_available() {
+                    crate::theme_repair::refresh_dwm_colorization().map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                };
+                crate::theme_recovery::manual_repair_completed();
+                drop(operation);
+                crate::theme_repair::notify_theme_changed();
+                *crate::runtime::lock(&REPAIR_RESULT) = Some(result);
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        Some(crate::hwnd(&crate::HIDDEN)),
+                        crate::WM_REFRESH_UI,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            });
+            // Free the button whenever the repair thread ends — success or
+            // panic. The success path used to reset inside the body; the
+            // reset must not depend on how the body exited.
             REPAIR_RUNNING.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                    Some(crate::hwnd(&crate::HIDDEN)),
-                    crate::WM_REFRESH_UI,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
         })
     {
         REPAIR_RUNNING.store(false, Ordering::SeqCst);
@@ -603,7 +612,7 @@ pub fn repair() {
 }
 
 pub fn finish_repair() {
-    let result = REPAIR_RESULT.lock().unwrap().take();
+    let result = crate::runtime::lock(&REPAIR_RESULT).take();
     if let Some(result) = result {
         crate::request_theme_repair_refresh();
         match result {
@@ -641,7 +650,7 @@ mod solar_tests {
             matches!(queue.try_lock(), Err(std::sync::TryLockError::WouldBlock));
         resume.send(()).unwrap();
         click.join().unwrap();
-        let mut queue = queue.lock().unwrap();
+        let mut queue = crate::runtime::lock(&queue);
         queue.complete();
         assert!(
             completion_blocked,
@@ -671,9 +680,9 @@ mod solar_tests {
 
     #[test]
     fn manual_click_does_not_wait_for_the_background_operation_lock() {
-        let _test = crate::CONFIG_TEST_LOCK.lock().unwrap();
-        let previous = std::mem::take(&mut *super::MANUAL_REQUESTS.lock().unwrap());
-        let operation = super::THEME_OPERATION.lock().unwrap();
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous = std::mem::take(&mut *crate::runtime::lock(&super::MANUAL_REQUESTS));
+        let operation = crate::runtime::lock(&super::THEME_OPERATION);
         let (done, result) = std::sync::mpsc::channel();
         let click = std::thread::spawn(move || {
             super::manual_switch();
@@ -684,7 +693,7 @@ mod solar_tests {
             .is_ok();
         drop(operation);
         click.join().unwrap();
-        *super::MANUAL_REQUESTS.lock().unwrap() = previous;
+        *crate::runtime::lock(&super::MANUAL_REQUESTS) = previous;
         assert!(
             responsive,
             "button callback waited for the theme repair lock"

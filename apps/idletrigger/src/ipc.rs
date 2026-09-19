@@ -31,7 +31,7 @@ static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
 /// request is discarded before it can mutate anything.
 fn dispatch(request: String) -> String {
     let (sender, receiver) = mpsc::sync_channel(1);
-    REQUESTS.lock().unwrap().push(Request {
+    crate::runtime::lock(&REQUESTS).push(Request {
         text: request,
         deadline: Instant::now() + Duration::from_millis(1500),
         reply: sender,
@@ -45,7 +45,7 @@ fn dispatch(request: String) -> String {
         )
     };
     if posted.is_err() {
-        REQUESTS.lock().unwrap().clear();
+        crate::runtime::lock(&REQUESTS).clear();
         return "err: UI is unavailable".into();
     }
     receiver
@@ -54,7 +54,7 @@ fn dispatch(request: String) -> String {
 }
 
 pub fn process_requests() {
-    let requests = std::mem::take(&mut *REQUESTS.lock().unwrap());
+    let requests = std::mem::take(&mut *crate::runtime::lock(&REQUESTS));
     for request in requests {
         let reply = if Instant::now() >= request.deadline {
             "err: request expired".into()
@@ -81,17 +81,19 @@ pub fn spawn_server() {
                 }
             };
             while !crate::EXITING.load(Ordering::SeqCst) {
-                if pipe.connect().is_err() {
-                    pipe.disconnect();
-                    continue;
-                }
-                if let Ok(request) = pipe.read() {
-                    let response = dispatch(request);
-                    if pipe.write(&response).is_ok() {
-                        pipe.finish();
+                crate::runtime::catch_and_log("ipc-server", || {
+                    if pipe.connect().is_err() {
+                        pipe.disconnect();
+                        return;
                     }
-                }
-                pipe.disconnect();
+                    if let Ok(request) = pipe.read() {
+                        let response = dispatch(request);
+                        if pipe.write(&response).is_ok() {
+                            pipe.finish();
+                        }
+                    }
+                    pipe.disconnect();
+                });
             }
         })
         .expect("spawn ipc server");

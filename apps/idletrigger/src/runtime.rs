@@ -30,6 +30,29 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Extracts a human-readable message from a caught panic payload.
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "opaque panic payload".into())
+}
+
+/// Runs a background-thread body, logging instead of letting the panic kill
+/// the thread silently — the GUI subsystem has no stderr to surface it on,
+/// so an unwrapped panic would just stop the subsystem. Returns `true` when
+/// the body panicked, so one-shot threads can reset their busy flags.
+pub(crate) fn catch_and_log(name: &str, body: impl FnOnce()) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(()) => false,
+        Err(payload) => {
+            log_line(&format!("{name} thread panic: {}", panic_message(payload)));
+            true
+        }
+    }
+}
+
 pub(crate) fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
     let guard = lock(&CONFIG);
     #[cfg(feature = "devtools")]
