@@ -77,16 +77,17 @@ pub fn read(document: &DocumentMut) -> Result<(Vec<Rule>, Vec<RuleIssue>), Strin
     Ok(decode(&tables(document)?))
 }
 
-fn encoded(rule: &Rule) -> Table {
-    // Rule only contains strings, integers, booleans and arrays; serialization
-    // to its named root is infallible for this model.
+fn encoded(rule: &Rule) -> Result<Table, String> {
     let mut doc = DocumentMut::new();
-    auto::replace_rules(&mut doc, std::slice::from_ref(rule)).expect("serializable rule");
+    auto::replace_rules(&mut doc, std::slice::from_ref(rule))
+        .map_err(|error| format!("rule serialization failed: {error}"))?;
     tables(&doc)
-        .expect("serialized rule table")
-        .remove(0)
+        .map_err(|error| format!("serialized rule lookup failed: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or("serialized rule entry is missing".to_string())?
         .table
-        .unwrap()
+        .ok_or("serialized rule entry is not a table".to_string())
 }
 
 /// Refuse stale edits, retain invalid untouched entries, and patch only the
@@ -124,8 +125,8 @@ pub fn update(document: &mut DocumentMut, base: &[Rule], proposed: &[Rule]) -> R
             }
             let mut table = existing[index].table.clone().unwrap_or_default();
             if current[index] != *rule {
-                let previous = encoded(&current[index]);
-                let next = encoded(rule);
+                let previous = encoded(&current[index])?;
+                let next = encoded(rule)?;
                 let keys: std::collections::BTreeSet<_> = previous
                     .iter()
                     .chain(next.iter())
@@ -157,7 +158,7 @@ pub fn update(document: &mut DocumentMut, base: &[Rule], proposed: &[Rule]) -> R
                 output.push(table);
             }
         } else {
-            let table = encoded(rule);
+            let table = encoded(rule)?;
             if let Some(array) = &mut inline {
                 array.push(Value::InlineTable(table.into_inline_table()));
             } else {
@@ -266,5 +267,47 @@ unknown = 123 # keep this
         assert!(doc.to_string().contains("unknown = 123 # keep this"));
         update(&mut doc, &new_base, &[]).unwrap();
         assert!(read(&doc).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn full_field_rule_roundtrips_through_serialization() {
+        // Every field set non-default: adding a Rule field must extend this
+        // rule (compilation fails otherwise) so the serde roundtrip stays
+        // proven for the whole model.
+        let rule = Rule {
+            id: "full".into(),
+            name: "full rule".into(),
+            enabled: false,
+            action: "shutdown".into(),
+            trigger: "weekly".into(),
+            time: "09:30".into(),
+            end_time: "17:45".into(),
+            date: "2026-01-02".into(),
+            days: vec!["wed".into(), "mon".into()],
+            process_logic: "any".into(),
+            processes: vec![
+                auto::ProcessTarget {
+                    kind: "name".into(),
+                    executable: "app.exe".into(),
+                    path: String::new(),
+                },
+                auto::ProcessTarget {
+                    kind: "path".into(),
+                    executable: "tool.exe".into(),
+                    path: "C:\\tools\\tool.exe".into(),
+                },
+            ],
+            keep_screen_on: true,
+            idle_minutes: 5,
+            warning_seconds: 120,
+            blocked_policy: "skip".into(),
+            max_wait_minutes: 10,
+        };
+        let mut doc = DocumentMut::new();
+        update(&mut doc, &[], std::slice::from_ref(&rule)).unwrap();
+        let (expected, issues) = auto::prepare_rules(std::slice::from_ref(&rule));
+        assert!(issues.is_empty(), "{issues:?}");
+        let expected = auto::runtime_rules(expected, &issues);
+        assert_eq!(read(&doc).unwrap().0, expected);
     }
 }

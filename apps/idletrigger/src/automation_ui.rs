@@ -1093,7 +1093,7 @@ unsafe extern "system" fn mgr_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("automation-manager", hwnd, msg, move || unsafe {
         match msg {
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
@@ -1189,7 +1189,7 @@ unsafe extern "system" fn mgr_proc(
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 unsafe fn register_mgr_class(instance: windows::Win32::Foundation::HMODULE) {
@@ -2522,7 +2522,7 @@ pub(crate) fn test_process_details_fixture() -> String {
 }
 
 unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("automation-editor", hwnd, msg, move || unsafe {
         match msg {
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
@@ -2711,7 +2711,7 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Strips non-digits from a numeric edit and restores the caret (Go).
@@ -4305,7 +4305,7 @@ unsafe extern "system" fn picker_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("automation-picker", hwnd, msg, move || unsafe {
         match msg {
             WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
                 if !PK_LOADING.load(Ordering::SeqCst)
@@ -4429,7 +4429,7 @@ unsafe extern "system" fn picker_proc(
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Go handleNotify: checkbox changes, column sorting, label-click toggles.

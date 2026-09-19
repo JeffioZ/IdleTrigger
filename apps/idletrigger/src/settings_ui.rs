@@ -1642,7 +1642,7 @@ unsafe fn create_tooltip(hwnd: HWND) {
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("settings", hwnd, msg, move || unsafe {
         match msg {
             WM_COMMAND => {
                 let idc = (wparam.0 & 0xFFFF) as i32;
@@ -1818,7 +1818,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let is_error = child_hwnd == validation && GetWindowTextLengthW(validation) > 0;
                 let color = if is_error {
                     // Validation messages render in the error color.
-                    0x001C_2BC8
+                    theme::palette().danger_surface_text
                 } else {
                     theme::text_color()
                 };
@@ -1845,7 +1845,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Surface static id for an edit id, when one exists.

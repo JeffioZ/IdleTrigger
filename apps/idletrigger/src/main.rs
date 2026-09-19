@@ -361,9 +361,12 @@ fn cfg_edit<T>(f: impl FnOnce(&mut config::Config) -> T) -> T {
 
 fn log_line(msg: &str) {
     use std::io::Write;
-    let Ok(mut guard) = LOG_FILE.lock() else {
-        return;
-    };
+    // Recover from poisoning instead of skipping the write: the window-proc
+    // panic guard logs through here, possibly right after another thread
+    // poisoned LOG_FILE mid-write.
+    let mut guard = LOG_FILE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard
         .as_ref()
         .and_then(|file| file.metadata().ok())
@@ -372,7 +375,7 @@ fn log_line(msg: &str) {
         guard.take();
         if let Some(path) = CONFIG_PATH
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .and_then(|path| path.parent())
         {
@@ -704,7 +707,7 @@ unsafe extern "system" fn hidden_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    guarded_proc("hidden", hwnd_, msg, move || unsafe {
         let registered = REGISTERED_SHOW_PANEL.load(Ordering::SeqCst);
         if registered != 0 && msg == registered {
             show_panel();
@@ -841,7 +844,7 @@ unsafe extern "system" fn hidden_proc(
             }
             _ => DefWindowProcW(hwnd_, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Reads a control's window text (owner-drawn controls carry their label in
@@ -861,6 +864,25 @@ fn window_text(control: HWND) -> String {
 /// Wide string with a NUL terminator for PCWSTR call sites.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
+}
+
+/// Runs a window-proc body with a panic guard. A panic crossing the
+/// "system" ABI aborts the process before anything else could react, so
+/// each proc catches its own body here, logs, and degrades to
+/// DefWindowProcW instead of taking the tray down silently.
+fn guarded_proc(name: &str, hwnd: HWND, msg: u32, body: impl FnOnce() -> LRESULT) -> LRESULT {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "opaque panic payload".into());
+            log_line(&format!("panic in {name} proc (msg 0x{msg:04X}): {detail}"));
+            unsafe { DefWindowProcW(hwnd, msg, WPARAM(0), LPARAM(0)) }
+        }
+    }
 }
 
 fn invalidate_control(id: usize) {
@@ -1077,7 +1099,7 @@ unsafe extern "system" fn panel_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    guarded_proc("panel", hwnd_, msg, move || unsafe {
         match msg {
             WM_CLOSE => {
                 let _ = ShowWindow(hwnd_, SW_HIDE);
@@ -1165,7 +1187,7 @@ unsafe extern "system" fn panel_proc(
             }
             _ => DefWindowProcW(hwnd_, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Uniform static backgrounds: primary text for section headers and the
@@ -1193,7 +1215,7 @@ unsafe extern "system" fn warning_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    guarded_proc("warning", hwnd_, msg, move || unsafe {
         match msg {
             WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_WARN_CANCEL => {
                 cancel_warning("user");
@@ -1224,7 +1246,7 @@ unsafe extern "system" fn warning_proc(
             }
             _ => DefWindowProcW(hwnd_, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> bool {
