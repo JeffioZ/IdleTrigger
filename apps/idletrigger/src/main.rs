@@ -3489,15 +3489,29 @@ fn theme_changes_survive_native_messages() {
         // Separate processes still share USER32's foreground window. Hold
         // the UI test lock until the child exits, just like in-process tests.
         let _ui_test = CONFIG_TEST_LOCK.lock().unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "theme_changes_survive_native_messages",
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .status()
+            .spawn()
             .unwrap();
+        // A wedged child would hold the UI test lock forever and stall every
+        // other native UI test in this binary.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("theme child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert!(status.success(), "theme child failed: {status}");
         return;
     }
