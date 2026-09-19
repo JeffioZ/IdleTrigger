@@ -1345,7 +1345,9 @@ fn create_windows() {
         let panel_w = frame.right - frame.left;
         let panel_h = frame.bottom - frame.top;
         // Two-step commit: position first, show later (Go behavior).
-        let (x, y) = panel_origin(panel_w, panel_h);
+        let (x, y) = cursor_work_area()
+            .map(|work| panel_origin(work, panel_w, panel_h))
+            .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
         let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
             panel,
             Some(windows::Win32::Foundation::HWND::default()),
@@ -1789,7 +1791,7 @@ fn cursor_work_area() -> Option<RECT> {
     };
     unsafe {
         let mut point = windows::Win32::Foundation::POINT::default();
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point);
+        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).ok()?;
         let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
         if monitor.is_invalid() {
             return None;
@@ -1812,10 +1814,7 @@ fn cursor_work_area() -> Option<RECT> {
 
 /// Panel origin: bottom-right of the work area with a 16-logical-px margin,
 /// clamped inside, matching the Go `panelOrigin`.
-fn panel_origin(width: i32, height: i32) -> (i32, i32) {
-    let Some(work) = cursor_work_area() else {
-        return (CW_USEDEFAULT, CW_USEDEFAULT);
-    };
+fn panel_origin(work: RECT, width: i32, height: i32) -> (i32, i32) {
     let margin = scale(16);
     let mut x = work.right - width - margin;
     let mut y = work.bottom - height - margin;
@@ -1826,6 +1825,47 @@ fn panel_origin(width: i32, height: i32) -> (i32, i32) {
         y = work.top;
     }
     (x, y)
+}
+
+/// Re-anchor a retained, hidden panel using the current monitor topology.
+fn position_panel_for_show(panel: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE};
+    let Some(work) = cursor_work_area() else {
+        return;
+    };
+    unsafe {
+        // Move onto the destination monitor first so WM_DPICHANGED can resize
+        // the panel and its controls before we measure its final outer bounds.
+        if SetWindowPos(
+            panel,
+            None,
+            work.left,
+            work.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .is_err()
+        {
+            return;
+        }
+        viewport::fit_work_area(panel, work);
+        let mut bounds = RECT::default();
+        if GetWindowRect(panel, &mut bounds).is_err() {
+            return;
+        }
+        let _dpi = dpi::Scope::window(panel);
+        let (x, y) = panel_origin(work, bounds.right - bounds.left, bounds.bottom - bounds.top);
+        let _ = SetWindowPos(
+            panel,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// Splits a row into `count` equal widths separated by GAP, like the Go
@@ -2518,7 +2558,11 @@ fn show_panel() {
         } else if !IsWindowVisible(target).as_bool() {
             // Reopening a retained panel needs the same complete first frame
             // as startup; ShowWindow alone can expose an unfinished surface.
-            FirstFrameGate::begin(target).reveal();
+            let frame = FirstFrameGate::begin(target);
+            if target == hwnd(&PANEL) {
+                position_panel_for_show(target);
+            }
+            frame.reveal();
         } else {
             let _ = ShowWindow(target, SW_SHOW);
         }

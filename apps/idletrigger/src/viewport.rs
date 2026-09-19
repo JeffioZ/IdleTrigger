@@ -219,6 +219,49 @@ pub fn fit(hwnd: HWND) {
     }
 }
 
+/// Refit retained content after a monitor/work-area change, even at the same DPI.
+/// Unlike `fit`, this keeps the full content size instead of recording the
+/// already-constrained client size as the new layout size.
+pub fn fit_work_area(hwnd: HWND, work: RECT) {
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    unsafe {
+        let Some(state) = state(hwnd) else {
+            return;
+        };
+        let mut rect = RECT::default();
+        let mut client = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() || GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        let width = (state.width.get() + rect.right - rect.left - client.right)
+            .min(work.right - work.left)
+            .max(1);
+        let height = (state.height.get() + rect.bottom - rect.top - client.bottom)
+            .min(work.bottom - work.top)
+            .max(1);
+        let x = state.x.get();
+        let y = state.position.get();
+        if SetWindowPos(
+            hwnd,
+            None,
+            rect.left
+                .clamp(work.left, (work.right - width).max(work.left)),
+            rect.top
+                .clamp(work.top, (work.bottom - height).max(work.top)),
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .is_ok()
+        {
+            scroll_x(hwnd, x);
+            scroll_to(hwnd, y);
+            crate::list_style::refresh(hwnd);
+            sync_horizontal(hwnd);
+        }
+    }
+}
+
 unsafe fn constrain(hwnd: HWND) {
     unsafe {
         let work = crate::display::work_area_for(hwnd);
@@ -513,6 +556,92 @@ unsafe extern "system" fn horizontal_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn work_area_change_at_same_dpi_preserves_content_and_restores_size() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        unsafe {
+            let work = crate::display::work_area_for(HWND::default());
+            let width = (work.right - work.left).min(600);
+            let height = (work.bottom - work.top).min(400);
+            let form = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_POPUP | WS_CAPTION,
+                work.left,
+                work.top,
+                width,
+                height,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            crate::dpi::install(form);
+            let mut client = RECT::default();
+            GetClientRect(form, &mut client).unwrap();
+            let edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("EDIT"),
+                windows::core::w!("keep this draft"),
+                WS_CHILD | WS_VISIBLE,
+                client.right - 160,
+                client.bottom - 36,
+                150,
+                24,
+                Some(form),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            fit(form);
+            let dpi = crate::dpi::window_dpi(form);
+            let small = RECT {
+                right: work.left + width / 2,
+                bottom: work.top + height / 2,
+                ..work
+            };
+            fit_work_area(form, small);
+            let mut bounds = RECT::default();
+            GetWindowRect(form, &mut bounds).unwrap();
+            assert_eq!(bounds, small);
+            assert_eq!(state(form).unwrap().width.get(), client.right);
+            assert_eq!(metrics(form).unwrap().0, client.bottom);
+            assert_ne!(
+                GetWindowLongW(state(form).unwrap().bar.get(), GWL_STYLE) as u32 & WS_VISIBLE.0,
+                0
+            );
+            reveal_control(form, edit);
+            let position = metrics(form).unwrap().2;
+            let x = state(form).unwrap().x.get();
+            assert!(position > 0 && x > 0);
+            GetWindowRect(edit, &mut bounds).unwrap();
+            assert!(bounds.left >= small.left && bounds.right <= small.right);
+            assert!(bounds.top >= small.top && bounds.bottom <= small.bottom);
+            fit_work_area(form, small);
+            assert_eq!(metrics(form).unwrap().2, position);
+            assert_eq!(state(form).unwrap().x.get(), x);
+
+            fit_work_area(form, work);
+            GetWindowRect(form, &mut bounds).unwrap();
+            assert_eq!(bounds.right - bounds.left, width);
+            assert_eq!(bounds.bottom - bounds.top, height);
+            assert_eq!(metrics(form).unwrap().2, 0);
+            assert_eq!(state(form).unwrap().x.get(), 0);
+            assert_eq!(
+                GetWindowLongW(state(form).unwrap().bar.get(), GWL_STYLE) as u32 & WS_VISIBLE.0,
+                0
+            );
+            assert_eq!(crate::dpi::window_dpi(form), dpi);
+            let mut text = [0u16; 32];
+            GetWindowTextW(edit, &mut text);
+            assert!(String::from_utf16_lossy(&text).starts_with("keep this draft"));
+            DestroyWindow(form).unwrap();
+        }
+    }
+
     #[test]
     fn oversized_form_scrolls_both_axes_and_preserves_draft_through_dpi_change() {
         let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
