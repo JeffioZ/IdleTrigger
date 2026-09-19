@@ -251,9 +251,7 @@ fn fetch_ipwho() -> Option<Location> {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 /// Keep the display label alongside the coordinates used for solar calculations.
 fn parse_ipwho(body: &str) -> Option<Location> {

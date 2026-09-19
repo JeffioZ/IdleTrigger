@@ -69,9 +69,7 @@ use windows::core::PCWSTR;
 const VALUE_NAME: &str = "IdleTrigger";
 const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 pub fn autostart_is_enabled() -> bool {
     unsafe {

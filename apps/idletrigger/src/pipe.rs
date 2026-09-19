@@ -42,9 +42,7 @@ impl Drop for Allocation {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 fn security() -> Result<Allocation> {
     unsafe {

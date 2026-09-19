@@ -293,9 +293,8 @@ fn s(v: i32) -> i32 {
     crate::scale_pub(v)
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
+use crate::window_text;
 
 fn set_text(hwnd: HWND, text: &str) {
     unsafe {
@@ -303,29 +302,8 @@ fn set_text(hwnd: HWND, text: &str) {
     }
 }
 
-fn get_text(hwnd: HWND) -> String {
-    unsafe {
-        let len = GetWindowTextLengthW(hwnd);
-        let mut buf = vec![0u16; (len + 1) as usize];
-        let n = GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..n.max(0) as usize])
-    }
-}
-
 fn get_dlg_item(parent: HWND, id: usize) -> HWND {
     unsafe { GetDlgItem(Some(parent), id as i32).unwrap_or_default() }
-}
-
-fn window_text(control: HWND) -> String {
-    unsafe {
-        let len = GetWindowTextLengthW(control);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        let copied = GetWindowTextW(control, &mut buf);
-        String::from_utf16_lossy(&buf[..copied.max(0) as usize])
-    }
 }
 
 fn is_chinese() -> bool {
@@ -661,7 +639,6 @@ pub fn ensure_created() {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-        MGR_LIST_SURFACE_HWND.store(surface.0 as isize, Ordering::SeqCst);
 
         let list = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -769,8 +746,6 @@ pub fn ensure_created() {
         }
     }
 }
-
-static MGR_LIST_SURFACE_HWND: AtomicIsize = AtomicIsize::new(0);
 
 pub fn show() {
     let _dpi = crate::dpi::Scope::window(crate::hwnd(&crate::PANEL));
@@ -1205,6 +1180,7 @@ unsafe extern "system" fn mgr_proc(
             WM_DESTROY => {
                 MGR_HWND.store(0, Ordering::SeqCst);
                 MGR_LIST_HWND.store(0, Ordering::SeqCst);
+                MGR_DISPLAYED_RULES.lock().unwrap().clear();
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                     crate::hwnd(&crate::PANEL),
                     true,
@@ -1350,7 +1326,7 @@ fn normalize_time_edit_text(value: &str, caret: usize, final_: bool) -> (String,
 
 /// Go timeEditNormalizeWindow: reformat the field and restore the caret.
 fn time_edit_normalize(hwnd: HWND, final_: bool) {
-    let value = get_text(hwnd);
+    let value = window_text(hwnd);
     let caret = unsafe {
         let mut start: u32 = 0;
         let mut end: u32 = 0;
@@ -1856,14 +1832,14 @@ fn populate_editor() {
 /// Reads the editor controls into a Rule (Go syncDraft).
 fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
     let mut draft = base.clone();
-    draft.name = clean_single_line(&get_text(get_dlg_item(ed, ED_NAME)));
+    draft.name = clean_single_line(&window_text(get_dlg_item(ed, ED_NAME)));
     draft.action = choice_value(ed, ED_ACTION);
     draft.trigger = choice_value(ed, ED_TRIGGER);
     draft.process_logic = choice_value(ed, ED_LOGIC);
     draft.blocked_policy = choice_value(ed, ED_BLOCKED);
-    draft.date = clean_single_line(&get_text(get_dlg_item(ed, ED_DATE)));
-    draft.time = clean_single_line(&get_text(get_dlg_item(ed, ED_TIME)));
-    draft.end_time = clean_single_line(&get_text(get_dlg_item(ed, ED_END_TIME)));
+    draft.date = clean_single_line(&window_text(get_dlg_item(ed, ED_DATE)));
+    draft.time = clean_single_line(&window_text(get_dlg_item(ed, ED_TIME)));
+    draft.end_time = clean_single_line(&window_text(get_dlg_item(ed, ED_END_TIME)));
     let day_ids = [
         (ED_DAYS_MON, "mon"),
         (ED_DAYS_TUE, "tue"),
@@ -1880,15 +1856,15 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
         .collect();
     draft.keep_screen_on = edit_is_checked(ED_KEEP_SCREEN);
     draft.processes = EDIT_PROCS.lock().unwrap().clone();
-    draft.idle_minutes = get_text(get_dlg_item(ed, ED_IDLE_MIN))
+    draft.idle_minutes = window_text(get_dlg_item(ed, ED_IDLE_MIN))
         .trim()
         .parse()
         .unwrap_or(0);
-    draft.warning_seconds = get_text(get_dlg_item(ed, ED_WARNING))
+    draft.warning_seconds = window_text(get_dlg_item(ed, ED_WARNING))
         .trim()
         .parse()
         .unwrap_or(0);
-    draft.max_wait_minutes = get_text(get_dlg_item(ed, ED_MAX_WAIT))
+    draft.max_wait_minutes = window_text(get_dlg_item(ed, ED_MAX_WAIT))
         .trim()
         .parse()
         .unwrap_or(0);
@@ -2718,6 +2694,15 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_DESTROY => {
                 EDIT_HWND.store(0, Ordering::SeqCst);
+                // Hidden-reuse never reaches here; a real destroy must drop
+                // editor state so a recreated window cannot inherit stale
+                // checkbox marks on reused control ids.
+                EDIT_INDEX.store(-1, Ordering::SeqCst);
+                EDIT_ERROR.store(false, Ordering::SeqCst);
+                *EDIT_CHECKS.lock().unwrap() = None;
+                *EDIT_ORIG.lock().unwrap() = None;
+                EDIT_BASE_RULES.lock().unwrap().clear();
+                EDIT_PROCS.lock().unwrap().clear();
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                     HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
                     true,
@@ -2735,7 +2720,7 @@ fn sanitize_numeric_edit(ed: HWND, id: usize) {
     if control.is_invalid() {
         return;
     }
-    let value = get_text(control);
+    let value = window_text(control);
     let filtered: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
     if filtered == value {
         return;
@@ -3821,7 +3806,9 @@ fn apply_filter() {
     unsafe {
         let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
         let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        let filter = get_text(get_dlg_item(pk, PK_SEARCH)).trim().to_lowercase();
+        let filter = window_text(get_dlg_item(pk, PK_SEARCH))
+            .trim()
+            .to_lowercase();
         let (column, ascending) = *PK_SORT.lock().unwrap();
         let old_visible = PK_VISIBLE.lock().unwrap().clone();
         let old_top = SendMessageW(
@@ -4424,6 +4411,16 @@ unsafe extern "system" fn picker_proc(
                 PK_GENERATION.fetch_add(1, Ordering::SeqCst);
                 PICKER_HWND.store(0, Ordering::SeqCst);
                 PK_LIST_HWND.store(0, Ordering::SeqCst);
+                // Same rule as the editor: drop picker caches on a real
+                // destroy so recreation starts clean. PK_GENERATION above
+                // already invalidates any in-flight background load.
+                PK_ITEMS.lock().unwrap().clear();
+                PK_VISIBLE.lock().unwrap().clear();
+                PK_SELECTED.lock().unwrap().clear();
+                *PK_SORT.lock().unwrap() = (0, true);
+                DESCRIPTIONS.lock().unwrap().clear();
+                *PK_RESULT.lock().unwrap() = None;
+                *PK_UPDATED.lock().unwrap() = None;
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                     HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
                     true,

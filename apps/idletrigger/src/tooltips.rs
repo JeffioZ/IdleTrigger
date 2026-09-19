@@ -18,9 +18,7 @@ use windows::core::PCWSTR;
 
 static TOOLTIP_HWND: AtomicIsize = AtomicIsize::new(0);
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 /// Creates the shared tooltip control for `panel` and registers a tool per
 /// control id with its Go-parity i18n key.

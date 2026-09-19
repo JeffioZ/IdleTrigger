@@ -15,9 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {

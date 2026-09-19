@@ -120,9 +120,7 @@ fn s(v: i32) -> i32 {
     crate::scale_pub(v)
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 fn current() -> HWND {
     HWND(SETTINGS_HWND.load(Ordering::SeqCst) as *mut _)
@@ -920,12 +918,7 @@ fn body_font() -> HFONT {
 }
 
 fn is_chinese() -> bool {
-    let lang = crate::cfg_map(|c| c.language.clone());
-    match lang.as_str() {
-        "en" => false,
-        "zh-CN" => true,
-        _ => unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() == 0x0804 },
-    }
+    crate::i18n_is_chinese()
 }
 
 /// Physical text width converted back to logical pixels (Go logicalTextWidth).
@@ -1821,31 +1814,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                     return LRESULT(theme::bg_brush().0 as isize);
                 }
-                // Disabled edit interiors paint on the disabled surface, not
-                // the window background (Go disabledBrush path).
-                if !IsWindowEnabled(child_hwnd).as_bool() && msg == WM_CTLCOLORSTATIC {
-                    let mut buffer = [0u16; 8];
-                    let len = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(
-                        child_hwnd,
-                        &mut buffer,
-                    );
-                    let class =
-                        String::from_utf16_lossy(&buffer[..len.max(0) as usize]).to_uppercase();
-                    if class == "EDIT" {
-                        let palette = theme::palette();
-                        let _ = windows::Win32::Graphics::Gdi::SetTextColor(
-                            hdc,
-                            windows::Win32::Foundation::COLORREF(palette.disabled_text),
-                        );
-                        let _ = windows::Win32::Graphics::Gdi::SetBkColor(
-                            hdc,
-                            windows::Win32::Foundation::COLORREF(palette.disabled_surface),
-                        );
-                        let (light, dark) = theme::surface_brush_pairs();
-                        let pair = if theme::is_dark() { dark } else { light };
-                        return LRESULT(pair.1.0 as isize);
-                    }
-                }
                 let validation = get(hwnd, ID_VALIDATION);
                 let is_error = child_hwnd == validation && GetWindowTextLengthW(validation) > 0;
                 let color = if is_error {
@@ -1868,6 +1836,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 SETTINGS_HWND.store(0, Ordering::SeqCst);
                 TOOLTIP_HWND.store(0, Ordering::SeqCst);
                 PAGE.store(0, Ordering::SeqCst);
+                // Drop owner-draw checkbox states so a recreated window does
+                // not resurrect check marks on reused control ids.
+                *checks() = None;
                 let _ = EnableWindow(crate::hwnd(&crate::PANEL), true);
                 crate::refresh_status();
                 LRESULT(0)

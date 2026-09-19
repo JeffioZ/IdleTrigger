@@ -58,9 +58,7 @@ const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\The
 const BREED: &str = "SystemUsesLightTheme";
 const APP_BREED: &str = "AppsUseLightTheme";
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
+use crate::wide;
 
 /// Local time snapshot (minutes + weekday).
 pub struct LocalTime {

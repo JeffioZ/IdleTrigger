@@ -858,6 +858,11 @@ fn window_text(control: HWND) -> String {
     }
 }
 
+/// Wide string with a NUL terminator for PCWSTR call sites.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain([0]).collect()
+}
+
 fn invalidate_control(id: usize) {
     unsafe {
         let control = GetDlgItem(Some(hwnd(&PANEL)), id as i32).unwrap_or_default();
