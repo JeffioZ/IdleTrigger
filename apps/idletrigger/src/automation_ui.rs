@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use idletrigger_core::automation as auto;
 
@@ -154,12 +154,86 @@ static EDIT_HWND: AtomicIsize = AtomicIsize::new(0);
 static PICKER_HWND: AtomicIsize = AtomicIsize::new(0);
 static PK_LIST_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Editor working state.
-static EDIT_INDEX: AtomicI32 = AtomicI32::new(-1); // -1 = new
+/// Editor working state. EDIT_ERROR is a UI flag; everything describing the
+/// session itself lives in one struct behind one lock so index, snapshot,
+/// original rule and process selection can never be observed torn.
 static EDIT_ERROR: AtomicBool = AtomicBool::new(false);
-static EDIT_ORIG: Mutex<Option<auto::Rule>> = Mutex::new(None);
-static EDIT_BASE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 static MGR_DISPLAYED_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
+
+struct EditorSession {
+    index: i32, // -1 = new rule
+    orig: Option<auto::Rule>,
+    base_rules: Vec<auto::Rule>,
+    procs: Vec<auto::ProcessTarget>,
+}
+
+impl Default for EditorSession {
+    fn default() -> Self {
+        Self {
+            index: -1,
+            orig: None,
+            base_rules: Vec::new(),
+            procs: Vec::new(),
+        }
+    }
+}
+
+static EDIT_SESSION: Mutex<Option<EditorSession>> = Mutex::new(None);
+
+/// Opens a session when a rule is chosen for editing; the snapshot and
+/// original rule are filled in later by complete_edit at populate time.
+fn begin_edit(index: i32, procs: Vec<auto::ProcessTarget>) {
+    *EDIT_SESSION.lock().unwrap() = Some(EditorSession {
+        index,
+        procs,
+        ..Default::default()
+    });
+}
+
+fn complete_edit(index: i32, base_rules: Vec<auto::Rule>, orig: auto::Rule) {
+    let mut guard = EDIT_SESSION.lock().unwrap();
+    let session = guard.get_or_insert_with(Default::default);
+    session.index = index;
+    session.base_rules = base_rules;
+    session.orig = Some(orig);
+}
+
+fn end_edit() {
+    *EDIT_SESSION.lock().unwrap() = None;
+}
+
+fn edit_index() -> i32 {
+    EDIT_SESSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or(-1, |s| s.index)
+}
+
+fn edit_orig() -> Option<auto::Rule> {
+    EDIT_SESSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.orig.clone())
+}
+
+fn edit_procs() -> Vec<auto::ProcessTarget> {
+    EDIT_SESSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.procs.clone())
+        .unwrap_or_default()
+}
+
+fn set_edit_procs(procs: Vec<auto::ProcessTarget>) {
+    EDIT_SESSION
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .procs = procs;
+}
 
 // Owner-draw checkboxes track state here (BS_OWNERDRAW absorbs the native
 // check bits); keyed by control id, exactly like Go's p.checks map.
@@ -193,8 +267,6 @@ fn edit_toggle(ed: HWND, id: usize) {
     let next = !edit_is_checked(id);
     edit_set_checked(ed, id, next);
 }
-
-static EDIT_PROCS: Mutex<Vec<auto::ProcessTarget>> = Mutex::new(Vec::new());
 
 // ===== Geometry (Go tokens) =================================================
 
@@ -1036,9 +1108,9 @@ fn edit_selected() {
     if let Some(idx) = selected_index() {
         let rules = MGR_DISPLAYED_RULES.lock().unwrap();
         if let Some(rule) = rules.get(idx) {
-            *EDIT_PROCS.lock().unwrap() = rule.processes.clone();
+            let procs = rule.processes.clone();
             drop(rules);
-            EDIT_INDEX.store(idx as i32, Ordering::SeqCst);
+            begin_edit(idx as i32, procs);
             show_editor();
         }
     }
@@ -1100,8 +1172,7 @@ unsafe extern "system" fn mgr_proc(
                 let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
                 match code {
                     MGR_NEW => {
-                        EDIT_INDEX.store(-1, Ordering::SeqCst);
-                        *EDIT_PROCS.lock().unwrap() = Vec::new();
+                        begin_edit(-1, Vec::new());
                         crate::log_line("automation: new rule editor");
                         show_editor();
                     }
@@ -1746,20 +1817,19 @@ fn default_rule() -> auto::Rule {
 fn populate_editor() {
     unsafe {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
-        let idx = EDIT_INDEX.load(Ordering::SeqCst);
+        let idx = edit_index();
         let rules = if idx >= 0 {
             MGR_DISPLAYED_RULES.lock().unwrap().clone()
         } else {
             crate::automation::RULES.lock().unwrap().clone()
         };
-        *EDIT_BASE_RULES.lock().unwrap() = rules.clone();
         let rule = if idx >= 0 && (idx as usize) < rules.len() {
             Some(rules[idx as usize].clone())
         } else {
             None
         };
         let rule = rule.unwrap_or_else(default_rule);
-        *EDIT_ORIG.lock().unwrap() = Some(rule.clone());
+        complete_edit(idx, rules, rule.clone());
 
         // Title follows new/edit mode (Go setCaption).
         let title = if idx >= 0 {
@@ -1855,7 +1925,7 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
         .map(|(_, key)| key.to_string())
         .collect();
     draft.keep_screen_on = edit_is_checked(ED_KEEP_SCREEN);
-    draft.processes = EDIT_PROCS.lock().unwrap().clone();
+    draft.processes = edit_procs();
     draft.idle_minutes = window_text(get_dlg_item(ed, ED_IDLE_MIN))
         .trim()
         .parse()
@@ -1951,11 +2021,7 @@ fn clear_editor_error(ed: HWND) {
 
 /// Go saveEditor: validate, default the name, persist, close on success.
 fn save_rule(ed: HWND) {
-    let orig = EDIT_ORIG
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(default_rule);
+    let orig = edit_orig().unwrap_or_else(default_rule);
     let draft = read_draft(ed, &orig);
 
     if let Some((id, message)) = validate_draft(ed, &draft) {
@@ -1975,8 +2041,12 @@ fn save_rule(ed: HWND) {
     }
     let draft = normalized.remove(0);
 
-    let idx = EDIT_INDEX.load(Ordering::SeqCst);
-    let base = EDIT_BASE_RULES.lock().unwrap().clone();
+    // One lock: index and snapshot must describe the same session.
+    let (idx, base) = EDIT_SESSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or((-1, Vec::new()), |s| (s.index, s.base_rules.clone()));
     let mut candidate = base.clone();
     if idx >= 0 && (idx as usize) < candidate.len() {
         candidate[idx as usize] = draft.clone();
@@ -1992,7 +2062,7 @@ fn save_rule(ed: HWND) {
 
 /// Go cancelEditor: confirm when unsaved work would be lost.
 fn cancel_editor(ed: HWND) {
-    let orig = EDIT_ORIG.lock().unwrap().clone();
+    let orig = edit_orig();
     if let Some(orig) = orig {
         let current = read_draft(ed, &orig);
         if editor_needs_discard_confirm(&current, &orig) {
@@ -2020,7 +2090,7 @@ fn editor_needs_discard_confirm(current: &auto::Rule, orig: &auto::Rule) -> bool
     if current == orig {
         return false;
     }
-    if EDIT_INDEX.load(Ordering::SeqCst) >= 0 {
+    if edit_index() >= 0 {
         return true;
     }
     let intent = |r: &auto::Rule| {
@@ -2221,7 +2291,7 @@ pub fn layout_editor() {
         y += ED_FIELD_H + ED_RELATED_GAP;
 
         // Summary row: text shrinks by 30 when the info glyph is visible.
-        let has_procs = !EDIT_PROCS.lock().unwrap().is_empty();
+        let has_procs = !edit_procs().is_empty();
         update_proc_summary();
         if has_procs {
             place(ED_PROC_SUMMARY, ED_PAD, y, content_w - 30, ED_SUMMARY_H);
@@ -2422,7 +2492,7 @@ fn time_label_text(trigger: &str) -> String {
 /// Refreshes the selected-processes summary line (Go idProcessSummary).
 fn update_proc_summary() {
     let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
-    let count = EDIT_PROCS.lock().unwrap().len();
+    let count = edit_procs().len();
     let text = if count == 0 {
         t_pub("automation_no_processes")
     } else {
@@ -2492,7 +2562,7 @@ fn field_surface_of(edit_id: usize) -> Option<usize> {
 
 /// Process details text for the info glyph (Go processDetails).
 fn process_details() -> String {
-    let targets = EDIT_PROCS.lock().unwrap().clone();
+    let targets = edit_procs();
     let mut lines = Vec::new();
     for target in &targets {
         let name = described_target(target);
@@ -2513,11 +2583,11 @@ fn process_details() -> String {
 
 #[cfg(all(test, feature = "devtools"))]
 pub(crate) fn test_process_details_fixture() -> String {
-    *EDIT_PROCS.lock().unwrap() = vec![auto::ProcessTarget {
+    set_edit_procs(vec![auto::ProcessTarget {
         kind: "name".into(),
         executable: "IdleTrigger-audit.exe".into(),
         path: String::new(),
-    }];
+    }]);
     process_details()
 }
 
@@ -2553,7 +2623,7 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         clear_editor_error(hwnd);
                     }
                     ED_PROC_INFO if hi == BN_CLICKED => {
-                        if !EDIT_PROCS.lock().unwrap().is_empty() {
+                        if !edit_procs().is_empty() {
                             info_dialog(
                                 hwnd,
                                 &t_pub("automation_process_details_title"),
@@ -2697,12 +2767,9 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // Hidden-reuse never reaches here; a real destroy must drop
                 // editor state so a recreated window cannot inherit stale
                 // checkbox marks on reused control ids.
-                EDIT_INDEX.store(-1, Ordering::SeqCst);
                 EDIT_ERROR.store(false, Ordering::SeqCst);
                 *EDIT_CHECKS.lock().unwrap() = None;
-                *EDIT_ORIG.lock().unwrap() = None;
-                EDIT_BASE_RULES.lock().unwrap().clear();
-                EDIT_PROCS.lock().unwrap().clear();
+                end_edit();
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                     HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
                     true,
@@ -2960,7 +3027,7 @@ fn show_picker(owner: HWND) {
         refresh_tooltips();
 
         // Seed the selection from the editor draft (Go Show Selected).
-        *PK_SELECTED.lock().unwrap() = EDIT_PROCS.lock().unwrap().clone();
+        *PK_SELECTED.lock().unwrap() = edit_procs();
         *PK_SORT.lock().unwrap() = (0, true);
         set_text(get_dlg_item(pk, PK_SEARCH), "");
 
@@ -4173,7 +4240,7 @@ fn picker_confirm() {
             update_selection_status(pk);
             return;
         }
-        *EDIT_PROCS.lock().unwrap() = selected;
+        set_edit_procs(selected);
         update_proc_summary();
         layout_editor();
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
@@ -4698,8 +4765,7 @@ pub fn dpi_changed(hwnd: HWND) {
 /// Devtools capture support: open the editor in new-rule mode.
 #[cfg(feature = "devtools")]
 pub fn devtools_show_editor() {
-    EDIT_INDEX.store(-1, Ordering::SeqCst);
-    *EDIT_PROCS.lock().unwrap() = Vec::new();
+    begin_edit(-1, Vec::new());
     show_editor();
 }
 
@@ -4812,7 +4878,7 @@ pub fn refresh_language() {
         crate::nativeform::cue_banner(get_dlg_item(ed, ED_NAME), "automation_name_placeholder");
         set_text(
             ed,
-            &t_pub(if EDIT_INDEX.load(Ordering::SeqCst) >= 0 {
+            &t_pub(if edit_index() >= 0 {
                 "automation_edit_title"
             } else {
                 "automation_new_title"
