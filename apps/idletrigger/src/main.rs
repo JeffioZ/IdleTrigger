@@ -1,9 +1,9 @@
 //! IdleTrigger — native Windows power automation tray utility.
 //!
-//! Vertical slice: single-instance tray app with a control panel for Stay
+//! Single-instance tray app with a control panel for Stay
 //! Awake and Idle Monitoring (lock/sleep/hibernate/shutdown/restart actions
 //! with a cancellable non-activating countdown), config persisted to
-//! `IdleTrigger.toml` next to the EXE using the Go-compatible schema.
+//! `IdleTrigger.toml` next to the EXE using stable configuration fields.
 
 #![windows_subsystem = "windows"]
 
@@ -147,6 +147,7 @@ fn post_theme_refresh() {
 mod accessibility;
 mod automation;
 mod automation_ui;
+#[cfg(feature = "devtools")]
 mod capture;
 mod choice;
 #[cfg(feature = "devtools")]
@@ -3387,7 +3388,8 @@ pub fn t_args(key: &str, arguments: &[&str]) -> String {
     idletrigger_core::i18n::format(&t(key), arguments)
 }
 
-/// Devtools warning preview entry (feature-gated call site).
+/// Devtools warning preview entry.
+#[cfg(feature = "devtools")]
 pub fn popups_show_warning_preview() {
     WARNING_PREVIEW_SESSION.store(true, Ordering::SeqCst);
     *WARN_ACTION.lock().unwrap() = cfg_map(|c| c.idle_action.clone());
@@ -3396,7 +3398,8 @@ pub fn popups_show_warning_preview() {
     show_warning();
 }
 
-/// Window capture for devtools (feature-gated call site).
+/// Window capture for devtools.
+#[cfg(feature = "devtools")]
 pub fn capture_client_bmp_pub(hwnd_: HWND, path: &std::path::Path) -> std::io::Result<()> {
     capture::capture_client_bmp(hwnd_, path)
 }

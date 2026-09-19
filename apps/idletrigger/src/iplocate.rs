@@ -1,6 +1,5 @@
-//! IP geolocation via ipwho.is over WinHTTP — no Go net/http, no extra
-//! crates. Success caches for 24h in memory; failures retry after 30 min.
-//! Contract parity with Go `internal/feature/theme/location.go`.
+//! IP geolocation via ipwho.is over WinHTTP without an extra HTTP crate.
+//! Success caches for 24 hours in memory; failures retry after 30 minutes.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};

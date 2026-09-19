@@ -1,5 +1,5 @@
 //! Cancellable countdown window shown before automatic system actions.
-//! Mirrors the Go `actionwarning` behavior: at least 10 seconds, cancel
+//! The countdown lasts at least 10 seconds; cancel
 //! stops the occurrence, timeout executes the action.
 #![allow(clippy::manual_dangling_ptr)]
 
@@ -508,9 +508,6 @@ struct Surface {
     w: i32,
     h: i32,
     inset: i32,
-    /// The DIB's own memory; ownership lives with the bitmap.
-    #[allow(dead_code)]
-    pixels: *mut u8,
 }
 
 impl Drop for Surface {
@@ -772,7 +769,6 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
             w: sw,
             h: sh,
             inset: pad,
-            pixels,
         })
     }
 }

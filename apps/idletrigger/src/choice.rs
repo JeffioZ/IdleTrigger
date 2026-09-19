@@ -1,10 +1,7 @@
-//! Go nativeform choicepopup parity: owner-drawn choice buttons that open a
-//! custom drop-down popup (rounded card rows with hover/press/selected
-//! states) instead of a native combobox. Selection changes notify the owner
-//! form via WM_COMMAND with CBN_SELCHANGE so existing handlers keep working.
-//! Rows can be plain options, danger options, or non-selectable group
-//! headers (Go ChoicePopupItem.Header); lists longer than the visible window
-//! scroll with the wheel and arrow keys like the Go popup.
+//! Owner-drawn choice buttons with rounded drop-down rows and hover,
+//! press, and selection states. Selection changes notify the owner via
+//! WM_COMMAND with CBN_SELCHANGE. Rows support plain options, danger
+//! styling, and non-selectable headers; long lists scroll by wheel or keys.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
@@ -42,16 +39,6 @@ impl ChoiceItem {
             value: value.to_string(),
             label: label.to_string(),
             danger: false,
-            header: false,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn danger(value: &str, label: &str) -> ChoiceItem {
-        ChoiceItem {
-            value: value.to_string(),
-            label: label.to_string(),
-            danger: true,
             header: false,
         }
     }
@@ -113,27 +100,6 @@ pub fn create(
     create_rows(parent, id, b, &rows, font)
 }
 
-/// Choice creation with per-row danger flags.
-#[allow(dead_code)]
-pub fn create_danger(
-    parent: HWND,
-    id: i32,
-    b: (i32, i32, i32, i32),
-    items: &[(String, String, bool)],
-    font: windows::Win32::Graphics::Gdi::HFONT,
-) -> HWND {
-    let rows: Vec<ChoiceItem> = items
-        .iter()
-        .map(|(v, l, d)| ChoiceItem {
-            value: v.clone(),
-            label: l.clone(),
-            danger: *d,
-            header: false,
-        })
-        .collect();
-    create_rows(parent, id, b, &rows, font)
-}
-
 /// Choice creation with the full row model (options, danger rows, headers).
 pub fn create_rows(
     parent: HWND,
@@ -180,7 +146,6 @@ pub fn create_rows(
 }
 
 /// Replaces the item list (Go fill + select flows).
-#[allow(dead_code)]
 pub fn set_items(button: HWND, items: &[(String, String)]) {
     let rows: Vec<ChoiceItem> = items
         .iter()
@@ -579,7 +544,6 @@ fn detach_popup(popup: HWND) {
 }
 
 /// The popup window currently open, if any.
-#[allow(dead_code)]
 pub fn open_popup() -> HWND {
     HWND(
         choices()

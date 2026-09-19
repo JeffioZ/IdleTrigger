@@ -1,4 +1,4 @@
-//! Native tooltip layer for the control panel (Go tooltips.go parity):
+//! Native tooltip layer for the control panel:
 //! one tooltip control hosting a tool per panel control, refreshed when
 //! language or runtime state changes.
 

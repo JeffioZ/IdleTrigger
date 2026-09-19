@@ -1,4 +1,4 @@
-//! Native report header interaction with Go's palette drawing, plus a
+//! Native report-header interaction using the application palette, plus a
 //! compact client scrollbar where Windows non-client colors are unreliable.
 use std::cell::Cell;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};

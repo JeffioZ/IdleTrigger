@@ -44,17 +44,6 @@ pub fn centered_on(hwnd: HWND, w: i32, h: i32) -> (i32, i32) {
     )
 }
 
-/// Bottom-center of the monitor `hwnd` lives on, with a logical margin.
-#[allow(dead_code)]
-pub fn bottom_center_on(hwnd: HWND, w: i32, h: i32, margin: i32) -> (i32, i32) {
-    let work = work_area_for(hwnd);
-    let m = crate::scale_pub(margin);
-    (
-        (work.left + (work.right - work.left - w) / 2).max(work.left),
-        (work.bottom - h - m).max(work.top),
-    )
-}
-
 /// True when the foreground window covers the entire monitor it is on
 /// (heuristic for fullscreen apps / presentations), matching the Go
 /// environment check closely enough for the two skip-fullscreen flags.

@@ -1,8 +1,8 @@
 //! IdleTrigger core: pure logic shared by the tray app and tests.
 //!
-//! No Win32 or UI dependencies here — `automation` is the Go
-//! `internal/automation` port, `config` is the Go-compatible TOML
-//! round-trip, and `i18n` loads the product locale files.
+//! No Win32 or UI dependencies: `automation` defines rules and runtime state,
+//! `config` loads and saves TOML, `rule_document` preserves rule edits and
+//! comments, and `i18n` loads the product locale files.
 
 pub mod automation;
 pub mod config;

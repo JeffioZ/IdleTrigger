@@ -1,9 +1,8 @@
 //! IdleTrigger configuration: TOML load, validate, save.
 //!
-//! Field names and the annotated template are kept identical to the Go
-//! version so existing `IdleTrigger.toml` files load unchanged. Saving
-//! edits the loaded document in place via `toml_edit`, preserving every
-//! other key and comment; the file is never rewritten on load.
+//! Stable field names allow existing `IdleTrigger.toml` files to load.
+//! Saving edits the loaded document in place via `toml_edit`, preserving
+//! other keys and comments; loading never rewrites the file.
 
 use std::path::Path;
 

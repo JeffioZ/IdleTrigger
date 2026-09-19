@@ -1,6 +1,5 @@
-//! Theme follow: system light/dark detection, palette values from the Go
-//! `internal/ui/colors` palette, and DWM title-bar theming (attribute 20
-//! with a fallback to legacy attribute 19 for Windows 10 1809–1909).
+//! System light/dark detection, application palettes, and DWM title-bar
+//! theming (attribute 20, falling back to 19 on older Windows 10 builds).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +15,8 @@ use windows::core::{BOOL, PCWSTR};
 
 // Go palette tokens (colors/palette.go).
 
-// Choice-popup-batch fields carry allow(dead_code) until that batch lands.
 /// Full Go palette (colors/palette.go Palette) for owner-drawn controls.
 /// Values are COLORREF (0x00BBGGRR), converted to ARGB at the GDI+ edge.
-#[allow(dead_code)]
 pub struct Palette {
     pub window_bg: u32,
     pub surface: u32,
@@ -117,7 +114,6 @@ const DARK_PALETTE: Palette = Palette {
 };
 
 /// One (surface, disabled-surface) brush pair, shareable across threads.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub struct SurfaceBrushPair(
     pub windows::Win32::Graphics::Gdi::HBRUSH,
@@ -252,11 +248,6 @@ pub fn read_light_preference(name: &str) -> Option<bool> {
             None
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn accent_color() -> u32 {
-    palette().accent
 }
 
 pub fn tooltip_bg_color() -> u32 {

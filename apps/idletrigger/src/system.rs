@@ -1,5 +1,5 @@
 //! Global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock,
-//! Win+Shift+N toggle Stay Awake — identical to the Go bindings.
+//! Win+Shift+N toggle Stay Awake.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,

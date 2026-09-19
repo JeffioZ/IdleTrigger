@@ -1,11 +1,7 @@
-//! Signatures mirror the Go nativeform painters 1:1, argument count
-//! included.
+//! GDI+ anti-aliased vector primitives and owner-drawn control painters.
+//! Text uses GDI DrawTextW; GDI+ draws rounded surfaces and vector marks.
+//! Painters accept explicit geometry, colors, and state parameters.
 #![allow(clippy::too_many_arguments)]
-//! GDI+ anti-aliased vector primitives plus the Go nativeform control
-//! painters (controls.go / gdiplus_windows.go parity). Text always renders
-//! through GDI DrawTextW; GDI+ only draws rounded surfaces, the check glyph,
-//! and compact vector marks.
-
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
@@ -36,8 +32,7 @@ pub struct ControlState {
     pub focused: bool,
     pub disabled: bool,
     pub active: bool,
-    /// Choice-popup open state (reserved for the choice-popup batch).
-    #[allow(dead_code)]
+    /// Whether the choice popup is open.
     pub open: bool,
 }
 
@@ -537,8 +532,7 @@ pub fn draw_button(
 }
 
 /// Choice (combo) closed state with the drop arrow (Go DrawChoice).
-/// Reserved for the custom choice-popup batch.
-#[allow(dead_code)]
+/// Draws a choice button and its popup-state arrow.
 pub fn draw_choice(
     hdc: HDC,
     bounds: &RECT,
@@ -709,8 +703,7 @@ fn draw_check_fallback(hdc: HDC, box_rect: &RECT, color: u32, scale: i32) {
 }
 
 /// Menu row for choice popups (Go DrawMenuOption).
-/// Reserved for the custom choice-popup batch.
-#[allow(dead_code)]
+/// Draws a selectable row in the custom choice popup.
 pub fn draw_menu_option(
     hdc: HDC,
     bounds: &RECT,
@@ -844,7 +837,6 @@ pub fn draw_text_link(
     }
 }
 
-#[allow(dead_code)]
 fn draw_arrow(hdc: HDC, x: i32, y: i32, up: bool, color: u32, scale: i32) {
     unsafe {
         let pen = CreatePen(PEN_STYLE(PS_SOLID.0), sp(1, scale).max(1), COLORREF(color));

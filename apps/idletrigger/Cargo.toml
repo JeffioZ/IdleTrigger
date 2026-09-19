@@ -9,7 +9,7 @@ publish = false
 [features]
 devtools = []
 
-# Go parity: the shipped binary is IdleTrigger-<arch>.exe at packaging time;
+# The shipped binary is IdleTrigger-<arch>.exe at packaging time;
 # the raw cargo output keeps the product name.
 [[bin]]
 name = "IdleTrigger"

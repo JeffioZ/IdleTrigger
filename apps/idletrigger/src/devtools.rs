@@ -1,8 +1,6 @@
-//! Developer-tools modes, compiled only with `--features devtools` and
-//! gated at runtime by IDLETRIGGER_DEVTOOLS=1. Mirrors the Go devtools
-//! contract: runtime overrides only, config never rewritten.
-
-#![allow(dead_code)]
+//! Developer diagnostics, compiled only with `--features devtools` and
+//! enabled at runtime by IDLETRIGGER_DEVTOOLS=1. Diagnostic overrides are
+//! runtime-only and do not rewrite the user's configuration.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -179,24 +177,6 @@ pub fn trace_idle_sample(tick: Option<u32>) {
         } else {
             "input state unavailable"
         });
-    }
-}
-
-/// Captures the panel window to a BMP beside the EXE (capture-panel mode).
-/// Call after the UI is up; safe from any thread.
-pub fn capture_panel_once() {
-    if !CAPTURE_PANEL.load(Ordering::SeqCst) {
-        return;
-    }
-    let panel = crate::hwnd(&crate::PANEL);
-    let out = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .map(|dir| dir.join("IdleTrigger-panel-capture.bmp"));
-    let Some(out) = out else { return };
-    match crate::capture_client_bmp_pub(panel, &out) {
-        Ok(()) => crate::log_line(&format!("panel captured -> {}", out.display())),
-        Err(err) => crate::log_line(&format!("panel capture failed: {err}")),
     }
 }
 

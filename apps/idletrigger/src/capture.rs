@@ -1,5 +1,5 @@
-//! Window client-area capture to BMP — ported from the old platform crate
-//! (its only remaining consumer is the devtools capture mode).
+//! Window client-area capture to BMP for developer diagnostics.
+//! Compiled only with the devtools feature.
 
 use std::io;
 use std::path::Path;

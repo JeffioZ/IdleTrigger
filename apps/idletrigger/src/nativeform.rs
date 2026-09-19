@@ -1,7 +1,6 @@
-//! Owner-draw plumbing shared by all form windows (Go nativeform
-//! interaction.go parity): subclasses standard controls only to observe
-//! hover / press / focus, and exposes WM_DRAWITEM dispatch helpers. Native
-//! controls keep their input, keyboard, and accessibility behavior.
+//! Owner-draw plumbing shared by all form windows. Subclasses standard
+//! controls to observe hover, press, and focus, and provides WM_DRAWITEM
+//! dispatch helpers. Native controls retain input and accessibility behavior.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

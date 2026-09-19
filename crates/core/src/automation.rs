@@ -1,9 +1,8 @@
 //! Automatic-task model, validation, and normalization.
 //!
-//! Faithful port of the Go `internal/automation` package: string-based
-//! enums, the same TOML field names, the same limits, and the same
-//! normalization rules, so existing `IdleTrigger.toml` rule lists and
-//! `IdleTrigger.state.json` bookkeeping load unchanged.
+//! String-based enums and stable TOML field names preserve existing
+//! `IdleTrigger.toml` rule lists. Runtime-state loading also supports
+//! earlier `IdleTrigger.state.json` occurrence formats.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

@@ -543,12 +543,6 @@ fn set_manual_override(dark: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Clears the manual override (returns control to the schedule).
-#[allow(dead_code)]
-pub fn clear_manual_override() {
-    *MANUAL_OVERRIDE.lock().unwrap() = None;
-}
-
 /// The three panel theme buttons: enable is the master toggle; switch/repair
 /// act on demand.
 pub fn toggle_enabled() {

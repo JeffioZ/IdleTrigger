@@ -1,8 +1,7 @@
 #![allow(clippy::manual_dangling_ptr)]
-//! Automation task UI: manager (rule list), editor (form), and process
-//! picker — a three-level modal chain mirroring the Go UX. All owner-drawn
-//! controls use the paint.rs system; geometry, defaults, and behavior follow
-//! the Go automationpanel/processpicker sources.
+//! Automatic-task manager, rule editor, and process picker form a
+//! three-level modal chain. Owner-drawn controls share the painting,
+//! theme, DPI, and viewport helpers used by the other native forms.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -1,4 +1,4 @@
-//! Named-pipe IPC server and the CLI client, mirroring the Go surface:
+//! Named-pipe IPC server and CLI client:
 //! tray commands (`nosleep`, `monitor`, `status`, `config:reload`) are
 //! forwarded to the running instance; direct actions (`sleep`, `lock`,
 //! `autostart`, `version`) run in-process.

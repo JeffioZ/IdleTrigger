@@ -1,7 +1,6 @@
-//! Settings window — Go settingspanel parity: four left navigation tabs,
-//! per-page content on the right, and a footer with inline validation,
-//! Save, and Cancel. Geometry mirrors the Go logical tokens (700×524
-//! client, tabs 156×36 at x=24, content x=208..676).
+//! Settings window with four left navigation tabs, per-page content on the
+//! right, and a footer with inline validation, Save, and Cancel.
+//! Layout uses logical coordinates and adapts to DPI and text scaling.
 
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 

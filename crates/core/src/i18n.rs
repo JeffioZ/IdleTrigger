@@ -1,8 +1,7 @@
 //! IdleTrigger i18n: locale loading and string lookup.
 //!
-//! Reuses the product locale files from the Go version (`en.json`,
-//! `zh-CN.json`). Missing keys fall back to the key name so a stale locale
-//! file never crashes the app; the caller passes a resolved language.
+//! Embeds `en.json` and `zh-CN.json`. Missing keys fall back to the key name;
+//! the caller passes a resolved language.
 
 use std::collections::HashMap;
 
