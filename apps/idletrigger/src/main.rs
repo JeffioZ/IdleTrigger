@@ -3486,6 +3486,9 @@ fn theme_changes_survive_native_messages() {
     }
     const CHILD: &str = "IDLETRIGGER_TEST_THEME_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        // Separate processes still share USER32's foreground window. Hold
+        // the UI test lock until the child exits, just like in-process tests.
+        let _ui_test = CONFIG_TEST_LOCK.lock().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

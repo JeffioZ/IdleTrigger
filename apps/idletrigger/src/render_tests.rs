@@ -188,6 +188,9 @@ fn assert_form_surfaces_are_buffered(window: HWND) {
 fn hidden_theme_reopen_preserves_background_and_geometry() {
     const CHILD: &str = "IDLETRIGGER_TEST_HIDDEN_THEME_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        // Process isolation protects globals, not desktop focus. Serialize
+        // the complete child lifetime with other native UI tests.
+        let _ui_test = CONFIG_TEST_LOCK.lock().unwrap();
         for language in ["en", "zh-CN"] {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
