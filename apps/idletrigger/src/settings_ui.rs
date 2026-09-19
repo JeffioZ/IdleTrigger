@@ -8,10 +8,7 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HDC, HFONT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{
-    EM_SETLIMITTEXT, TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH,
-    TTS_ALWAYSTIP, TTTOOLINFOW,
-};
+use windows::Win32::UI::Controls::EM_SETLIMITTEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
@@ -1548,97 +1545,53 @@ unsafe fn open_project_home(hwnd: HWND) {
 }
 
 unsafe fn create_tooltip(hwnd: HWND) {
-    unsafe {
-        let old = HWND(TOOLTIP_HWND.swap(0, Ordering::SeqCst) as *mut _);
-        if !old.is_invalid() {
-            let _ = DestroyWindow(old);
-        }
-        let tip = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            TOOLTIPS_CLASSW,
-            PCWSTR::null(),
-            WINDOW_STYLE(WS_POPUP.0 | TTS_ALWAYSTIP),
-            0,
-            0,
-            0,
-            0,
-            Some(hwnd),
-            None,
-            Some(GetModuleHandleW(None).unwrap_or_default().into()),
-            None,
-        )
-        .unwrap_or_default();
-        if tip.is_invalid() {
-            return;
-        }
-        TOOLTIP_HWND.store(tip.0 as isize, Ordering::SeqCst);
-        let _ = SendMessageW(
-            tip,
-            TTM_SETMAXTIPWIDTH,
-            Some(WPARAM(0)),
-            Some(LPARAM(s(380) as isize)),
-        );
-        // (control id, i18n key) pairs — Go settingsTooltipBindings().
-        let tools: &[(i32, &str)] = &[
-            (ID_KEEP_SCREEN, "tip_keep_screen"),
-            (ID_BATTERY_ALLOWED, "tip_nosleep_battery"),
-            (ID_BATTERY_LBL, "tip_nosleep_battery_threshold"),
-            (ID_BATTERY_THRESH, "tip_nosleep_battery_threshold"),
-            (ID_IDLE_TIMEOUT_LBL, "tip_idle_timeout"),
-            (ID_IDLE_TIMEOUT, "tip_idle_timeout"),
-            (ID_IDLE_ACTION_LBL, "tip_idle_action"),
-            (ID_IDLE_ACTION, "tip_idle_action"),
-            (ID_WARNING_LBL, "tip_idle_warning_seconds"),
-            (ID_WARNING_SECONDS, "tip_idle_warning_seconds"),
-            (ID_IDLE_ENHANCED, "tip_idle_enhanced"),
-            (ID_THEME_MODE_LBL, "tip_theme_mode"),
-            (ID_THEME_MODE, "tip_theme_mode"),
-            (ID_LIGHT_TIME_LBL, "tip_theme_light_time"),
-            (ID_LIGHT_TIME, "tip_theme_light_time"),
-            (ID_DARK_TIME_LBL, "tip_theme_dark_time"),
-            (ID_DARK_TIME, "tip_theme_dark_time"),
-            (ID_LOCATION_LBL, "tip_theme_location_source"),
-            (ID_LOCATION_SOURCE, "tip_theme_location_source"),
-            (ID_THEME_LOCATION_STATUS, "tip_theme_location_status"),
-            (ID_THEME_BATTERY, "tip_battery_theme"),
-            (ID_THEME_FULLSCREEN, "tip_fullscreen"),
-            (ID_LANGUAGE_LBL, "tip_language"),
-            (ID_LANGUAGE, "tip_language"),
-            (ID_LOCK_KEYS, "tip_lock_keys"),
-            (ID_LOCK_CAPS, "tip_lock_key_selection"),
-            (ID_LOCK_NUM, "tip_lock_key_selection"),
-            (ID_LOCK_SCROLL, "tip_lock_key_selection"),
-            (ID_LOCK_FULLSCREEN, "tip_notification_fullscreen"),
-            (ID_LOCK_PREVIEW, "tip_notification_preview"),
-            (ID_HOTKEYS, "tip_hotkeys"),
-            (ID_AUTOSTART, "tip_autostart"),
-            (ID_LOGGING, "tip_logging"),
-            (ID_PROJECT_HOME, "tip_project_home"),
-            (ID_CANCEL, "tip_settings_cancel"),
-            (ID_SAVE, "tip_settings_save"),
-        ];
-        for (id, key) in tools {
-            let target = get(hwnd, *id);
-            if target.is_invalid() {
-                continue;
-            }
-            let text = wide(&t_pub(key));
-            let mut tool = TTTOOLINFOW {
-                cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
-                uFlags: TTF_IDISHWND | TTF_SUBCLASS,
-                hwnd,
-                uId: target.0 as usize,
-                ..Default::default()
-            };
-            tool.lpszText = windows::core::PWSTR(text.as_ptr() as *mut _);
-            let _ = SendMessageW(
-                tip,
-                TTM_ADDTOOLW,
-                Some(WPARAM(0)),
-                Some(LPARAM(&tool as *const _ as isize)),
-            );
-        }
-    }
+    // (control id, i18n key) pairs — Go settingsTooltipBindings().
+    static TOOLS: &[(i32, &str)] = &[
+        (ID_KEEP_SCREEN, "tip_keep_screen"),
+        (ID_BATTERY_ALLOWED, "tip_nosleep_battery"),
+        (ID_BATTERY_LBL, "tip_nosleep_battery_threshold"),
+        (ID_BATTERY_THRESH, "tip_nosleep_battery_threshold"),
+        (ID_IDLE_TIMEOUT_LBL, "tip_idle_timeout"),
+        (ID_IDLE_TIMEOUT, "tip_idle_timeout"),
+        (ID_IDLE_ACTION_LBL, "tip_idle_action"),
+        (ID_IDLE_ACTION, "tip_idle_action"),
+        (ID_WARNING_LBL, "tip_idle_warning_seconds"),
+        (ID_WARNING_SECONDS, "tip_idle_warning_seconds"),
+        (ID_IDLE_ENHANCED, "tip_idle_enhanced"),
+        (ID_THEME_MODE_LBL, "tip_theme_mode"),
+        (ID_THEME_MODE, "tip_theme_mode"),
+        (ID_LIGHT_TIME_LBL, "tip_theme_light_time"),
+        (ID_LIGHT_TIME, "tip_theme_light_time"),
+        (ID_DARK_TIME_LBL, "tip_theme_dark_time"),
+        (ID_DARK_TIME, "tip_theme_dark_time"),
+        (ID_LOCATION_LBL, "tip_theme_location_source"),
+        (ID_LOCATION_SOURCE, "tip_theme_location_source"),
+        (ID_THEME_LOCATION_STATUS, "tip_theme_location_status"),
+        (ID_THEME_BATTERY, "tip_battery_theme"),
+        (ID_THEME_FULLSCREEN, "tip_fullscreen"),
+        (ID_LANGUAGE_LBL, "tip_language"),
+        (ID_LANGUAGE, "tip_language"),
+        (ID_LOCK_KEYS, "tip_lock_keys"),
+        (ID_LOCK_CAPS, "tip_lock_key_selection"),
+        (ID_LOCK_NUM, "tip_lock_key_selection"),
+        (ID_LOCK_SCROLL, "tip_lock_key_selection"),
+        (ID_LOCK_FULLSCREEN, "tip_notification_fullscreen"),
+        (ID_LOCK_PREVIEW, "tip_notification_preview"),
+        (ID_HOTKEYS, "tip_hotkeys"),
+        (ID_AUTOSTART, "tip_autostart"),
+        (ID_LOGGING, "tip_logging"),
+        (ID_PROJECT_HOME, "tip_project_home"),
+        (ID_CANCEL, "tip_settings_cancel"),
+        (ID_SAVE, "tip_settings_save"),
+    ];
+    let bindings: Vec<(usize, &str)> = TOOLS.iter().map(|(id, key)| (*id as usize, *key)).collect();
+    crate::nativeform::form_tooltips(hwnd, &bindings);
+    // Keep the module handle in sync for retheme_tooltip; form_tooltips
+    // stores the tooltip as a window property.
+    TOOLTIP_HWND.store(
+        unsafe { GetPropW(hwnd, windows::core::w!("IdleTriggerFormTooltip")) }.0 as isize,
+        Ordering::SeqCst,
+    );
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
