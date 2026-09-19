@@ -12,10 +12,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowRect, HMENU, KillTimer, LoadCursorW, LoadIconW,
-    MoveWindow, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SetTimer, SetWindowTextW, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
-    WS_VISIBLE,
+    MoveWindow, RegisterClassW, SW_HIDE, SetTimer, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -1051,10 +1050,33 @@ pub fn show(vk: i32, on: bool) {
             state.shown = Some(std::time::Instant::now());
         }
         animate_notice(hwnd);
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if reveal_notice(hwnd).is_err() {
+            hide_notice();
+            return;
+        }
         if SetTimer(Some(hwnd), LN_TIMER, 15, None) == 0 {
             hide_notice();
         }
+    }
+}
+
+fn reveal_notice(hwnd: HWND) -> windows::core::Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
+    };
+    unsafe {
+        // Reassert the notification's Z-order on every reveal, including
+        // repeated key changes while the card is already visible. The window
+        // never takes activation, and animation ticks do not reorder windows.
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
     }
 }
 
@@ -1144,6 +1166,85 @@ pub fn poll_state(vk: i32) -> i16 {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    #[test]
+    fn lock_notice_restores_topmost_without_activating() {
+        let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
+        unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            // Only manipulate windows created by this test. The ordinary
+            // window models an ordinary overlapping application; it does
+            // not simulate the Windows Snap shell or Edge's compositor.
+            let ordinary = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                windows::core::w!("STATIC"),
+                windows::core::w!("IdleTrigger Z-order test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                600,
+                600,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            lock_create();
+            let card = HWND(LN_WINDOW.load(Ordering::SeqCst) as *mut _);
+            SetWindowPos(
+                card,
+                None,
+                520,
+                420,
+                160,
+                108,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .unwrap();
+            let foreground = GetForegroundWindow();
+            let active = GetActiveWindow();
+            for hidden in [true, false, true] {
+                if hidden {
+                    let _ = ShowWindow(card, SW_HIDE);
+                }
+                // Model a stale/lost topmost state between notifications.
+                SetWindowPos(
+                    card,
+                    Some(HWND_NOTOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+                .unwrap();
+                let _ = ShowWindow(ordinary, SW_SHOWNOACTIVATE);
+                let mut bounds_before = windows::Win32::Foundation::RECT::default();
+                GetWindowRect(card, &mut bounds_before).unwrap();
+                reveal_notice(card).unwrap();
+                let mut bounds_after = windows::Win32::Foundation::RECT::default();
+                GetWindowRect(card, &mut bounds_after).unwrap();
+                assert_eq!(bounds_after, bounds_before, "reveal changed card geometry");
+                assert!(IsWindowVisible(card).as_bool());
+                assert_ne!(
+                    GetWindowLongW(card, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0,
+                    0
+                );
+                assert_eq!(GetForegroundWindow(), foreground, "notice stole foreground");
+                assert_eq!(GetActiveWindow(), active, "notice activated its UI thread");
+                let mut above = GetWindow(card, GW_HWNDPREV).unwrap_or_default();
+                while !above.is_invalid() {
+                    assert_ne!(above, ordinary, "ordinary window covers the notice");
+                    above = GetWindow(above, GW_HWNDPREV).unwrap_or_default();
+                }
+            }
+            DestroyWindow(card).unwrap();
+            DestroyWindow(ordinary).unwrap();
+            LN_WINDOW.store(0, Ordering::SeqCst);
+            crate::LOCK_NOTIFY_HWND.store(0, Ordering::SeqCst);
+        }
+    }
     #[test]
     fn long_warning_keeps_buttons_below_the_complete_body() {
         let _guard = crate::CONFIG_TEST_LOCK.lock().unwrap();
