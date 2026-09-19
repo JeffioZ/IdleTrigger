@@ -221,12 +221,14 @@ pub fn refresh_from_registry() -> bool {
     (dark != DARK.swap(dark, Ordering::SeqCst)) | contrast
 }
 
-pub fn read_light_preference(name: &str) -> Option<bool> {
-    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let value: Vec<u16> = name.encode_utf16().chain([0]).collect();
+/// HKCU subkey holding the system light/dark preferences.
+pub(crate) const PERSONALIZE_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+
+/// Reads a REG_DWORD under HKCU; only a well-formed 4-byte DWORD counts.
+pub(crate) fn read_registry_dword(subkey: &str, value: &str) -> Option<u32> {
+    let subkey = crate::wide(subkey);
+    let value = crate::wide(value);
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(
@@ -251,12 +253,13 @@ pub fn read_light_preference(name: &str) -> Option<bool> {
             Some(&mut size),
         ) == ERROR_SUCCESS;
         let _ = RegCloseKey(hkey);
-        if ok && size == 4 && kind == windows::Win32::System::Registry::REG_DWORD {
-            Some(u32::from_le_bytes(data) != 0)
-        } else {
-            None
-        }
+        (ok && size == 4 && kind == windows::Win32::System::Registry::REG_DWORD)
+            .then(|| u32::from_le_bytes(data))
     }
+}
+
+pub fn read_light_preference(name: &str) -> Option<bool> {
+    read_registry_dword(PERSONALIZE_KEY, name).map(|value| value != 0)
 }
 
 pub fn tooltip_bg_color() -> u32 {

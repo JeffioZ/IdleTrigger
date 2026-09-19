@@ -54,10 +54,10 @@ pub fn wake() {
 /// Manual mode and its absolute local-time expiration minute.
 static MANUAL_OVERRIDE: Mutex<Option<(bool, i64)>> = Mutex::new(None);
 
-const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const BREED: &str = "SystemUsesLightTheme";
 const APP_BREED: &str = "AppsUseLightTheme";
 
+use crate::theme::PERSONALIZE_KEY;
 use crate::wide;
 use idletrigger_core::automation::parse_hhmm;
 

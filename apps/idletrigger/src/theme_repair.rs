@@ -15,24 +15,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+use crate::theme::{PERSONALIZE_KEY, read_registry_dword};
 use crate::wide;
 
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {
     let session = crate::theme_com::Session::new()?;
     let snapshot = current_theme_snapshot()?;
-    let apps_light = read_registry_dword(
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-        "AppsUseLightTheme",
-    )
-    .map(|v| v != 0)
-    .unwrap_or_else(|| theme_mode(&snapshot, "AppMode"));
-    let system_light = read_registry_dword(
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-        "SystemUsesLightTheme",
-    )
-    .map(|v| v != 0)
-    .unwrap_or_else(|| theme_mode(&snapshot, "SystemMode"));
+    let apps_light = read_registry_dword(PERSONALIZE_KEY, "AppsUseLightTheme")
+        .map(|v| v != 0)
+        .unwrap_or_else(|| theme_mode(&snapshot, "AppMode"));
+    let system_light = read_registry_dword(PERSONALIZE_KEY, "SystemUsesLightTheme")
+        .map(|v| v != 0)
+        .unwrap_or_else(|| theme_mode(&snapshot, "SystemMode"));
     let accent = current_accent_color()
         .ok_or_else(|| io::Error::other("Windows accent color is unavailable"))?;
     let original_dwm =
@@ -64,11 +59,7 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
     ] {
         if let Err(error) = write_personalize(key, light) {
             errors.push(error.to_string());
-        } else if read_registry_dword(
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-            key,
-        ) != Some(light as u32)
-        {
+        } else if read_registry_dword(PERSONALIZE_KEY, key) != Some(light as u32) {
             errors.push(format!("Windows did not retain {key}"));
         }
     }
@@ -212,40 +203,6 @@ fn current_accent_color() -> Option<u32> {
         return Some(0xFF00_0000 | (v & 0x00FF_FFFF));
     }
     None
-}
-
-fn read_registry_dword(subkey: &str, value: &str) -> Option<u32> {
-    let key = wide(subkey);
-    let val = wide(value);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        ) != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let mut data = [0u8; 4];
-        let mut size = 4u32;
-        let ok = RegQueryValueExW(
-            hkey,
-            PCWSTR(val.as_ptr()),
-            None,
-            None,
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        ) == ERROR_SUCCESS;
-        let _ = RegCloseKey(hkey);
-        if ok && size >= 4 {
-            Some(u32::from_le_bytes(data))
-        } else {
-            None
-        }
-    }
 }
 
 fn read_registry_binary(subkey: &str, value: &str) -> Option<Vec<u8>> {
@@ -399,7 +356,7 @@ fn write_dwm_colorization(value: u32) -> io::Result<()> {
 }
 
 fn write_personalize(value_name: &str, light: bool) -> io::Result<()> {
-    let key = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let key = wide(PERSONALIZE_KEY);
     let val = wide(value_name);
     unsafe {
         let mut hkey = HKEY::default();
