@@ -63,11 +63,16 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
             errors.push(format!("Windows did not retain {key}"));
         }
     }
-    if errors.is_empty() {
+    let result = if errors.is_empty() {
         Ok(())
     } else {
         Err(io::Error::other(errors.join("; ")))
-    }
+    };
+    // The helper theme was only the vehicle for the COM apply/restore round
+    // trip; remove it so it does not linger in the personalization list.
+    // Best effort: a locked file is overwritten by the next repair anyway.
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 fn theme_mode(source: &str, key: &str) -> bool {

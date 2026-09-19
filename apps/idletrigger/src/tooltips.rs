@@ -10,8 +10,7 @@ use windows::Win32::UI::Controls::{
     TTM_SETTIPBKCOLOR, TTM_SETTIPTEXTCOLOR, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetDlgItem, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SendMessageW, SetWindowPos, WINDOW_STYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    CreateWindowExW, GetDlgItem, SendMessageW, WINDOW_STYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
 use windows::core::PCWSTR;
@@ -62,16 +61,8 @@ pub fn create_for_panel(panel: HWND) {
             Some(WPARAM(crate::panel_font_body().0 as usize)),
             Some(LPARAM(0)),
         );
-        // Keep the tip above other windows so it isn't hidden by the panel.
-        let _ = SetWindowPos(
-            tip,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-        );
+        // The WS_EX_TOPMOST style from creation keeps the tip above other
+        // windows; nothing further to do here.
 
         // (control id, i18n key) pairs — Go tooltips.go mapping.
         let tools = [
@@ -143,6 +134,23 @@ pub fn retheme() {
     }
 }
 
+/// A tool's caption source: either a plain i18n key or an already-rendered
+/// string (stateful tooltips compose their text at call time). Replaces the
+/// old `starts_with("tip_")` guesswork.
+enum TipText {
+    Key(&'static str),
+    Text(String),
+}
+
+impl TipText {
+    fn render(self) -> String {
+        match self {
+            TipText::Key(key) => crate::t_pub(key),
+            TipText::Text(text) => text,
+        }
+    }
+}
+
 /// Updates every tool's text (language change / runtime state change).
 /// Called every second from `refresh_status`, so the final rendered text of
 /// each tool is cached and `TTM_UPDATETIPTEXTW` is only sent on change —
@@ -155,46 +163,63 @@ pub fn refresh_all(panel: HWND) {
         if tip.is_invalid() {
             return;
         }
-        let tools: [(usize, String); 10] = [
-            (crate::IDC_NOSLEEP, state_power_tip(true)),
-            (crate::IDC_IDLE, state_power_tip(false)),
+        // The wrap width was fixed at creation; keep it in step with the
+        // current DPI instead of wrapping at the startup resolution forever.
+        static LAST_WIDTH: AtomicIsize = AtomicIsize::new(-1);
+        let width = crate::scale_pub(360) as isize;
+        if LAST_WIDTH.swap(width, Ordering::SeqCst) != width {
+            let _ = SendMessageW(
+                tip,
+                TTM_SETMAXTIPWIDTH,
+                Some(WPARAM(0)),
+                Some(LPARAM(width)),
+            );
+        }
+        let tools: [(usize, TipText); 10] = [
+            (crate::IDC_NOSLEEP, TipText::Text(state_power_tip(true))),
+            (crate::IDC_IDLE, TipText::Text(state_power_tip(false))),
             (
                 crate::IDC_AUTOMATION,
-                toggle_state_tip(crate::IDC_AUTOMATION, "tip_automation_master"),
+                TipText::Text(toggle_state_tip(
+                    crate::IDC_AUTOMATION,
+                    "tip_automation_master",
+                )),
             ),
-            (crate::IDC_SYSTEM_BUTTON, crate::t_pub("tip_quick_actions")),
-            (crate::IDC_SETTINGS_BUTTON, crate::t_pub("tip_settings")),
+            (crate::IDC_SYSTEM_BUTTON, TipText::Key("tip_quick_actions")),
+            (crate::IDC_SETTINGS_BUTTON, TipText::Key("tip_settings")),
             (
                 crate::IDC_THEME_ENABLE,
-                toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme"),
+                TipText::Text(toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")),
             ),
             (
                 crate::IDC_THEME_SWITCH,
-                toggle_state_tip(crate::IDC_THEME_SWITCH, "tip_theme_switch"),
+                TipText::Text(toggle_state_tip(
+                    crate::IDC_THEME_SWITCH,
+                    "tip_theme_switch",
+                )),
             ),
             (
                 crate::IDC_THEME_REPAIR,
-                toggle_state_tip(crate::IDC_THEME_REPAIR, "tip_theme_repair"),
+                TipText::Text(toggle_state_tip(
+                    crate::IDC_THEME_REPAIR,
+                    "tip_theme_repair",
+                )),
             ),
             (
                 crate::IDC_MANAGE_BUTTON,
-                toggle_state_tip(crate::IDC_MANAGE_BUTTON, "tip_automation"),
+                TipText::Text(toggle_state_tip(crate::IDC_MANAGE_BUTTON, "tip_automation")),
             ),
-            (crate::IDC_EXIT_BUTTON, crate::t_pub("tip_exit")),
+            (crate::IDC_EXIT_BUTTON, TipText::Key("tip_exit")),
         ];
         static LAST: std::sync::Mutex<[Option<String>; 10]> =
             std::sync::Mutex::new([const { None }; 10]);
         let mut last = crate::runtime::lock(&LAST);
-        for (slot, (id, key_or_text)) in tools.iter().enumerate() {
-            let text = if key_or_text.starts_with("tip_") || key_or_text.starts_with("automation") {
-                crate::t_pub(key_or_text)
-            } else {
-                key_or_text.to_string()
-            };
+        for (slot, (id, source)) in tools.into_iter().enumerate() {
+            let text = source.render();
             if last[slot].as_deref() == Some(text.as_str()) {
                 continue;
             }
-            let target = get_panel_child(panel, *id);
+            let target = get_panel_child(panel, id);
             if target.is_invalid() {
                 // Cache only after a successful send: a skipped slot must
                 // stay pending so a later refresh populates it.

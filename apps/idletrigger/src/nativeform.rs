@@ -61,6 +61,9 @@ static CONTROLS: Mutex<Option<HashMap<isize, Tracked>>> = Mutex::new(None);
 // Keyboard-focus visibility (Go tracker focusVisible): the owner-drawn focus
 // ring renders only when focus arrived via the keyboard, so clicking a
 // control never shows the frame.
+// Deliberately process-global: keyboard focus rings turn on from any key
+// press and turn off from any mouse activity across all tracked windows —
+// "there was recent mouse input" is a session-wide fact, not per-window.
 static FOCUS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn keyboard_navigation() {

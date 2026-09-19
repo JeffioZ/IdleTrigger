@@ -88,13 +88,24 @@ pub(crate) fn log_line(msg: &str) {
         }
     }
     if let Some(file) = guard.as_mut() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(file, "[{now}] [{}] {msg}", crate::APP_VERSION);
+        let _ = writeln!(
+            file,
+            "[{}] [{}] {msg}",
+            local_timestamp(),
+            crate::APP_VERSION
+        );
         let _ = file.flush();
     }
+}
+
+/// Wall-clock local time for log lines; far easier to correlate with user
+/// reports than raw Unix seconds.
+fn local_timestamp() -> String {
+    let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
+    )
 }
 
 pub(crate) fn init_log(exe_dir: &std::path::Path) {

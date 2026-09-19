@@ -233,6 +233,21 @@ pub fn spawn(config_dir: PathBuf) {
     let (state, err) = auto::load_runtime_state(&state_path);
     if let Some(err) = err {
         crate::log_line(&format!("automation state: {err}"));
+        // Preserve the corrupt file for inspection instead of silently
+        // resetting every occurrence checkpoint.
+        let backup = state_path.with_extension(format!(
+            "json.corrupt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        if std::fs::rename(&state_path, &backup).is_ok() {
+            crate::log_line(&format!(
+                "automation state file preserved as {}",
+                backup.display()
+            ));
+        }
     }
     *crate::runtime::lock(&RUNTIME_STATE) = state;
     *crate::runtime::lock(&STATE_PATH) = Some(state_path);
@@ -434,6 +449,13 @@ fn dispatch_event(rule: &auto::Rule, occurrence: Option<String>, notify: impl Fn
             "automation event {} skipped (countdown busy)",
             rule.id
         ));
+        // Surface the skip through the save-error dialog channel: dropping
+        // a scheduled action silently is hard to diagnose from the tray.
+        crate::runtime::lock(&SAVE_ERRORS).insert(
+            format!("{}-busy", rule.id),
+            crate::t_args("automation_event_skipped_busy", &[&rule.name]),
+        );
+        request_refresh();
         return;
     }
     let seconds = rule.warning_seconds.max(auto::MIN_WARNING_SECONDS);

@@ -1,4 +1,13 @@
 //! Windows theme-manager interfaces used by the Windows 11 repair coordinator.
+//!
+//! `IThemeManager41` is undocumented: the vtable slots below (init@3,
+//! current@11, select@12, custom@13, update_custom@26; legacy apply@4) come
+//! from community reverse engineering and have been verified against the
+//! builds this repair path runs on (Windows 11 22621+, gated by
+//! `full_dwm_refresh_available`). A future Windows build that reshuffles
+//! these slots would surface as a failed HRESULT here — collected into the
+//! repair error report — not as silent corruption; revisit the ordinals if
+//! that error pattern appears.
 use std::ffi::c_void;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,

@@ -1176,7 +1176,7 @@ fn apply_dependent_states(hwnd: HWND) {
             for id in page_ids(p) {
                 show(*id, p == page);
                 // Edit surfaces hide/show together with their inner edit.
-                if *id >= ID_BATTERY_THRESH && *id <= ID_DARK_TIME {
+                if field_surface_of(*id).is_some() {
                     show(FIELD_SURFACE_BASE + *id, p == page);
                 }
             }
@@ -1310,11 +1310,17 @@ fn validate_draft(draft: &Draft) -> Option<(i32, i32, &'static str)> {
         Some(v) if (idletrigger_core::automation::MIN_WARNING_SECONDS..=3600).contains(&v) => {}
         _ => return Some((0, ID_WARNING_SECONDS, "settings_error_warning_seconds")),
     }
-    if !valid_time(&draft.light_time) {
-        return Some((1, ID_LIGHT_TIME, "settings_error_light_time"));
-    }
-    if !valid_time(&draft.dark_time) {
-        return Some((1, ID_DARK_TIME, "settings_error_dark_time"));
+    // The fixed-schedule times are hidden and unused in sunrise mode;
+    // validating them would report against invisible fields. Leftover junk
+    // values only persist until the user switches back to fixed mode (which
+    // validates again) or the next full config load (which sanitizes).
+    if draft.theme_mode_idx != 1 {
+        if !valid_time(&draft.light_time) {
+            return Some((1, ID_LIGHT_TIME, "settings_error_light_time"));
+        }
+        if !valid_time(&draft.dark_time) {
+            return Some((1, ID_DARK_TIME, "settings_error_dark_time"));
+        }
     }
     None
 }
@@ -1333,7 +1339,7 @@ fn valid_time(value: &str) -> bool {
 }
 
 /// Whether the open draft differs from the live config (Go cancel() check).
-fn draft_differs(hwnd: HWND, draft: &Draft) -> bool {
+fn draft_differs(draft: &Draft) -> bool {
     let base = crate::runtime::lock(&DRAFT_BASE)
         .clone()
         .unwrap_or_else(|| crate::cfg_map(Clone::clone));
@@ -1408,7 +1414,6 @@ fn draft_differs(hwnd: HWND, draft: &Draft) -> bool {
         || draft.hotkeys != cfg_hotkeys
         || draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst)
         || draft.logging != cfg_logging
-        || control_text(hwnd, ID_BATTERY_THRESH).trim() != cfg_thresh.to_string()
 }
 
 fn save() {
@@ -1517,7 +1522,7 @@ fn save() {
 fn close_request() {
     unsafe {
         let hwnd = current();
-        if draft_differs(hwnd, &collect_draft(hwnd)) {
+        if draft_differs(&collect_draft(hwnd)) {
             // Go settingspanel confirm: Yes/No + warning + default No.
             let choice = MessageBoxW(
                 Some(hwnd),

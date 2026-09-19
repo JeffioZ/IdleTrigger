@@ -30,6 +30,13 @@ static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
 /// Window/configuration work belongs to the UI thread. A timed-out queued
 /// request is discarded before it can mutate anything.
 fn dispatch(request: String) -> String {
+    let hidden = crate::hwnd(&crate::HIDDEN);
+    if hidden.is_invalid() {
+        // Posting to a null HWND lands in this thread's queue, where the
+        // IPC server never pumps it; answer immediately instead of timing
+        // out (mirrors automation::fire_event).
+        return "err: UI is unavailable".into();
+    }
     let (sender, receiver) = mpsc::sync_channel(1);
     crate::runtime::lock(&REQUESTS).push(Request {
         text: request,
@@ -38,7 +45,7 @@ fn dispatch(request: String) -> String {
     });
     let posted = unsafe {
         windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(crate::hwnd(&crate::HIDDEN)),
+            Some(hidden),
             crate::WM_IPC_REQUEST,
             windows::Win32::Foundation::WPARAM(0),
             windows::Win32::Foundation::LPARAM(0),
@@ -121,7 +128,9 @@ fn handle_request(request: &str) -> String {
                 if request == "nosleep:on" {
                     c.keep_screen_on = false;
                 }
-                if request.ends_with(":screen") {
+                // Only an enabled request carries the screen flag; turning
+                // Stay Awake off must not leave keep_screen_on latched.
+                if request.ends_with(":screen") && target {
                     c.keep_screen_on = true;
                 }
                 if target {

@@ -376,9 +376,15 @@ fn is_chinese() -> bool {
     crate::i18n_is_chinese()
 }
 
-fn center_on_parent(w: i32, h: i32) -> (i32, i32) {
+/// Centers on the window the new dialog is modal to (Go centers on the
+/// actual owner, not the panel behind it).
+fn center_on_parent(owner: HWND, w: i32, h: i32) -> (i32, i32) {
     unsafe {
-        let parent = crate::hwnd(&crate::PANEL);
+        let parent = if owner.is_invalid() {
+            crate::hwnd(&crate::PANEL)
+        } else {
+            owner
+        };
         let mut wr = RECT::default();
         if GetWindowRect(parent, &mut wr).is_ok() {
             let pw = wr.right - wr.left;
@@ -612,7 +618,11 @@ pub fn ensure_created() {
             bottom: s(MGR_H),
         };
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(frame.right - frame.left, frame.bottom - frame.top);
+        let (x, y) = center_on_parent(
+            crate::hwnd(&crate::PANEL),
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+        );
 
         let mgr = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -1176,7 +1186,7 @@ unsafe extern "system" fn mgr_proc(
                     let code = wparam.0 & 0xFFFF;
                     let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
                     match code {
-                        MGR_NEW => {
+                        MGR_NEW if hi == BN_CLICKED => {
                             begin_edit(-1, Vec::new());
                             crate::log_line("automation: new rule editor");
                             show_editor();
@@ -1512,10 +1522,16 @@ fn hide_editor() {
         let _ = ShowWindow(ed, SW_HIDE);
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(mgr, true);
         refresh_list();
-        // Go focuses the manager list after save/cancel (keyboard stays live).
+        // Go focuses the manager list after save/cancel (keyboard stays
+        // live). An empty rule list hides the listbox; focus New instead of
+        // silently dropping the focus onto a hidden window.
         let list = HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        if !list.is_invalid() {
+        if !list.is_invalid() && IsWindowVisible(list).as_bool() {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(list));
+        } else {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(get_dlg_item(
+                mgr, MGR_NEW,
+            )));
         }
     }
 }
@@ -1536,7 +1552,11 @@ fn create_editor() {
             bottom: s(ED_EDGE * 2 + 600),
         };
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(frame.right - frame.left, frame.bottom - frame.top);
+        let (x, y) = center_on_parent(
+            HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+        );
 
         let ed = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -3184,7 +3204,11 @@ fn create_picker(owner: HWND) {
             bottom: s(PK_H),
         };
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(frame.right - frame.left, frame.bottom - frame.top);
+        let (x, y) = center_on_parent(
+            HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+        );
 
         let pk = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -5076,6 +5100,24 @@ pub fn refresh_language() {
         crate::nativeform::cue_banner(get_dlg_item(pk, PK_SEARCH), "process_picker_search_hint");
         for &(id, key) in PICKER_TEXTS {
             set_text(get_dlg_item(pk, id), &t_pub(key));
+        }
+        // Re-derive the empty-overlay caption for the new language; its
+        // text normally only refreshes from apply_filter.
+        let filter = window_text(get_dlg_item(pk, PK_SEARCH));
+        let overlay_text = if PK_LOADING.load(Ordering::SeqCst) {
+            t_pub("process_picker_loading")
+        } else if !filter.trim().is_empty() {
+            t_pub("process_picker_no_results")
+        } else {
+            t_pub("process_picker_empty")
+        };
+        set_text(get_dlg_item(pk, PK_EMPTY), &overlay_text);
+        let overlay = get_dlg_item(pk, PK_EMPTY);
+        let list_empty = crate::runtime::lock(&PK_VISIBLE).is_empty();
+        if !overlay.is_invalid() {
+            unsafe {
+                let _ = ShowWindow(overlay, if list_empty { SW_SHOW } else { SW_HIDE });
+            }
         }
         update_header_captions(pk);
         dpi_changed(pk);

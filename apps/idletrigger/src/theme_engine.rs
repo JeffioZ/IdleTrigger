@@ -458,7 +458,15 @@ fn tick() {
     }
     drop(operation);
     notify_theme();
-    std::thread::sleep(Duration::from_millis(1200));
+    // Let the theme-change broadcast settle before recovery finishes, but
+    // stay interruptible: a queued manual switch must not wait out the full
+    // window. The wake flag itself is consumed by the loop's own wait.
+    {
+        let pending = crate::runtime::lock(&WAKE.0);
+        let _ = WAKE
+            .1
+            .wait_timeout_while(pending, Duration::from_millis(1200), |pending| !*pending);
+    }
     let operation = crate::runtime::lock(&THEME_OPERATION);
     if prepared.current() && crate::cfg_map(|c| c.theme_switch_enabled) {
         crate::theme_recovery::finish(prepared, !matches_target);

@@ -56,6 +56,9 @@ const APP_VERSION: &str = match option_env!("IDLETRIGGER_VERSION") {
 // Control identifiers.
 const IDC_NOSLEEP: usize = 110;
 const IDC_IDLE: usize = 112;
+// 211-213 deliberately land inside the subtitle static range below so the
+// panel's summary rows draw through the subtitle painter; adding ordinary
+// controls at 214-219 would silently render them as subtitles too.
 const IDC_POWER_SUMMARY: usize = 211;
 const IDC_AUTOMATION_SUMMARY: usize = 212;
 const IDC_THEME_SCHEDULE: usize = 213;
@@ -441,6 +444,14 @@ fn main() {
             err
         );
         warn_dialog("", &body);
+    } else if let Some(fields) = &loaded.field_errors {
+        // Field-level type mistakes keep the document parseable; one save
+        // rewrites the offenders, so this must not lock committing.
+        log_line(&format!("config fields reset to defaults: {fields}"));
+        warn_dialog(
+            "",
+            &t_pub("warning_config_fields").replacen("%s", fields, 1),
+        );
     }
 
     if startup_delay > 0 {
@@ -2235,33 +2246,7 @@ fn theme_tooltip_value_short() -> String {
 /// Short theme schedule for the tooltip (Go formatThemeSchedule short=true):
 /// 浅7:00/深19:00, 日出6:33/日落18:34, with the fixed-fallback suffix.
 fn theme_schedule_text_short() -> String {
-    let (mode, light, dark, _ip_enabled) = cfg_map(|c| {
-        (
-            c.theme_mode.clone(),
-            c.theme_light_time.clone(),
-            c.theme_dark_time.clone(),
-            c.theme_ip_location_enabled,
-        )
-    });
-    let hhmm = |v: &str| -> String {
-        if v.len() == 5 {
-            v[..5].to_string()
-        } else {
-            "--:--".to_string()
-        }
-    };
-    if mode == "sunrise" {
-        match theme_engine::solar_window(_ip_enabled) {
-            Some((rise, set)) => t("theme_schedule_sunrise_short_format")
-                .replacen("%s", &format!("{:02}:{:02}", rise / 60, rise % 60), 1)
-                .replacen("%s", &format!("{:02}:{:02}", set / 60, set % 60), 1),
-            None => t("theme_schedule_unavailable"),
-        }
-    } else {
-        t("theme_schedule_short_format")
-            .replacen("%s", &hhmm(&light), 1)
-            .replacen("%s", &hhmm(&dark), 1)
-    }
+    theme_schedule_summary(true)
 }
 
 /// Updates the tray tooltip with a status line capped like Go's 120 UTF-16
@@ -2803,14 +2788,13 @@ fn refresh_status() {
     );
     set_text(&LBL_POWER_SUMMARY, &overview);
 
-    let (automation_on, rule_count) = (
-        cfg_map(|c| c.automation_enabled),
-        crate::runtime::lock(&automation::RULES).len(),
-    );
-    let enabled_count = crate::runtime::lock(&automation::RULES)
-        .iter()
-        .filter(|r| r.enabled)
-        .count();
+    let automation_on = cfg_map(|c| c.automation_enabled);
+    // One lock for both counts: two separate samples could pair a total
+    // from before a rule save with an enabled count from after it.
+    let (rule_count, enabled_count) = {
+        let rules = crate::runtime::lock(&automation::RULES);
+        (rules.len(), rules.iter().filter(|r| r.enabled).count())
+    };
     // Go automationOverviewText four states.
     let automation = if rule_count == 0 {
         t("automation_overview_empty")
@@ -2853,7 +2837,14 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 /// showSource = true). Fixed mode lists both times; sunrise mode lists the
 /// solved solar times plus the location source.
 fn theme_schedule_text() -> String {
-    let (mode, light, dark, _ip_enabled) = cfg_map(|c| {
+    theme_schedule_summary(false)
+}
+
+/// Go formatThemeSchedule for both consumers: the panel schedule row (long,
+/// with source attribution and fixed-time fallback) and the compact tray
+/// tooltip line.
+fn theme_schedule_summary(short: bool) -> String {
+    let (mode, light, dark, ip_enabled) = cfg_map(|c| {
         (
             c.theme_mode.clone(),
             c.theme_light_time.clone(),
@@ -2868,25 +2859,44 @@ fn theme_schedule_text() -> String {
             "--:--".to_string()
         }
     };
-    if mode == "sunrise"
-        && let Some((rise, set)) = theme_engine::solar_window(_ip_enabled)
-    {
-        let schedule = t("theme_schedule_sunrise_format")
-            .replacen("%s", &format!("{:02}:{:02}", rise / 60, rise % 60), 1)
-            .replacen("%s", &format!("{:02}:{:02}", set / 60, set % 60), 1);
-        let source = t(theme_engine::location(_ip_enabled).2);
-        t("theme_schedule_source_format")
-            .replacen("%s", &schedule, 1)
-            .replacen("%s", &source, 1)
-    } else {
-        let fixed = t("theme_schedule_format")
-            .replacen("%s", &hhmm(&light), 1)
-            .replacen("%s", &hhmm(&dark), 1);
-        if mode == "sunrise" {
-            t_args("theme_schedule_fallback_format", &[&fixed])
-        } else {
-            fixed
+    if mode == "sunrise" {
+        match theme_engine::solar_window(ip_enabled) {
+            Some((rise, set)) => {
+                let times = [
+                    format!("{:02}:{:02}", rise / 60, rise % 60),
+                    format!("{:02}:{:02}", set / 60, set % 60),
+                ];
+                if short {
+                    t("theme_schedule_sunrise_short_format")
+                        .replacen("%s", &times[0], 1)
+                        .replacen("%s", &times[1], 1)
+                } else {
+                    let schedule = t("theme_schedule_sunrise_format")
+                        .replacen("%s", &times[0], 1)
+                        .replacen("%s", &times[1], 1);
+                    let source = t(theme_engine::location(ip_enabled).2);
+                    t("theme_schedule_source_format")
+                        .replacen("%s", &schedule, 1)
+                        .replacen("%s", &source, 1)
+                }
+            }
+            None if short => t("theme_schedule_unavailable"),
+            None => {
+                let fixed = t("theme_schedule_format")
+                    .replacen("%s", &hhmm(&light), 1)
+                    .replacen("%s", &hhmm(&dark), 1);
+                t_args("theme_schedule_fallback_format", &[&fixed])
+            }
         }
+    } else {
+        let key = if short {
+            "theme_schedule_short_format"
+        } else {
+            "theme_schedule_format"
+        };
+        t(key)
+            .replacen("%s", &hhmm(&light), 1)
+            .replacen("%s", &hhmm(&dark), 1)
     }
 }
 
@@ -3186,7 +3196,14 @@ fn try_system_action(action: &str) -> Result<(), String> {
                 if SetSuspendState(action == "hibernate", false, false) {
                     Ok(())
                 } else {
-                    Err(windows::core::Error::from_thread().to_string())
+                    let error = windows::core::Error::from_thread();
+                    // A FALSE return without a last-error code would render
+                    // as "operation completed successfully".
+                    Err(if error.code().0 == 0 {
+                        "suspend request was rejected".to_string()
+                    } else {
+                        error.to_string()
+                    })
                 }
             }
             _ => {

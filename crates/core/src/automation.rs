@@ -361,10 +361,11 @@ fn path_is_abs_drive(path: &str) -> bool {
 /// The single normalization and validation entry point. Invalid rules stay
 /// present and receive one deterministic diagnostic each.
 pub fn prepare_rules(rules: &[Rule]) -> (Vec<Rule>, Vec<RuleIssue>) {
-    let normalized = normalize_rules(rules.to_vec());
+    let mut normalized = normalize_rules(rules.to_vec());
     let mut issues = Vec::new();
 
     let mut seen = std::collections::BTreeSet::new();
+    let mut overflow_noted = false;
     for (index, raw) in rules.iter().enumerate() {
         let rule_id_at = |i: usize| normalized.get(i).map(|r| r.id.clone()).unwrap_or_default();
         let mut add_issue = |message: String| {
@@ -375,9 +376,19 @@ pub fn prepare_rules(rules: &[Rule]) -> (Vec<Rule>, Vec<RuleIssue>) {
             });
         };
         if index >= MAX_RULES {
-            add_issue(format!(
-                "automation_rules may contain at most {MAX_RULES} rules"
-            ));
+            // One summary issue instead of one per overflowing entry...
+            if !overflow_noted {
+                overflow_noted = true;
+                add_issue(format!(
+                    "automation_rules may contain at most {MAX_RULES} rules; later entries were ignored"
+                ));
+            }
+            // ...but the disable must still reach every overflow rule:
+            // runtime_rules disables by issue index, and the summary issue
+            // only carries the first one.
+            if let Some(rule) = normalized.get_mut(index) {
+                rule.enabled = false;
+            }
             continue;
         }
         let id = raw.id.trim();
@@ -652,9 +663,15 @@ pub fn save_runtime_state(path: &Path, state: &RuntimeState) -> std::io::Result<
         ".IdleTrigger-state-{}.json.tmp",
         std::process::id()
     ));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let result = (|| {
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        // Same cleanup discipline as config::save_candidate.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -808,6 +825,29 @@ mod tests {
         let (normalized, issues) = prepare_rules(&[r]);
         assert!(issues.is_empty());
         assert_eq!(normalized[0].days.len(), 7);
+    }
+
+    #[test]
+    fn overflow_rules_are_disabled_with_one_summary_issue() {
+        let rules: Vec<Rule> = (0..MAX_RULES + 2)
+            .map(|i| {
+                let mut r = rule(&format!("r{i}"), ACTION_LOCK, TRIGGER_DAILY);
+                r.time = "09:00".into();
+                r
+            })
+            .collect();
+        let (normalized, issues) = prepare_rules(&rules);
+        let overflow: Vec<_> = issues
+            .iter()
+            .filter(|i| i.message.contains("at most"))
+            .collect();
+        assert_eq!(overflow.len(), 1); // summary, not one per entry
+        let runtime = runtime_rules(normalized, &issues);
+        for (i, rule) in runtime.iter().enumerate() {
+            // The disable must reach every overflow rule, not just the one
+            // carrying the summary issue's index.
+            assert_eq!(rule.enabled, i < MAX_RULES, "rule {i}");
+        }
     }
 
     #[test]

@@ -9,11 +9,13 @@
 IdleTrigger.toml
 IdleTrigger.toml.bak
 IdleTrigger.state.json
+IdleTrigger.state.json.corrupt-*
 IdleTrigger.log
 IdleTrigger.log.*
 IdleTrigger-panic.txt
-.IdleTrigger-*.toml.tmp
-.IdleTrigger-state-*.json.tmp
+# save_candidate writes .{file}-{pid}.tmp (config + state); the screenshot
+# pattern predates the current BMP capture path but stays harmless.
+.IdleTrigger*.tmp
 .IdleTrigger-screenshot-*.png.tmp
 
 # Editor backup files

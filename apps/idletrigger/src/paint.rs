@@ -427,37 +427,43 @@ use windows::Win32::Graphics::Gdi::{
 /// GDI+ path is unavailable (Go DrawSurface).
 pub fn draw_surface(hdc: HDC, bounds: &RECT, background: u32, fill: u32, border: u32, radius: i32) {
     fill_rect(hdc, bounds, background);
+    let fallback = || unsafe {
+        let brush = CreateSolidBrush(COLORREF(fill));
+        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(border));
+        if brush.is_invalid() || pen.is_invalid() {
+            if !brush.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+            if !pen.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+            }
+            return;
+        }
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = RoundRect(
+            hdc,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom,
+            (radius * 2).max(2),
+            (radius * 2).max(2),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    };
     match fill_rounded_rect(hdc, bounds, radius, fill, border) {
         DrawResult::Completed => {}
-        DrawResult::MayBeDirty => fill_rect(hdc, bounds, background),
-        DrawResult::NotStarted => unsafe {
-            let brush = CreateSolidBrush(COLORREF(fill));
-            let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(border));
-            if brush.is_invalid() || pen.is_invalid() {
-                if !brush.is_invalid() {
-                    let _ = DeleteObject(HGDIOBJ(brush.0));
-                }
-                if !pen.is_invalid() {
-                    let _ = DeleteObject(HGDIOBJ(pen.0));
-                }
-                return;
-            }
-            let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
-            let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-            let _ = RoundRect(
-                hdc,
-                bounds.left,
-                bounds.top,
-                bounds.right,
-                bounds.bottom,
-                (radius * 2).max(2),
-                (radius * 2).max(2),
-            );
-            SelectObject(hdc, old_pen);
-            SelectObject(hdc, old_brush);
-            let _ = DeleteObject(HGDIOBJ(pen.0));
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-        },
+        // Mid-fill failure may have written partial pixels: clear them, then
+        // still draw the GDI fallback like Go instead of leaving a hole.
+        DrawResult::MayBeDirty => {
+            fill_rect(hdc, bounds, background);
+            fallback();
+        }
+        DrawResult::NotStarted => fallback(),
     }
 }
 

@@ -109,6 +109,10 @@ pub struct Loaded {
     pub config: Config,
     /// Human-readable load problem; defaults were used for broken fields.
     pub load_error: Option<String>,
+    /// Present-but-mistyped fields that fell back to defaults. Softer than
+    /// `load_error`: the document still parses, and saving once rewrites
+    /// the offenders with correct types, so saving stays available.
+    pub field_errors: Option<String>,
     /// The document the file was parsed into (template-based when absent).
     pub document: toml_edit::DocumentMut,
     /// True when no config file existed yet.
@@ -117,36 +121,39 @@ pub struct Loaded {
 
 pub fn load(path: &Path) -> Loaded {
     let defaults = Config::default();
+    let base = Loaded {
+        source_text: None,
+        config: Config::default().sanitized(),
+        load_error: None,
+        field_errors: None,
+        document: template_document(),
+        created_from_template: true,
+    };
     match std::fs::read_to_string(path) {
         Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
-            Ok(document) => Loaded {
-                source_text: Some(text),
-                config: read_config(&document, defaults).sanitized(),
-                load_error: None,
-                document,
-                created_from_template: false,
-            },
+            Ok(document) => {
+                let mut bad_fields = Vec::new();
+                let config = read_config(&document, defaults, &mut bad_fields).sanitized();
+                let field_errors = (!bad_fields.is_empty()).then(|| bad_fields.join(", "));
+                Loaded {
+                    source_text: Some(text),
+                    config,
+                    load_error: None,
+                    field_errors,
+                    document,
+                    created_from_template: false,
+                }
+            }
             Err(err) => Loaded {
                 source_text: Some(text),
-                config: defaults.sanitized(),
                 load_error: Some(format!("parse error: {err}")),
-                document: template_document(),
-                created_from_template: true,
+                ..base
             },
         },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Loaded {
-            source_text: None,
-            config: defaults.sanitized(),
-            load_error: None,
-            document: template_document(),
-            created_from_template: true,
-        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => base,
         Err(err) => Loaded {
-            source_text: None,
-            config: defaults.sanitized(),
             load_error: Some(format!("read error: {err}")),
-            document: template_document(),
-            created_from_template: true,
+            ..base
         },
     }
 }
@@ -157,58 +164,111 @@ fn template_document() -> toml_edit::DocumentMut {
         .expect("embedded template must parse")
 }
 
-fn read_config(document: &toml_edit::DocumentMut, defaults: Config) -> Config {
-    let as_bool = |key: &str| document.get(key).and_then(|v| v.as_bool());
-    let as_int = |key: &str| document.get(key).and_then(|v| v.as_integer());
-    let as_str = |key: &str| document.get(key).and_then(|v| v.as_str());
+/// Reads one typed field; a present-but-mistyped value is recorded so the
+/// loader can tell the user which fields fell back to defaults.
+fn typed<'a, T>(
+    document: &'a toml_edit::DocumentMut,
+    key: &str,
+    cast: impl FnOnce(&'a toml_edit::Item) -> Option<T>,
+    bad_fields: &mut Vec<String>,
+) -> Option<T> {
+    let item = document.get(key)?;
+    match cast(item) {
+        Some(value) => Some(value),
+        None => {
+            bad_fields.push(key.to_string());
+            None
+        }
+    }
+}
+
+fn as_bool(
+    document: &toml_edit::DocumentMut,
+    key: &str,
+    bad_fields: &mut Vec<String>,
+) -> Option<bool> {
+    typed(document, key, |v| v.as_bool(), bad_fields)
+}
+
+fn as_int(
+    document: &toml_edit::DocumentMut,
+    key: &str,
+    bad_fields: &mut Vec<String>,
+) -> Option<i64> {
+    typed(document, key, |v| v.as_integer(), bad_fields)
+}
+
+fn as_str<'a>(
+    document: &'a toml_edit::DocumentMut,
+    key: &str,
+    bad_fields: &mut Vec<String>,
+) -> Option<&'a str> {
+    typed(document, key, |v| v.as_str(), bad_fields)
+}
+
+fn read_config(
+    document: &toml_edit::DocumentMut,
+    defaults: Config,
+    bad_fields: &mut Vec<String>,
+) -> Config {
     Config {
-        language: as_str("language").unwrap_or(&defaults.language).to_string(),
-        logging_enabled: as_bool("logging_enabled").unwrap_or(defaults.logging_enabled),
-        nosleep_enabled: as_bool("nosleep_enabled").unwrap_or(defaults.nosleep_enabled),
-        keep_screen_on: as_bool("keep_screen_on").unwrap_or(defaults.keep_screen_on),
-        nosleep_on_battery: as_bool("nosleep_on_battery").unwrap_or(defaults.nosleep_on_battery),
-        nosleep_battery_threshold: as_int("nosleep_battery_threshold")
+        language: as_str(document, "language", bad_fields)
+            .unwrap_or(&defaults.language)
+            .to_string(),
+        logging_enabled: as_bool(document, "logging_enabled", bad_fields)
+            .unwrap_or(defaults.logging_enabled),
+        nosleep_enabled: as_bool(document, "nosleep_enabled", bad_fields)
+            .unwrap_or(defaults.nosleep_enabled),
+        keep_screen_on: as_bool(document, "keep_screen_on", bad_fields)
+            .unwrap_or(defaults.keep_screen_on),
+        nosleep_on_battery: as_bool(document, "nosleep_on_battery", bad_fields)
+            .unwrap_or(defaults.nosleep_on_battery),
+        nosleep_battery_threshold: as_int(document, "nosleep_battery_threshold", bad_fields)
             .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.nosleep_battery_threshold),
-        idle_enabled: as_bool("idle_enabled").unwrap_or(defaults.idle_enabled),
-        idle_timeout_minutes: as_int("idle_timeout_minutes")
+        idle_enabled: as_bool(document, "idle_enabled", bad_fields)
+            .unwrap_or(defaults.idle_enabled),
+        idle_timeout_minutes: as_int(document, "idle_timeout_minutes", bad_fields)
             .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.idle_timeout_minutes),
-        idle_action: as_str("idle_action")
+        idle_action: as_str(document, "idle_action", bad_fields)
             .unwrap_or(&defaults.idle_action)
             .to_string(),
-        idle_warning_seconds: as_int("idle_warning_seconds")
+        idle_warning_seconds: as_int(document, "idle_warning_seconds", bad_fields)
             .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.idle_warning_seconds),
-        idle_enhanced_monitor: as_bool("idle_enhanced_monitor")
+        idle_enhanced_monitor: as_bool(document, "idle_enhanced_monitor", bad_fields)
             .unwrap_or(defaults.idle_enhanced_monitor),
-        automation_enabled: as_bool("automation_enabled").unwrap_or(defaults.automation_enabled),
-        hotkeys_enabled: as_bool("hotkeys_enabled").unwrap_or(defaults.hotkeys_enabled),
-        lock_keys_enabled: as_bool("lock_keys_enabled").unwrap_or(defaults.lock_keys_enabled),
-        lock_keys_caps_enabled: as_bool("lock_keys_caps_enabled")
+        automation_enabled: as_bool(document, "automation_enabled", bad_fields)
+            .unwrap_or(defaults.automation_enabled),
+        hotkeys_enabled: as_bool(document, "hotkeys_enabled", bad_fields)
+            .unwrap_or(defaults.hotkeys_enabled),
+        lock_keys_enabled: as_bool(document, "lock_keys_enabled", bad_fields)
+            .unwrap_or(defaults.lock_keys_enabled),
+        lock_keys_caps_enabled: as_bool(document, "lock_keys_caps_enabled", bad_fields)
             .unwrap_or(defaults.lock_keys_caps_enabled),
-        lock_keys_num_enabled: as_bool("lock_keys_num_enabled")
+        lock_keys_num_enabled: as_bool(document, "lock_keys_num_enabled", bad_fields)
             .unwrap_or(defaults.lock_keys_num_enabled),
-        lock_keys_scroll_enabled: as_bool("lock_keys_scroll_enabled")
+        lock_keys_scroll_enabled: as_bool(document, "lock_keys_scroll_enabled", bad_fields)
             .unwrap_or(defaults.lock_keys_scroll_enabled),
-        lock_keys_skip_fullscreen: as_bool("lock_keys_skip_fullscreen")
+        lock_keys_skip_fullscreen: as_bool(document, "lock_keys_skip_fullscreen", bad_fields)
             .unwrap_or(defaults.lock_keys_skip_fullscreen),
-        theme_switch_enabled: as_bool("theme_switch_enabled")
+        theme_switch_enabled: as_bool(document, "theme_switch_enabled", bad_fields)
             .unwrap_or(defaults.theme_switch_enabled),
-        theme_mode: as_str("theme_mode")
+        theme_mode: as_str(document, "theme_mode", bad_fields)
             .unwrap_or(&defaults.theme_mode)
             .to_string(),
-        theme_light_time: as_str("theme_light_time")
+        theme_light_time: as_str(document, "theme_light_time", bad_fields)
             .unwrap_or(&defaults.theme_light_time)
             .to_string(),
-        theme_dark_time: as_str("theme_dark_time")
+        theme_dark_time: as_str(document, "theme_dark_time", bad_fields)
             .unwrap_or(&defaults.theme_dark_time)
             .to_string(),
-        theme_ip_location_enabled: as_bool("theme_ip_location_enabled")
+        theme_ip_location_enabled: as_bool(document, "theme_ip_location_enabled", bad_fields)
             .unwrap_or(defaults.theme_ip_location_enabled),
-        theme_dark_on_battery: as_bool("theme_dark_on_battery")
+        theme_dark_on_battery: as_bool(document, "theme_dark_on_battery", bad_fields)
             .unwrap_or(defaults.theme_dark_on_battery),
-        theme_skip_fullscreen: as_bool("theme_skip_fullscreen")
+        theme_skip_fullscreen: as_bool(document, "theme_skip_fullscreen", bad_fields)
             .unwrap_or(defaults.theme_skip_fullscreen),
     }
 }
@@ -367,6 +427,35 @@ mod save_tests {
             config.idle_warning_seconds,
             crate::automation::MIN_WARNING_SECONDS
         );
+    }
+    #[test]
+    fn mistyped_fields_surface_in_load_error_and_fall_back() {
+        let path = std::env::temp_dir().join(format!(
+            "idletrigger-mistyped-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "idle_timeout_minutes = \"30\"
+",
+        )
+        .unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        // Field-level mistakes are a soft warning, not a load failure: the
+        // document parses and one save repairs the offenders.
+        assert!(loaded.load_error.is_none());
+        assert!(
+            loaded
+                .field_errors
+                .as_deref()
+                .is_some_and(|err| err.contains("idle_timeout_minutes"))
+        );
+        assert_eq!(loaded.config.idle_timeout_minutes, 30); // default, not the string
     }
     #[test]
     fn save_load_preserves_comments_and_ui_limits() {

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, SetFocus, VK_DOWN};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
@@ -192,7 +192,13 @@ pub fn set_rows(button: HWND, rows: &[ChoiceItem]) {
     if OPEN_BUTTON.load(Ordering::SeqCst) == button.0 as isize {
         close(false);
     }
-    let first_option = rows.iter().position(|r| !r.header).unwrap_or(0) as i32;
+    // With no selectable option there is nothing to latch onto: keep the
+    // selection empty instead of pointing at a header row.
+    let first_option = rows
+        .iter()
+        .position(|r| !r.header)
+        .map(|i| i as i32)
+        .unwrap_or(-1);
     choices().get_or_insert_with(Default::default).insert(
         button.0 as isize,
         ChoiceData {
@@ -217,7 +223,10 @@ unsafe extern "system" fn button_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_KEYDOWN && wparam.0 == 0x73 {
+    // F4 and Down/Alt+Down open the dropdown, like a native combo box.
+    if (msg == WM_KEYDOWN && (wparam.0 == 0x73 || wparam.0 == VK_DOWN.0 as usize))
+        || (msg == WM_SYSKEYDOWN && wparam.0 == VK_DOWN.0 as usize)
+    {
         unsafe {
             toggle(
                 hwnd,

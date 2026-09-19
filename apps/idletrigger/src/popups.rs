@@ -490,6 +490,11 @@ const CARD_H: i32 = 88;
 const ENTER_MS: u128 = 120;
 const HOLD_MS: u128 = 1500;
 const EXIT_MS: u128 = 90;
+/// Hold-phase opacity: a hint of translucency so the card sits softer on
+/// desktop content (≈4%, visually subtle at any background). The entry and
+/// exit curves use this as their endpoint so opacity is continuous across
+/// phase boundaries.
+const HOLD_OPACITY: u8 = 245;
 
 pub const VK_CAPITAL: i32 = 0x14;
 pub const VK_NUMLOCK: i32 = 0x90;
@@ -896,15 +901,14 @@ fn opacity_at(elapsed_ms: u128, initial: u8, animated: bool) -> u8 {
         return 255;
     }
     if elapsed_ms < ENTER_MS {
-        return initial + ((255 - initial) as f64 * entry_progress(elapsed_ms)) as u8;
+        return initial
+            + (HOLD_OPACITY.saturating_sub(initial) as f64 * entry_progress(elapsed_ms)) as u8;
     }
     if elapsed_ms > HOLD_MS {
         let t = (elapsed_ms - HOLD_MS) as f64 / EXIT_MS as f64;
-        return (255.0 * (1.0 - t * t)) as u8;
+        return (HOLD_OPACITY as f64 * (1.0 - t * t)) as u8;
     }
-    // Hold phase: a hint of translucency so the card sits softer on desktop
-    // content (≈4%, visually subtle at any background).
-    245
+    HOLD_OPACITY
 }
 
 fn rise_at(elapsed_ms: u128, rise: i32, animated: bool) -> i32 {
@@ -1026,10 +1030,13 @@ pub fn show(vk: i32, on: bool) {
             info.rcWork.left + (info.rcWork.right - info.rcWork.left - sw) / 2,
             info.rcWork.bottom - scale(48) - sh + inset,
         );
-        position.0 = position.0.clamp(info.rcWork.left, info.rcWork.right - sw);
-        position.1 = position
-            .1
-            .clamp(info.rcWork.top, info.rcWork.bottom - sh - scale(4));
+        // A card larger than the work area (huge accessibility text on a
+        // small remote-session desktop) must not invert the clamp bounds:
+        // std clamps panic when min > max, so pin max at min first.
+        let max_x = (info.rcWork.right - sw).max(info.rcWork.left);
+        let max_y = (info.rcWork.bottom - sh - scale(4)).max(info.rcWork.top);
+        position.0 = position.0.clamp(info.rcWork.left, max_x);
+        position.1 = position.1.clamp(info.rcWork.top, max_y);
         let animated = client_area_animations();
         {
             let mut guard = notice();
