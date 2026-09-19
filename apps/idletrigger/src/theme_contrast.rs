@@ -82,6 +82,9 @@ fn from_colors(
         selected,
         selected_hover: selected,
         accent_text: selected_text,
+        link: text,
+        link_hover: text,
+        link_pressed: text,
         focus: text,
         danger_bg: selected,
         danger_hover: selected,
@@ -107,5 +110,7 @@ mod tests {
         assert_eq!((p.accent_pressed, p.accent_text), (3, 4));
         assert_eq!((p.disabled_surface, p.disabled_text), (5, 6));
         assert_eq!((p.tooltip_bg, p.tooltip_text), (8, 9));
+        assert_eq!([p.link, p.link_hover, p.link_pressed], [2; 3]);
+        assert_eq!((p.danger_hover, p.danger_focus), (3, 4));
     }
 }

@@ -1251,7 +1251,14 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
     let id = item.control_id as usize;
     if id == MGR_LIST_SURFACE {
         // Card surface behind the listbox: elevated fill + border.
-        crate::paint::draw_surface(dc, bounds, p.window_bg, p.surface, p.border, 6);
+        crate::paint::draw_surface(
+            dc,
+            bounds,
+            p.window_bg,
+            p.surface,
+            p.border,
+            crate::paint::control_radius(),
+        );
     } else {
         let label = window_text(item.control);
         let state = crate::nativeform::control_state(item.control, item.state);
@@ -1263,7 +1270,7 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             p,
             p.window_bg,
             state,
-            6,
+            crate::paint::control_radius(),
         );
     }
 }
@@ -2528,6 +2535,16 @@ fn process_details() -> String {
     lines.join("\n")
 }
 
+#[cfg(all(test, feature = "devtools"))]
+pub(crate) fn test_process_details_fixture() -> String {
+    *EDIT_PROCS.lock().unwrap() = vec![auto::ProcessTarget {
+        kind: "name".into(),
+        executable: "IdleTrigger-audit.exe".into(),
+        path: String::new(),
+    }];
+    process_details()
+}
+
 unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -2759,7 +2776,14 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
             item.control_id as usize,
             PK_SEARCH_SURFACE | PK_LIST_SURFACE | PK_PREVIEW_SURFACE
         ) {
-            crate::paint::draw_surface(dc, bounds, p.window_bg, p.surface, p.border, 6);
+            crate::paint::draw_surface(
+                dc,
+                bounds,
+                p.window_bg,
+                p.surface,
+                p.border,
+                crate::paint::control_radius(),
+            );
             return;
         }
 
@@ -2779,13 +2803,27 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
             let edit_class =
                 String::from_utf16_lossy(&buffer[..len.max(0) as usize]).to_uppercase();
             if edit_class != "EDIT" {
-                crate::paint::draw_surface(dc, bounds, p.window_bg, p.surface, p.border, 6);
+                crate::paint::draw_surface(
+                    dc,
+                    bounds,
+                    p.window_bg,
+                    p.surface,
+                    p.border,
+                    crate::paint::control_radius(),
+                );
                 return;
             }
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.focused = GetFocus() == edit;
             state.disabled = !IsWindowEnabled(edit).as_bool();
-            crate::paint::draw_field(dc, bounds, p, p.window_bg, state, 6);
+            crate::paint::draw_field(
+                dc,
+                bounds,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
             return;
         }
 
@@ -2829,10 +2867,28 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
         } else if weekday_ids.contains(&item.control_id) {
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = edit_is_checked(item.control_id as usize);
-            crate::paint::draw_button(dc, bounds, font, &label, p, p.window_bg, state, 6);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                font,
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         } else {
             let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_button(dc, bounds, font, &label, p, p.window_bg, state, 6);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                font,
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         }
     }
 }

@@ -482,6 +482,13 @@ pub fn draw_field(
     draw_surface(hdc, bounds, background, fill, border, radius);
 }
 
+/// Shared form corner radius in the same DPI/text scale as the controls.
+/// Callers with a special shape (for example a circular info button) retain
+/// their own radius. Drawing never changes the native control's bounds.
+pub fn control_radius() -> i32 {
+    crate::dpi::scale(6)
+}
+
 fn button_visual(p: &Palette, state: ControlState) -> (u32, u32, u32) {
     let (mut fill, mut border, mut text) = (p.surface, p.border, p.text);
     if state.hovered {
@@ -791,12 +798,12 @@ pub fn draw_text_link(
     scale: i32,
 ) {
     fill_rect(hdc, bounds, background);
-    let mut color = p.accent;
+    let mut color = p.link;
     if state.hovered {
-        color = p.accent_hover;
+        color = p.link_hover;
     }
     if state.pressed {
-        color = p.accent_pressed;
+        color = p.link_pressed;
     }
     if state.disabled {
         color = p.disabled_text;

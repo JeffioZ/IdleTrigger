@@ -14,6 +14,17 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 /// Captures `hwnd`'s client area and writes it as a 24-bit BMP file.
 pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
+    capture_client(hwnd, out_path, false)
+}
+
+/// Ask native dialogs to draw into our bitmap. A window DC can contain the
+/// desktop behind a composited dialog, which is not valid visual evidence.
+#[cfg(test)]
+pub fn capture_print_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
+    capture_client(hwnd, out_path, true)
+}
+
+fn capture_client(hwnd: HWND, out_path: &Path, print: bool) -> io::Result<()> {
     unsafe {
         let mut rect = RECT::default();
         GetClientRect(hwnd, &mut rect).map_err(|e| io::Error::other(e.to_string()))?;
@@ -42,17 +53,33 @@ pub fn capture_client_bmp(hwnd: HWND, out_path: &Path) -> io::Result<()> {
         }
         let old_obj = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
 
-        let blit = BitBlt(
-            mem_dc,
-            0,
-            0,
-            width as i32,
-            height as i32,
-            Some(window_dc),
-            0,
-            0,
-            SRCCOPY | CAPTUREBLT,
-        );
+        let blit = if print {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                PRF_CHILDREN, PRF_CLIENT, PRF_ERASEBKGND, SendMessageW, WM_PRINT,
+            };
+            windows::Win32::Graphics::Gdi::FillRect(mem_dc, &rect, crate::theme::bg_brush());
+            SendMessageW(
+                hwnd,
+                WM_PRINT,
+                Some(windows::Win32::Foundation::WPARAM(mem_dc.0 as usize)),
+                Some(windows::Win32::Foundation::LPARAM(
+                    (PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                )),
+            );
+            Ok(())
+        } else {
+            BitBlt(
+                mem_dc,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                Some(window_dc),
+                0,
+                0,
+                SRCCOPY | CAPTUREBLT,
+            )
+        };
 
         let _ = SelectObject(mem_dc, old_obj);
         let mut pixels = vec![0u8; bytes];

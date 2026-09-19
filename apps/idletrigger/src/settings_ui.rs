@@ -1923,7 +1923,14 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.focused = GetFocus() == edit;
             state.disabled = !IsWindowEnabled(edit).as_bool();
-            crate::paint::draw_field(dc, bounds, p, p.window_bg, state, 6);
+            crate::paint::draw_field(
+                dc,
+                bounds,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         } else if id == ID_PROJECT_HOME {
             let state = crate::nativeform::control_state(item.control, item.state);
             crate::paint::draw_text_link(
@@ -1947,12 +1954,30 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
             let page = PAGE.load(Ordering::SeqCst);
             state.active =
                 id == [ID_TAB_POWER, ID_TAB_THEME, ID_TAB_APP, ID_TAB_NOTIFICATIONS][page as usize];
-            crate::paint::draw_button(dc, bounds, body_font(), &label, p, p.window_bg, state, 6);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                body_font(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         } else if id == ID_SAVE {
             // Save is the form's default action: accent fill (Go state.Active).
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = true;
-            crate::paint::draw_button(dc, bounds, body_font(), &label, p, p.window_bg, state, 6);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                body_font(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         } else if checks().as_ref().is_some_and(|m| m.contains_key(&id)) {
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = is_checked(hwnd, id);
@@ -1969,7 +1994,16 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
             );
         } else {
             let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_button(dc, bounds, body_font(), &label, p, p.window_bg, state, 6);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                body_font(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         }
     }
 }

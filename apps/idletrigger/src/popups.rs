@@ -426,7 +426,7 @@ pub fn draw_warning_button(lparam: LPARAM) -> LRESULT {
             crate::theme::palette(),
             crate::theme::bg_color(),
             crate::nativeform::control_state(item.control, item.state),
-            crate::scale_pub(4),
+            crate::paint::control_radius(),
         );
     };
     unsafe {
@@ -774,6 +774,49 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
 }
 
 impl Surface {
+    /// Inspect the actual layered-card renderer without reading the desktop.
+    #[cfg(all(test, feature = "devtools"))]
+    fn save_preview(&self, path: &std::path::Path) -> std::io::Result<()> {
+        unsafe {
+            let mut pixels = vec![0u8; (self.w * self.h * 4) as usize];
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: 40,
+                    biWidth: self.w,
+                    biHeight: -self.h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            SelectObject(self.dc, self.old);
+            let lines = windows::Win32::Graphics::Gdi::GetDIBits(
+                self.dc,
+                self.bitmap,
+                0,
+                self.h as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            SelectObject(self.dc, HGDIOBJ(self.bitmap.0));
+            if lines != self.h {
+                return Err(std::io::Error::other("card bitmap readback failed"));
+            }
+            let mut bytes = vec![0u8; 54];
+            bytes[..2].copy_from_slice(b"BM");
+            bytes[2..6].copy_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
+            bytes[10..14].copy_from_slice(&54u32.to_le_bytes());
+            bytes[14..18].copy_from_slice(&40u32.to_le_bytes());
+            bytes[18..22].copy_from_slice(&self.w.to_le_bytes());
+            bytes[22..26].copy_from_slice(&(-self.h).to_le_bytes());
+            bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
+            bytes[28..30].copy_from_slice(&32u16.to_le_bytes());
+            bytes.extend(pixels);
+            std::fs::write(path, bytes)
+        }
+    }
     /// UpdateLayeredWindow with per-pixel premultiplied alpha and a global
     /// opacity factor (Go present).
     unsafe fn present(&self, hwnd: HWND, position: (i32, i32), alpha: u8) -> bool {
@@ -803,6 +846,28 @@ impl Surface {
             .is_ok()
         }
     }
+}
+
+#[cfg(all(test, feature = "devtools"))]
+pub(crate) fn capture_lock_preview(
+    dpi: u32,
+    vk: i32,
+    on: bool,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let (symbol, name) = match vk {
+        VK_CAPITAL => (if on { "AA" } else { "aa" }, "Caps Lock"),
+        VK_NUMLOCK => ("123", "Num Lock"),
+        _ => ("\u{2195}", "Scroll Lock"),
+    };
+    let text = format!(
+        "{} {}",
+        name,
+        crate::t_pub(if on { "lock_keys_on" } else { "lock_keys_off" })
+    );
+    render_surface(dpi, crate::theme::is_dark(), on, symbol, &text)
+        .ok_or_else(|| std::io::Error::other("card render failed"))?
+        .save_preview(path)
 }
 
 fn client_area_animations() -> bool {

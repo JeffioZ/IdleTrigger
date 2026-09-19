@@ -163,6 +163,8 @@ mod nativeform;
 mod paint;
 mod pipe;
 mod popups;
+#[cfg(test)]
+mod render_tests;
 mod settings_ui;
 mod single_instance;
 mod system;
@@ -929,7 +931,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
                 p,
                 p.window_bg,
                 state,
-                6,
+                paint::control_radius(),
             );
         }
     }
@@ -1020,8 +1022,7 @@ unsafe fn draw_exit_button(
     scale: i32,
 ) {
     let state = nativeform::control_state(item.control, item.state);
-    let (mut fill, mut border, mut text) =
-        (p.surface, p.danger_surface_text, p.danger_surface_text);
+    let (mut fill, mut border, mut text) = (p.surface, p.border, p.danger_surface_text);
     if state.hovered {
         fill = p.danger_hover;
         border = p.danger_hover_border;
@@ -1037,9 +1038,16 @@ unsafe fn draw_exit_button(
         border = p.subtle_border;
         text = p.disabled_text;
     }
-    paint::draw_surface(dc, bounds, p.window_bg, fill, border, 6);
+    paint::draw_surface(
+        dc,
+        bounds,
+        p.window_bg,
+        fill,
+        border,
+        paint::control_radius(),
+    );
     paint::draw_button_label(dc, bounds, panel_font_body(), label, text, false, 8, 8);
-    if state.focused {
+    if state.focused && !state.disabled {
         let inset = paint::sp(2, scale);
         paint::frame_rect(
             dc,
@@ -1049,7 +1057,11 @@ unsafe fn draw_exit_button(
                 right: bounds.right - inset,
                 bottom: bounds.bottom - inset,
             },
-            p.danger_focus,
+            if state.hovered || state.pressed {
+                p.danger_focus
+            } else {
+                p.focus
+            },
         );
     }
 }

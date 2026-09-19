@@ -35,6 +35,9 @@ pub struct Palette {
     pub selected: u32,
     pub selected_hover: u32,
     pub accent_text: u32,
+    pub link: u32,
+    pub link_hover: u32,
+    pub link_pressed: u32,
     pub focus: u32,
     pub danger_bg: u32,
     pub danger_hover: u32,
@@ -67,6 +70,9 @@ const LIGHT_PALETTE: Palette = Palette {
     selected: 0x00B57600,
     selected_hover: 0x00A36A00,
     accent_text: 0x00FFFFFF,
+    link: 0x00B57600,
+    link_hover: 0x00A36A00,
+    link_pressed: 0x00855500,
     focus: 0x00865A00,                 // RGB(0,90,134)
     danger_bg: 0x003934AE,             // RGB(174,52,57)
     danger_hover: 0x004446C8,          // RGB(200,68,68)
@@ -86,19 +92,22 @@ const DARK_PALETTE: Palette = Palette {
     surface: 0x0036302B,          // RGB(43,48,54)
     elevated: 0x00433B34,         // RGB(52,59,67)
     hover_surface: 0x00453D36,    // RGB(54,61,69)
-    border: 0x00958D7D,           // RGB(125,137,149)
+    border: 0x008E8072,           // RGB(114,128,142)
     subtle_border: 0x004D443C,    // RGB(60,68,77)
     text: 0x00FAF7F4,             // RGB(244,247,250)
     text2: 0x00DCD4CC,            // RGB(204,212,220)
-    muted: 0x00BFB5AA,            // RGB(170,181,191)
+    muted: 0x00B7AA9F,            // RGB(159,170,183)
     disabled_text: 0x008D8277,    // RGB(119,130,141)
     disabled_surface: 0x00312C28, // RGB(40,44,49)
     accent: 0x00B4780A,           // RGB(10,120,180)
     accent_hover: 0x00CB8B0C,     // RGB(12,139,203)
     accent_pressed: 0x009D6806,   // RGB(6,104,157)
     selected: 0x00B4780A,
-    selected_hover: 0x00CB8B0C,
+    selected_hover: 0x00B67B08, // Keep white button labels readable on hover.
     accent_text: 0x00FFFFFF,
+    link: 0x00ECBC59,                  // RGB(89,188,236), text on dark surfaces.
+    link_hover: 0x00FAD585,            // RGB(133,213,250)
+    link_pressed: 0x00DDA736,          // RGB(54,167,221)
     focus: 0x00EDCD51,                 // RGB(81,205,237)
     danger_bg: 0x00423FB8,             // RGB(184,63,66)
     danger_hover: 0x004446C8,          // RGB(200,68,68)
@@ -263,6 +272,24 @@ pub fn tooltip_text_color() -> u32 {
 /// 19, so we fall back when 20 reports failure (Go two-step behavior).
 pub fn apply_to_window(hwnd: HWND) {
     unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GCLP_HBRBACKGROUND, GCLP_HMODULE};
+        #[cfg(target_pointer_width = "64")]
+        use windows::Win32::UI::WindowsAndMessaging::{GetClassLongPtrW, SetClassLongPtrW};
+        #[cfg(target_pointer_width = "32")]
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassLongW as GetClassLongPtrW, SetClassLongW as SetClassLongPtrW,
+        };
+        // Keep USER32's fallback erase color in sync while a retained window
+        // is hidden. Only change classes owned by this executable that already
+        // have a background; native controls and layered cards own theirs.
+        if let Ok(module) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+            && GetClassLongPtrW(hwnd, GCLP_HMODULE) as *mut core::ffi::c_void == module.0
+            && GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND) != 0
+        {
+            // Palette brushes are cached for process lifetime, not owned by
+            // the window class, so the replaced brush must not be deleted.
+            SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, bg_brush().0 as _);
+        }
         set_preferred_app_mode_allow_dark();
         allow_dark_for_window(hwnd, is_dark());
         let value: i32 = if is_dark() { 1 } else { 0 };
@@ -552,3 +579,46 @@ pub fn is_color_set_change(lparam: isize) -> bool {
 
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY: u32 = 19;
+
+#[cfg(test)]
+mod visual_tests {
+    use super::*;
+
+    fn contrast(a: u32, b: u32) -> f64 {
+        fn luminance(color: u32) -> f64 {
+            [0, 8, 16]
+                .into_iter()
+                .zip([0.2126, 0.7152, 0.0722])
+                .map(|(shift, weight)| {
+                    let channel = ((color >> shift) & 255) as f64 / 255.0;
+                    weight
+                        * if channel <= 0.04045 {
+                            channel / 12.92
+                        } else {
+                            ((channel + 0.055) / 1.055).powf(2.4)
+                        }
+                })
+                .sum()
+        }
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn form_colors_remain_readable_in_both_themes_and_selected_states() {
+        for p in [&LIGHT_PALETTE, &DARK_PALETTE] {
+            for background in [p.selected, p.selected_hover, p.accent_pressed] {
+                assert!(contrast(p.accent_text, background) >= 4.5);
+            }
+            assert!(contrast(p.muted, p.window_bg) >= 4.5);
+            assert!(contrast(p.border, p.surface) >= 3.0);
+            assert!(contrast(p.focus, p.surface) >= 3.0);
+            for background in [p.danger_hover, p.danger_pressed] {
+                assert!(contrast(p.danger_focus, background) >= 3.0);
+            }
+            for ink in [p.link, p.link_hover, p.link_pressed] {
+                assert!(contrast(ink, p.window_bg) >= 4.5);
+            }
+        }
+    }
+}

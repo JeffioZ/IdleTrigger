@@ -20,7 +20,6 @@ use crate::theme;
 const ROW_H: i32 = 34;
 const ROW_GAP: i32 = 1;
 const INSET: i32 = 4;
-const RADIUS: i32 = 6;
 const MAX_VISIBLE: usize = 6;
 
 /// One popup row. Headers are non-selectable group labels (Go header items
@@ -350,7 +349,7 @@ pub fn draw_button(
         p,
         p.window_bg,
         state,
-        RADIUS,
+        paint::control_radius(),
         scale(),
     );
 }
@@ -642,7 +641,7 @@ unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
             state,
             index == selected,
             item.danger,
-            RADIUS,
+            paint::control_radius(),
             scale(),
         );
     }
