@@ -59,6 +59,7 @@ const BREED: &str = "SystemUsesLightTheme";
 const APP_BREED: &str = "AppsUseLightTheme";
 
 use crate::wide;
+use idletrigger_core::automation::parse_hhmm;
 
 /// Local time snapshot (minutes + weekday).
 pub struct LocalTime {
@@ -251,23 +252,9 @@ pub fn light_window() -> Option<(i32, i32)> {
         )
     });
     if mode == "fixed" {
-        let parse = |v: &str| -> Option<i32> {
-            let h: i32 = v.get(..2)?.parse().ok()?;
-            let m: i32 = v.get(3..5)?.parse().ok()?;
-            Some(h * 60 + m)
-        };
-        return Some((parse(&light_str)?, parse(&dark_str)?));
+        return Some((parse_hhmm(&light_str)?, parse_hhmm(&dark_str)?));
     }
-    solar_window(ip_enabled).or_else(|| {
-        let parse = |v: &str| {
-            v.get(..2)?
-                .parse::<i32>()
-                .ok()
-                .zip(v.get(3..5)?.parse::<i32>().ok())
-                .map(|(h, m)| h * 60 + m)
-        };
-        Some((parse(&light_str)?, parse(&dark_str)?))
-    })
+    solar_window(ip_enabled).or_else(|| Some((parse_hhmm(&light_str)?, parse_hhmm(&dark_str)?)))
 }
 /// Whether the schedule says dark right now.
 fn scheduled_dark() -> Option<bool> {

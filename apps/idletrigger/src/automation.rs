@@ -501,11 +501,9 @@ pub fn disable_rule_after_cancel(rule_id: &str) {
 /// scheduled minute. The occurrence key prevents refiring within the same
 /// day. This window also applies after startup or resume; older times are skipped.
 fn schedule_due(now: &LocalNow, scheduled: &str) -> bool {
-    let parse = |s: &str| -> i32 {
-        s.get(..2).and_then(|v| v.parse().ok()).unwrap_or(0) * 60
-            + s.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0)
+    let Some(sched) = auto::parse_hhmm(scheduled) else {
+        return false;
     };
-    let sched = parse(scheduled);
     let diff = now.minutes - sched;
     (0..2).contains(&diff)
 }
@@ -568,11 +566,6 @@ fn weekday_of(days: i64) -> usize {
 /// formatted "YYYY-MM-DD HH:MM". Process start/exit triggers never schedule.
 pub fn next_scheduled() -> Option<String> {
     let now = local_now().ok()?;
-    let parse_hhmm = |v: &str| -> Option<i32> {
-        let h: i32 = v.get(..2)?.parse().ok()?;
-        let m: i32 = v.get(3..5)?.parse().ok()?;
-        Some(h * 60 + m)
-    };
     let today_days = days_from_civil(
         now.date
             .get(..4)
@@ -594,7 +587,7 @@ pub fn next_scheduled() -> Option<String> {
         {
             continue;
         }
-        let Some(minutes) = parse_hhmm(&rule.time) else {
+        let Some(minutes) = auto::parse_hhmm(&rule.time) else {
             continue;
         };
         let mut consider = |days: i64| {
@@ -661,13 +654,12 @@ fn day_matches(rule: &auto::Rule, now: &LocalNow) -> bool {
 }
 
 fn in_time_window(rule: &auto::Rule, now: &LocalNow) -> bool {
-    let parse = |s: &str| -> i32 {
-        let h: i32 = s.get(..2).and_then(|v| v.parse().ok()).unwrap_or(0);
-        let m: i32 = s.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
-        h * 60 + m
+    let (Some(start), Some(end)) = (
+        auto::parse_hhmm(&rule.time),
+        auto::parse_hhmm(&rule.end_time),
+    ) else {
+        return false;
     };
-    let start = parse(&rule.time);
-    let end = parse(&rule.end_time);
     let day_matches = |weekday| {
         rule.days.is_empty()
             || rule
@@ -1180,6 +1172,33 @@ days = ["sat"]
         for minute in [0, 60, 23 * 60, 1439] {
             assert!(in_time_window(&all_day, &at(6, minute)));
             assert!(!in_time_window(&all_day, &at(0, minute)));
+        }
+    }
+
+    #[test]
+    fn malformed_times_never_due_and_never_match_a_window() {
+        let rule: auto::Rule = toml_edit::de::from_str(
+            r#"
+id = "broken"
+name = "broken"
+enabled = true
+action = "lock"
+trigger = "time_window"
+time = "ab:cd"
+end_time = "99:99"
+days = []
+"#,
+        )
+        .unwrap();
+        let at = |weekday: usize, minutes: i32| LocalNow {
+            date: "2026-09-19".into(),
+            minutes,
+            weekday,
+        };
+        assert!(!schedule_due(&at(0, 0), "ab:cd"));
+        assert!(!schedule_due(&at(0, 0), ""));
+        for minute in [0, 1, 721, 1439] {
+            assert!(!in_time_window(&rule, &at(6, minute)));
         }
     }
 }

@@ -547,6 +547,18 @@ pub fn valid_hhmm(value: &str) -> bool {
         && value[3..].parse::<u32>().map(|m| m < 60).unwrap_or(false)
 }
 
+/// Minutes since midnight for a well-formed `HH:MM`; None for anything
+/// else. Evaluation layers treat None as "not scheduled" rather than
+/// guessing midnight.
+pub fn parse_hhmm(value: &str) -> Option<i32> {
+    if !valid_hhmm(value) {
+        return None;
+    }
+    let hours: i32 = value[..2].parse().ok()?;
+    let minutes: i32 = value[3..5].parse().ok()?;
+    Some(hours * 60 + minutes)
+}
+
 pub fn valid_date(value: &str) -> bool {
     let parts: Vec<&str> = value.split('-').collect();
     if parts.len() != 3 {
@@ -648,6 +660,18 @@ pub fn save_runtime_state(path: &Path, state: &RuntimeState) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_hhmm_accepts_only_well_formed_times() {
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("07:30"), Some(450));
+        assert_eq!(parse_hhmm("23:59"), Some(23 * 60 + 59));
+        for garbage in [
+            "", "7:30", "07:3", "24:00", "12:60", "ab:cd", "0730", "07:30x",
+        ] {
+            assert_eq!(parse_hhmm(garbage), None, "{garbage:?}");
+        }
+    }
 
     #[test]
     fn occurrence_checkpoints_accept_both_formats_and_remain_bounded() {
