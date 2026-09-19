@@ -1595,7 +1595,7 @@ unsafe fn create_tooltip(hwnd: HWND) {
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    crate::guarded_proc("settings", hwnd, msg, move || unsafe {
+    crate::guarded_proc("settings", hwnd, msg, wparam, lparam, move || unsafe {
         match msg {
             WM_COMMAND => {
                 let idc = (wparam.0 & 0xFFFF) as i32;

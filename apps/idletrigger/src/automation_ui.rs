@@ -1165,102 +1165,109 @@ unsafe extern "system" fn mgr_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    crate::guarded_proc("automation-manager", hwnd, msg, move || unsafe {
-        match msg {
-            WM_COMMAND => {
-                let code = wparam.0 & 0xFFFF;
-                let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
-                match code {
-                    MGR_NEW => {
-                        begin_edit(-1, Vec::new());
-                        crate::log_line("automation: new rule editor");
-                        show_editor();
+    crate::guarded_proc(
+        "automation-manager",
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        move || unsafe {
+            match msg {
+                WM_COMMAND => {
+                    let code = wparam.0 & 0xFFFF;
+                    let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
+                    match code {
+                        MGR_NEW => {
+                            begin_edit(-1, Vec::new());
+                            crate::log_line("automation: new rule editor");
+                            show_editor();
+                        }
+                        MGR_EDIT if hi == BN_CLICKED => edit_selected(),
+                        MGR_DELETE if hi == BN_CLICKED => delete_selected(hwnd),
+                        MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(hwnd),
+                        MGR_LIST if hi == LBN_DBLCLK => edit_selected(),
+                        MGR_LIST if hi == LBN_SELCHANGE => {
+                            let rules = MGR_DISPLAYED_RULES.lock().unwrap().clone();
+                            let sel = selected_index().map(|s| s as isize).unwrap_or(-1);
+                            update_manager_actions(hwnd, &rules, sel);
+                        }
+                        _ => {}
                     }
-                    MGR_EDIT if hi == BN_CLICKED => edit_selected(),
-                    MGR_DELETE if hi == BN_CLICKED => delete_selected(hwnd),
-                    MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(hwnd),
-                    MGR_LIST if hi == LBN_DBLCLK => edit_selected(),
-                    MGR_LIST if hi == LBN_SELCHANGE => {
-                        let rules = MGR_DISPLAYED_RULES.lock().unwrap().clone();
-                        let sel = selected_index().map(|s| s as isize).unwrap_or(-1);
-                        update_manager_actions(hwnd, &rules, sel);
-                    }
-                    _ => {}
+                    LRESULT(0)
                 }
-                LRESULT(0)
-            }
-            WM_CLOSE => {
-                hide();
-                LRESULT(0)
-            }
-            WM_DRAWITEM => {
-                if let Some(item) = crate::nativeform::draw_item(lparam) {
-                    draw_manager_item(&item);
+                WM_CLOSE => {
+                    hide();
+                    LRESULT(0)
+                }
+                WM_DRAWITEM => {
+                    if let Some(item) = crate::nativeform::draw_item(lparam) {
+                        draw_manager_item(&item);
+                        LRESULT(1)
+                    } else {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
+                }
+                WM_ERASEBKGND => {
+                    crate::popups::erase_theme_bg(hwnd, wparam);
                     LRESULT(1)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
-            }
-            WM_ERASEBKGND => {
-                crate::popups::erase_theme_bg(hwnd, wparam);
-                LRESULT(1)
-            }
-            WM_CTLCOLORSTATIC => {
-                // Secondary labels (Go isSecondaryLabel) get SecondaryText;
-                // section titles keep PrimaryText. The empty-state overlay
-                // paints on the Surface card.
-                let palette = theme::palette();
-                let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
-                let secondary = matches!(id, MGR_EMPTY_BODY | MGR_NEXT);
-                let on_surface = matches!(id, MGR_EMPTY_TITLE | MGR_EMPTY_BODY);
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(
-                    hdc,
-                    COLORREF(if secondary {
-                        palette.text2
+                WM_CTLCOLORSTATIC => {
+                    // Secondary labels (Go isSecondaryLabel) get SecondaryText;
+                    // section titles keep PrimaryText. The empty-state overlay
+                    // paints on the Surface card.
+                    let palette = theme::palette();
+                    let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
+                    let secondary = matches!(id, MGR_EMPTY_BODY | MGR_NEXT);
+                    let on_surface = matches!(id, MGR_EMPTY_TITLE | MGR_EMPTY_BODY);
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(
+                        hdc,
+                        COLORREF(if secondary {
+                            palette.text2
+                        } else {
+                            palette.text
+                        }),
+                    );
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(
+                        hdc,
+                        COLORREF(if on_surface {
+                            palette.surface
+                        } else {
+                            theme::bg_color()
+                        }),
+                    );
+                    if on_surface {
+                        let (light, dark) = theme::surface_brush_pairs();
+                        let pair = if theme::is_dark() { dark } else { light };
+                        LRESULT(pair.0.0 as isize)
                     } else {
-                        palette.text
-                    }),
-                );
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(
-                    hdc,
-                    COLORREF(if on_surface {
-                        palette.surface
-                    } else {
-                        theme::bg_color()
-                    }),
-                );
-                if on_surface {
+                        LRESULT(theme::bg_brush().0 as isize)
+                    }
+                }
+                WM_CTLCOLORLISTBOX => {
+                    // Listbox on the surface card: PrimaryText on Surface.
+                    let p = theme::palette();
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
                     let (light, dark) = theme::surface_brush_pairs();
                     let pair = if theme::is_dark() { dark } else { light };
                     LRESULT(pair.0.0 as isize)
-                } else {
-                    LRESULT(theme::bg_brush().0 as isize)
                 }
+                WM_DESTROY => {
+                    MGR_HWND.store(0, Ordering::SeqCst);
+                    MGR_LIST_HWND.store(0, Ordering::SeqCst);
+                    MGR_DISPLAYED_RULES.lock().unwrap().clear();
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                        crate::hwnd(&crate::PANEL),
+                        true,
+                    );
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            WM_CTLCOLORLISTBOX => {
-                // Listbox on the surface card: PrimaryText on Surface.
-                let p = theme::palette();
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
-                let (light, dark) = theme::surface_brush_pairs();
-                let pair = if theme::is_dark() { dark } else { light };
-                LRESULT(pair.0.0 as isize)
-            }
-            WM_DESTROY => {
-                MGR_HWND.store(0, Ordering::SeqCst);
-                MGR_LIST_HWND.store(0, Ordering::SeqCst);
-                MGR_DISPLAYED_RULES.lock().unwrap().clear();
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                    crate::hwnd(&crate::PANEL),
-                    true,
-                );
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    })
+        },
+    )
 }
 
 unsafe fn register_mgr_class(instance: windows::Win32::Foundation::HMODULE) {
@@ -2592,193 +2599,203 @@ pub(crate) fn test_process_details_fixture() -> String {
 }
 
 unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    crate::guarded_proc("automation-editor", hwnd, msg, move || unsafe {
-        match msg {
-            WM_COMMAND => {
-                let code = wparam.0 & 0xFFFF;
-                let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
-                match code {
-                    ED_SAVE if hi == BN_CLICKED => save_rule(hwnd),
-                    ED_CANCEL if hi == BN_CLICKED => cancel_editor(hwnd),
-                    ED_CHOOSE if hi == BN_CLICKED => show_picker(hwnd),
+    crate::guarded_proc(
+        "automation-editor",
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        move || unsafe {
+            match msg {
+                WM_COMMAND => {
+                    let code = wparam.0 & 0xFFFF;
+                    let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
+                    match code {
+                        ED_SAVE if hi == BN_CLICKED => save_rule(hwnd),
+                        ED_CANCEL if hi == BN_CLICKED => cancel_editor(hwnd),
+                        ED_CHOOSE if hi == BN_CLICKED => show_picker(hwnd),
 
-                    // Checkbox toggles (owner-draw; state in EDIT_CHECKS).
-                    ED_KEEP_SCREEN if hi == BN_CLICKED => {
-                        edit_toggle(hwnd, ED_KEEP_SCREEN);
-                        clear_editor_error(hwnd);
-                    }
-                    ED_DAYS_MON | ED_DAYS_TUE | ED_DAYS_WED | ED_DAYS_THU | ED_DAYS_FRI
-                    | ED_DAYS_SAT | ED_DAYS_SUN
-                        if hi == BN_CLICKED =>
-                    {
-                        edit_toggle(hwnd, code);
-                        clear_editor_error(hwnd);
-                    }
-                    ED_DAYS_WORKDAYS if hi == BN_CLICKED => {
-                        set_weekdays(hwnd, &["mon", "tue", "wed", "thu", "fri"]);
-                        clear_editor_error(hwnd);
-                    }
-                    ED_DAYS_EVERYDAY if hi == BN_CLICKED => {
-                        set_weekdays(hwnd, &["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
-                        clear_editor_error(hwnd);
-                    }
-                    ED_PROC_INFO if hi == BN_CLICKED => {
-                        if !edit_procs().is_empty() {
-                            info_dialog(
-                                hwnd,
-                                &t_pub("automation_process_details_title"),
-                                &process_details(),
-                            );
+                        // Checkbox toggles (owner-draw; state in EDIT_CHECKS).
+                        ED_KEEP_SCREEN if hi == BN_CLICKED => {
+                            edit_toggle(hwnd, ED_KEEP_SCREEN);
+                            clear_editor_error(hwnd);
                         }
-                    }
-
-                    // Numeric edits: filter digits and clear errors (Go
-                    // sanitizeNumericEdit).
-                    ED_WARNING | ED_IDLE_MIN | ED_MAX_WAIT if hi == EN_CHANGE => {
-                        sanitize_numeric_edit(hwnd, code);
-                        clear_editor_error(hwnd);
-                    }
-                    ED_NAME | ED_DATE | ED_TIME | ED_END_TIME if hi == EN_CHANGE => {
-                        clear_editor_error(hwnd);
-                    }
-
-                    // Field focus repaints the surface border (Go surfaces).
-                    code if (hi == EN_SETFOCUS || hi == EN_KILLFOCUS)
-                        && field_surface_of(code).is_some() =>
-                    {
-                        if let Some(surface) = field_surface_of(code) {
-                            let control = get_dlg_item(hwnd, surface);
-                            if !control.is_invalid() {
-                                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
-                                    Some(control),
-                                    None,
-                                    true,
+                        ED_DAYS_MON | ED_DAYS_TUE | ED_DAYS_WED | ED_DAYS_THU | ED_DAYS_FRI
+                        | ED_DAYS_SAT | ED_DAYS_SUN
+                            if hi == BN_CLICKED =>
+                        {
+                            edit_toggle(hwnd, code);
+                            clear_editor_error(hwnd);
+                        }
+                        ED_DAYS_WORKDAYS if hi == BN_CLICKED => {
+                            set_weekdays(hwnd, &["mon", "tue", "wed", "thu", "fri"]);
+                            clear_editor_error(hwnd);
+                        }
+                        ED_DAYS_EVERYDAY if hi == BN_CLICKED => {
+                            set_weekdays(hwnd, &["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
+                            clear_editor_error(hwnd);
+                        }
+                        ED_PROC_INFO if hi == BN_CLICKED => {
+                            if !edit_procs().is_empty() {
+                                info_dialog(
+                                    hwnd,
+                                    &t_pub("automation_process_details_title"),
+                                    &process_details(),
                                 );
                             }
                         }
-                    }
 
-                    // Choice selections drive the dynamic Go layout; the
-                    // trigger list itself depends on the selected action.
-                    ED_ACTION | ED_TRIGGER | ED_LOGIC | ED_BLOCKED if hi == CBN_SELCHANGE => {
-                        if code == ED_ACTION {
-                            // Keep the current trigger when still valid for the
-                            // new action (Go setTriggerOptions desired).
-                            let previous = choice_value(hwnd, ED_TRIGGER);
-                            let action = choice_value(hwnd, ED_ACTION);
-                            fill_trigger_choice(hwnd, &action, &previous);
+                        // Numeric edits: filter digits and clear errors (Go
+                        // sanitizeNumericEdit).
+                        ED_WARNING | ED_IDLE_MIN | ED_MAX_WAIT if hi == EN_CHANGE => {
+                            sanitize_numeric_edit(hwnd, code);
+                            clear_editor_error(hwnd);
                         }
-                        layout_editor();
-                        clear_editor_error(hwnd);
-                    }
-
-                    // Choice buttons open their popup on click.
-                    ED_ACTION | ED_TRIGGER | ED_LOGIC | ED_BLOCKED if hi == BN_CLICKED => {
-                        crate::choice::toggle(get_dlg_item(hwnd, code), hwnd, code as i32);
-                    }
-
-                    _ => {}
-                }
-                LRESULT(0)
-            }
-            WM_DRAWITEM => {
-                if let Some(item) = crate::nativeform::draw_item(lparam) {
-                    draw_form_item(&item);
-                    LRESULT(1)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
-            }
-            WM_CLOSE => {
-                cancel_editor(hwnd);
-                LRESULT(0)
-            }
-            WM_ERASEBKGND => {
-                crate::popups::erase_theme_bg(hwnd, wparam);
-                LRESULT(1)
-            }
-            WM_CTLCOLORSTATIC => {
-                // Go 3-tier labels: field labels SecondaryText, hints muted,
-                // titles PrimaryText, validation muted or danger-on-error.
-                let palette = theme::palette();
-                let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
-                let secondary = matches!(
-                    id,
-                    ED_NAME_LBL
-                        | ED_ACTION_LBL
-                        | ED_TRIGGER_LBL
-                        | ED_DATE_LBL
-                        | ED_TIME_LBL
-                        | ED_END_LBL
-                        | ED_DAYS_LBL
-                        | ED_LOGIC_LBL
-                        | ED_IDLE_LBL
-                        | ED_WARN_LBL
-                        | ED_BLOCKED_LBL
-                        | ED_MAX_LBL
-                        | ED_PROC_SUMMARY
-                );
-                let muted = matches!(id, ED_NAME_HINT | ED_NO_OPTIONS);
-                let color = if id == ED_VALIDATION {
-                    if EDIT_ERROR.load(Ordering::SeqCst) {
-                        if theme::is_dark() {
-                            palette.danger_border
-                        } else {
-                            palette.danger_bg
+                        ED_NAME | ED_DATE | ED_TIME | ED_END_TIME if hi == EN_CHANGE => {
+                            clear_editor_error(hwnd);
                         }
+
+                        // Field focus repaints the surface border (Go surfaces).
+                        code if (hi == EN_SETFOCUS || hi == EN_KILLFOCUS)
+                            && field_surface_of(code).is_some() =>
+                        {
+                            if let Some(surface) = field_surface_of(code) {
+                                let control = get_dlg_item(hwnd, surface);
+                                if !control.is_invalid() {
+                                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                        Some(control),
+                                        None,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+
+                        // Choice selections drive the dynamic Go layout; the
+                        // trigger list itself depends on the selected action.
+                        ED_ACTION | ED_TRIGGER | ED_LOGIC | ED_BLOCKED if hi == CBN_SELCHANGE => {
+                            if code == ED_ACTION {
+                                // Keep the current trigger when still valid for the
+                                // new action (Go setTriggerOptions desired).
+                                let previous = choice_value(hwnd, ED_TRIGGER);
+                                let action = choice_value(hwnd, ED_ACTION);
+                                fill_trigger_choice(hwnd, &action, &previous);
+                            }
+                            layout_editor();
+                            clear_editor_error(hwnd);
+                        }
+
+                        // Choice buttons open their popup on click.
+                        ED_ACTION | ED_TRIGGER | ED_LOGIC | ED_BLOCKED if hi == BN_CLICKED => {
+                            crate::choice::toggle(get_dlg_item(hwnd, code), hwnd, code as i32);
+                        }
+
+                        _ => {}
+                    }
+                    LRESULT(0)
+                }
+                WM_DRAWITEM => {
+                    if let Some(item) = crate::nativeform::draw_item(lparam) {
+                        draw_form_item(&item);
+                        LRESULT(1)
                     } else {
-                        palette.muted
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
                     }
-                } else if secondary {
-                    palette.text2
-                } else if muted {
-                    palette.muted
-                } else {
-                    palette.text
-                };
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(color));
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(theme::bg_color()));
-                LRESULT(theme::bg_brush().0 as isize)
-            }
-            WM_CTLCOLOREDIT => {
-                // Edit interior: PrimaryText on Surface (Go surfaces).
-                let p = theme::palette();
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let control = HWND(lparam.0 as *mut _);
-                let disabled = !IsWindowEnabled(control).as_bool();
-                if disabled {
-                    let _ =
-                        windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.disabled_text));
-                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(
-                        hdc,
-                        COLORREF(p.disabled_surface),
-                    );
-                } else {
-                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
-                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
                 }
-                let (light, dark) = theme::surface_brush_pairs();
-                let pair = if theme::is_dark() { dark } else { light };
-                LRESULT(pair.0.0 as isize)
+                WM_CLOSE => {
+                    cancel_editor(hwnd);
+                    LRESULT(0)
+                }
+                WM_ERASEBKGND => {
+                    crate::popups::erase_theme_bg(hwnd, wparam);
+                    LRESULT(1)
+                }
+                WM_CTLCOLORSTATIC => {
+                    // Go 3-tier labels: field labels SecondaryText, hints muted,
+                    // titles PrimaryText, validation muted or danger-on-error.
+                    let palette = theme::palette();
+                    let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
+                    let secondary = matches!(
+                        id,
+                        ED_NAME_LBL
+                            | ED_ACTION_LBL
+                            | ED_TRIGGER_LBL
+                            | ED_DATE_LBL
+                            | ED_TIME_LBL
+                            | ED_END_LBL
+                            | ED_DAYS_LBL
+                            | ED_LOGIC_LBL
+                            | ED_IDLE_LBL
+                            | ED_WARN_LBL
+                            | ED_BLOCKED_LBL
+                            | ED_MAX_LBL
+                            | ED_PROC_SUMMARY
+                    );
+                    let muted = matches!(id, ED_NAME_HINT | ED_NO_OPTIONS);
+                    let color = if id == ED_VALIDATION {
+                        if EDIT_ERROR.load(Ordering::SeqCst) {
+                            if theme::is_dark() {
+                                palette.danger_border
+                            } else {
+                                palette.danger_bg
+                            }
+                        } else {
+                            palette.muted
+                        }
+                    } else if secondary {
+                        palette.text2
+                    } else if muted {
+                        palette.muted
+                    } else {
+                        palette.text
+                    };
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(color));
+                    let _ =
+                        windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(theme::bg_color()));
+                    LRESULT(theme::bg_brush().0 as isize)
+                }
+                WM_CTLCOLOREDIT => {
+                    // Edit interior: PrimaryText on Surface (Go surfaces).
+                    let p = theme::palette();
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let control = HWND(lparam.0 as *mut _);
+                    let disabled = !IsWindowEnabled(control).as_bool();
+                    if disabled {
+                        let _ = windows::Win32::Graphics::Gdi::SetTextColor(
+                            hdc,
+                            COLORREF(p.disabled_text),
+                        );
+                        let _ = windows::Win32::Graphics::Gdi::SetBkColor(
+                            hdc,
+                            COLORREF(p.disabled_surface),
+                        );
+                    } else {
+                        let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
+                        let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
+                    }
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let pair = if theme::is_dark() { dark } else { light };
+                    LRESULT(pair.0.0 as isize)
+                }
+                WM_DESTROY => {
+                    EDIT_HWND.store(0, Ordering::SeqCst);
+                    // Hidden-reuse never reaches here; a real destroy must drop
+                    // editor state so a recreated window cannot inherit stale
+                    // checkbox marks on reused control ids.
+                    EDIT_ERROR.store(false, Ordering::SeqCst);
+                    *EDIT_CHECKS.lock().unwrap() = None;
+                    end_edit();
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                        HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
+                        true,
+                    );
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            WM_DESTROY => {
-                EDIT_HWND.store(0, Ordering::SeqCst);
-                // Hidden-reuse never reaches here; a real destroy must drop
-                // editor state so a recreated window cannot inherit stale
-                // checkbox marks on reused control ids.
-                EDIT_ERROR.store(false, Ordering::SeqCst);
-                *EDIT_CHECKS.lock().unwrap() = None;
-                end_edit();
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                    HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
-                    true,
-                );
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    })
+        },
+    )
 }
 
 /// Strips non-digits from a numeric edit and restores the caret (Go).
@@ -4372,131 +4389,138 @@ unsafe extern "system" fn picker_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    crate::guarded_proc("automation-picker", hwnd, msg, move || unsafe {
-        match msg {
-            WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
-                if !PK_LOADING.load(Ordering::SeqCst)
-                    && !PK_ENRICHING.load(Ordering::SeqCst)
-                    && PK_UPDATED
-                        .lock()
-                        .unwrap()
-                        .is_some_and(|last| last.elapsed() >= std::time::Duration::from_secs(30))
-                {
-                    picker_load();
-                    update_selection_status(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_COMMAND => {
-                let code = wparam.0 & 0xFFFF;
-                let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
-                match code {
-                    PK_CONFIRM if hi == BN_CLICKED => picker_confirm(),
-                    PK_CANCEL if hi == BN_CLICKED => hide_picker(),
-                    PK_REFRESH if hi == BN_CLICKED => {
-                        capture_selection();
+    crate::guarded_proc(
+        "automation-picker",
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        move || unsafe {
+            match msg {
+                WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
+                    if !PK_LOADING.load(Ordering::SeqCst)
+                        && !PK_ENRICHING.load(Ordering::SeqCst)
+                        && PK_UPDATED.lock().unwrap().is_some_and(|last| {
+                            last.elapsed() >= std::time::Duration::from_secs(30)
+                        })
+                    {
                         picker_load();
-                        apply_filter();
+                        update_selection_status(hwnd);
                     }
-                    PK_BROWSE if hi == BN_CLICKED => browse_executable(hwnd),
-                    PK_SEARCH if hi == EN_CHANGE => {
-                        // Go debounces 120ms; in-memory filtering is fast
-                        // enough to run directly.
-                        apply_filter();
-                    }
-                    _ => {}
+                    LRESULT(0)
                 }
-                LRESULT(0)
-            }
-            WM_NOTIFY => {
-                handle_picker_notify(hwnd, lparam);
-                LRESULT(0)
-            }
-            WM_APP_PICKER_DESC => {
-                finish_picker_load(hwnd);
-                LRESULT(0)
-            }
-            WM_DRAWITEM => {
-                if let Some(item) = crate::nativeform::draw_item(lparam) {
-                    draw_form_item(&item);
+                WM_COMMAND => {
+                    let code = wparam.0 & 0xFFFF;
+                    let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
+                    match code {
+                        PK_CONFIRM if hi == BN_CLICKED => picker_confirm(),
+                        PK_CANCEL if hi == BN_CLICKED => hide_picker(),
+                        PK_REFRESH if hi == BN_CLICKED => {
+                            capture_selection();
+                            picker_load();
+                            apply_filter();
+                        }
+                        PK_BROWSE if hi == BN_CLICKED => browse_executable(hwnd),
+                        PK_SEARCH if hi == EN_CHANGE => {
+                            // Go debounces 120ms; in-memory filtering is fast
+                            // enough to run directly.
+                            apply_filter();
+                        }
+                        _ => {}
+                    }
+                    LRESULT(0)
+                }
+                WM_NOTIFY => {
+                    handle_picker_notify(hwnd, lparam);
+                    LRESULT(0)
+                }
+                WM_APP_PICKER_DESC => {
+                    finish_picker_load(hwnd);
+                    LRESULT(0)
+                }
+                WM_DRAWITEM => {
+                    if let Some(item) = crate::nativeform::draw_item(lparam) {
+                        draw_form_item(&item);
+                        LRESULT(1)
+                    } else {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
+                }
+                WM_CLOSE => {
+                    hide_picker();
+                    LRESULT(0)
+                }
+                WM_ERASEBKGND => {
+                    crate::popups::erase_theme_bg(hwnd, wparam);
                     LRESULT(1)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
-            }
-            WM_CLOSE => {
-                hide_picker();
-                LRESULT(0)
-            }
-            WM_ERASEBKGND => {
-                crate::popups::erase_theme_bg(hwnd, wparam);
-                LRESULT(1)
-            }
-            WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
-                // Helper/status/privacy/preview-title SecondaryText; heading
-                // and titles PrimaryText; overlays paint on the Surface card.
-                let palette = theme::palette();
-                let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
-                let secondary = matches!(id, PK_HELPER | PK_STATUS | PK_PRIVACY | PK_PREVIEW_TITLE);
-                let on_surface = matches!(id, PK_EMPTY | PK_PREVIEW);
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(
-                    hdc,
-                    COLORREF(if secondary {
-                        palette.text2
+                WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
+                    // Helper/status/privacy/preview-title SecondaryText; heading
+                    // and titles PrimaryText; overlays paint on the Surface card.
+                    let palette = theme::palette();
+                    let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
+                    let secondary =
+                        matches!(id, PK_HELPER | PK_STATUS | PK_PRIVACY | PK_PREVIEW_TITLE);
+                    let on_surface = matches!(id, PK_EMPTY | PK_PREVIEW);
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(
+                        hdc,
+                        COLORREF(if secondary {
+                            palette.text2
+                        } else {
+                            palette.text
+                        }),
+                    );
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(
+                        hdc,
+                        COLORREF(if on_surface {
+                            palette.surface
+                        } else {
+                            theme::bg_color()
+                        }),
+                    );
+                    if on_surface {
+                        let (light, dark) = theme::surface_brush_pairs();
+                        let pair = if theme::is_dark() { dark } else { light };
+                        LRESULT(pair.0.0 as isize)
                     } else {
-                        palette.text
-                    }),
-                );
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(
-                    hdc,
-                    COLORREF(if on_surface {
-                        palette.surface
-                    } else {
-                        theme::bg_color()
-                    }),
-                );
-                if on_surface {
+                        LRESULT(theme::bg_brush().0 as isize)
+                    }
+                }
+                WM_CTLCOLOREDIT => {
+                    // Search interior: PrimaryText on Surface (Go picker).
+                    let p = theme::palette();
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
                     let (light, dark) = theme::surface_brush_pairs();
                     let pair = if theme::is_dark() { dark } else { light };
                     LRESULT(pair.0.0 as isize)
-                } else {
-                    LRESULT(theme::bg_brush().0 as isize)
                 }
+                WM_DESTROY => {
+                    PK_GENERATION.fetch_add(1, Ordering::SeqCst);
+                    PICKER_HWND.store(0, Ordering::SeqCst);
+                    PK_LIST_HWND.store(0, Ordering::SeqCst);
+                    // Same rule as the editor: drop picker caches on a real
+                    // destroy so recreation starts clean. PK_GENERATION above
+                    // already invalidates any in-flight background load.
+                    PK_ITEMS.lock().unwrap().clear();
+                    PK_VISIBLE.lock().unwrap().clear();
+                    PK_SELECTED.lock().unwrap().clear();
+                    *PK_SORT.lock().unwrap() = (0, true);
+                    DESCRIPTIONS.lock().unwrap().clear();
+                    *PK_RESULT.lock().unwrap() = None;
+                    *PK_UPDATED.lock().unwrap() = None;
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                        HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
+                        true,
+                    );
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            WM_CTLCOLOREDIT => {
-                // Search interior: PrimaryText on Surface (Go picker).
-                let p = theme::palette();
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(p.text));
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(p.surface));
-                let (light, dark) = theme::surface_brush_pairs();
-                let pair = if theme::is_dark() { dark } else { light };
-                LRESULT(pair.0.0 as isize)
-            }
-            WM_DESTROY => {
-                PK_GENERATION.fetch_add(1, Ordering::SeqCst);
-                PICKER_HWND.store(0, Ordering::SeqCst);
-                PK_LIST_HWND.store(0, Ordering::SeqCst);
-                // Same rule as the editor: drop picker caches on a real
-                // destroy so recreation starts clean. PK_GENERATION above
-                // already invalidates any in-flight background load.
-                PK_ITEMS.lock().unwrap().clear();
-                PK_VISIBLE.lock().unwrap().clear();
-                PK_SELECTED.lock().unwrap().clear();
-                *PK_SORT.lock().unwrap() = (0, true);
-                DESCRIPTIONS.lock().unwrap().clear();
-                *PK_RESULT.lock().unwrap() = None;
-                *PK_UPDATED.lock().unwrap() = None;
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                    HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
-                    true,
-                );
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    })
+        },
+    )
 }
 
 /// Go handleNotify: checkbox changes, column sorting, label-click toggles.

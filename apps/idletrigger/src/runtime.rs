@@ -19,8 +19,19 @@ pub(crate) static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
 pub(crate) static CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 pub(crate) static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
+/// Locks a runtime mutex, recovering from poisoning. A panic caught by the
+/// window-proc guard may have poisoned the lock mid-hold; published state is
+/// only ever swapped in from prepared clones, so the last consistent value
+/// stays usable. Without recovery every later access would panic again and
+/// degrade the process into a zombie that only logs.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub(crate) fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
-    let guard = CONFIG.lock().unwrap();
+    let guard = lock(&CONFIG);
     #[cfg(feature = "devtools")]
     if crate::devtools::ENABLED.load(Ordering::SeqCst) {
         let mut runtime = guard.as_ref().expect("config initialized").clone();
@@ -34,30 +45,22 @@ pub(crate) fn cfg_map<T>(f: impl FnOnce(&config::Config) -> T) -> T {
 
 #[cfg(test)]
 pub(crate) fn cfg_edit<T>(f: impl FnOnce(&mut config::Config) -> T) -> T {
-    let mut guard = CONFIG.lock().unwrap();
+    let mut guard = lock(&CONFIG);
     f(guard.as_mut().expect("config initialized"))
 }
 
 pub(crate) fn log_line(msg: &str) {
     use std::io::Write;
-    // Recover from poisoning instead of skipping the write: the window-proc
-    // panic guard logs through here, possibly right after another thread
-    // poisoned LOG_FILE mid-write.
-    let mut guard = LOG_FILE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The recovering lock keeps the panic path logging: the window-proc
+    // guard may log right after another thread poisoned LOG_FILE mid-write.
+    let mut guard = lock(&LOG_FILE);
     if guard
         .as_ref()
         .and_then(|file| file.metadata().ok())
         .is_some_and(|meta| meta.len() >= 5 * 1024 * 1024)
     {
         guard.take();
-        if let Some(path) = CONFIG_PATH
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .and_then(|path| path.parent())
-        {
+        if let Some(path) = lock(&CONFIG_PATH).as_ref().and_then(|path| path.parent()) {
             *guard = open_log(&path.join("IdleTrigger.log")).ok();
         }
     }
@@ -74,7 +77,7 @@ pub(crate) fn log_line(msg: &str) {
 pub(crate) fn init_log(exe_dir: &std::path::Path) {
     use std::io::Write;
     let path = exe_dir.join("IdleTrigger.log");
-    let mut current = LOG_FILE.lock().unwrap();
+    let mut current = lock(&LOG_FILE);
     if current.is_some() {
         return;
     }
@@ -96,25 +99,23 @@ pub(crate) fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File>
 
 pub(crate) fn sync_logging() {
     if cfg_map(|c| c.logging_enabled) {
-        let path = CONFIG_PATH.lock().unwrap().clone();
+        let path = lock(&CONFIG_PATH).clone();
         if let Some(dir) = path.as_ref().and_then(|path| path.parent()) {
             init_log(dir);
         }
     } else {
-        LOG_FILE.lock().unwrap().take();
+        lock(&LOG_FILE).take();
     }
 }
 
 pub(crate) fn commit_config(
     edit: impl FnOnce(&mut config::Config, &mut toml_edit::DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
-    let writer = CONFIG_WRITER.lock().unwrap();
+    let writer = lock(&CONFIG_WRITER);
     if CONFIG_LOAD_FAILED.load(Ordering::SeqCst) {
         return Err(crate::t_pub("warning_config_recovery"));
     }
-    let path = CONFIG_PATH
-        .lock()
-        .unwrap()
+    let path = lock(&CONFIG_PATH)
         .clone()
         .ok_or("configuration path unavailable")?;
     let source = match std::fs::read_to_string(&path) {
@@ -122,25 +123,19 @@ pub(crate) fn commit_config(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.to_string()),
     };
-    if source != *CONFIG_SOURCE.lock().unwrap() {
+    if source != *lock(&CONFIG_SOURCE) {
         return Err(crate::t_pub("settings_save_conflict"));
     }
-    let mut candidate = CONFIG
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("configuration unavailable")?;
-    let mut doc = CONFIG_DOC
-        .lock()
-        .unwrap()
+    let mut candidate = lock(&CONFIG).clone().ok_or("configuration unavailable")?;
+    let mut doc = lock(&CONFIG_DOC)
         .clone()
         .ok_or("configuration document unavailable")?;
     edit(&mut candidate, &mut doc)?;
     config::save(&path, &mut doc, &candidate)
         .map_err(|e| crate::t_pub("msg_config_save_failed").replacen("%s", &e.to_string(), 1))?;
-    *CONFIG_SOURCE.lock().unwrap() = Some(doc.to_string());
-    *CONFIG.lock().unwrap() = Some(candidate);
-    *CONFIG_DOC.lock().unwrap() = Some(doc);
+    *lock(&CONFIG_SOURCE) = Some(doc.to_string());
+    *lock(&CONFIG) = Some(candidate);
+    *lock(&CONFIG_DOC) = Some(doc);
     // Rule publication is inside the writer boundary, preventing a later
     // reload from being overwritten by an older save's publication.
     crate::automation::reload_rules();

@@ -160,7 +160,7 @@ pub fn reload_rules() {
     // Parse the whole document and pull only the rules key: array-of-tables
     // items do not round-trip reliably through Item::to_string alone.
     let parsed = {
-        let doc_guard = crate::CONFIG_DOC.lock().unwrap();
+        let doc_guard = crate::runtime::lock(&crate::CONFIG_DOC);
         let Some(doc) = doc_guard.as_ref() else {
             return;
         };
@@ -247,7 +247,7 @@ fn tick_with_snapshot(
 ) -> Result<(), String> {
     // Reload publishes config/rules under the same writer lock. A scan may
     // not publish obsolete overrides or queue an event after a rule edit.
-    let _configuration = crate::CONFIG_WRITER.lock().unwrap();
+    let _configuration = crate::runtime::lock(&crate::CONFIG_WRITER);
     let enabled = crate::cfg_map(|c| c.automation_enabled);
     let rules = RULES.lock().unwrap().clone();
     if !enabled {

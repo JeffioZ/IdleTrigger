@@ -396,11 +396,11 @@ fn main() {
     #[cfg(feature = "devtools")]
     let _ = devtools::load();
 
-    *CONFIG.lock().unwrap() = Some(effective_config.clone());
-    *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
-    *CONFIG_SOURCE.lock().unwrap() = loaded.source_text;
+    *lock(&CONFIG) = Some(effective_config.clone());
+    *lock(&CONFIG_DOC) = Some(loaded.document);
+    *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
-    *CONFIG_PATH.lock().unwrap() = Some(config_path.clone());
+    *lock(&CONFIG_PATH) = Some(config_path.clone());
     apply_language(&effective_config.language);
 
     let _instance_guard = match single_instance::acquire() {
@@ -615,7 +615,7 @@ unsafe extern "system" fn hidden_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    guarded_proc("hidden", hwnd_, msg, move || unsafe {
+    guarded_proc("hidden", hwnd_, msg, wparam, lparam, move || unsafe {
         let registered = REGISTERED_SHOW_PANEL.load(Ordering::SeqCst);
         if registered != 0 && msg == registered {
             show_panel();
@@ -778,7 +778,14 @@ fn wide(text: &str) -> Vec<u16> {
 /// "system" ABI aborts the process before anything else could react, so
 /// each proc catches its own body here, logs, and degrades to
 /// DefWindowProcW instead of taking the tray down silently.
-fn guarded_proc(name: &str, hwnd: HWND, msg: u32, body: impl FnOnce() -> LRESULT) -> LRESULT {
+fn guarded_proc(
+    name: &str,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    body: impl FnOnce() -> LRESULT,
+) -> LRESULT {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(result) => result,
         Err(payload) => {
@@ -788,7 +795,7 @@ fn guarded_proc(name: &str, hwnd: HWND, msg: u32, body: impl FnOnce() -> LRESULT
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "opaque panic payload".into());
             log_line(&format!("panic in {name} proc (msg 0x{msg:04X}): {detail}"));
-            unsafe { DefWindowProcW(hwnd, msg, WPARAM(0), LPARAM(0)) }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
     }
 }
@@ -1007,7 +1014,7 @@ unsafe extern "system" fn panel_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    guarded_proc("panel", hwnd_, msg, move || unsafe {
+    guarded_proc("panel", hwnd_, msg, wparam, lparam, move || unsafe {
         match msg {
             WM_CLOSE => {
                 let _ = ShowWindow(hwnd_, SW_HIDE);
@@ -1123,7 +1130,7 @@ unsafe extern "system" fn warning_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    guarded_proc("warning", hwnd_, msg, move || unsafe {
+    guarded_proc("warning", hwnd_, msg, wparam, lparam, move || unsafe {
         match msg {
             WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_WARN_CANCEL => {
                 cancel_warning("user");
@@ -2591,7 +2598,7 @@ fn warn_dialog(heading: &str, body: &str) {
 /// Serialize application writers; publish config and rules only after saving.
 /// Publish a valid external configuration and apply its UI/platform settings.
 fn hot_reload_config() -> Result<(), String> {
-    let writer = CONFIG_WRITER.lock().unwrap();
+    let writer = lock(&CONFIG_WRITER);
     let config_path = CONFIG_PATH
         .lock()
         .unwrap()
@@ -2611,9 +2618,9 @@ fn hot_reload_config() -> Result<(), String> {
         ));
         return Err(err.clone());
     }
-    *CONFIG.lock().unwrap() = Some(loaded.config.clone());
-    *CONFIG_DOC.lock().unwrap() = Some(loaded.document);
-    *CONFIG_SOURCE.lock().unwrap() = loaded.source_text;
+    *lock(&CONFIG) = Some(loaded.config.clone());
+    *lock(&CONFIG_DOC) = Some(loaded.document);
+    *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
     automation::reload_rules();
     drop(writer);
@@ -2639,13 +2646,13 @@ fn hot_reload_config() -> Result<(), String> {
 /// Poll exact file contents so atomic replacements and edits with preserved
 /// timestamps are detected; our own saved document is skipped automatically.
 fn spawn_config_watcher() {
-    let Some(path) = CONFIG_PATH.lock().unwrap().clone() else {
+    let Some(path) = lock(&CONFIG_PATH).clone() else {
         return;
     };
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || {
-            let mut observed = CONFIG_SOURCE.lock().unwrap().clone();
+            let mut observed = lock(&CONFIG_SOURCE).clone();
             while !EXITING.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(3));
                 let Ok(text) = std::fs::read_to_string(&path) else {
@@ -2654,7 +2661,7 @@ fn spawn_config_watcher() {
                 if observed.as_ref() == Some(&text) {
                     continue;
                 }
-                if CONFIG_SOURCE.lock().unwrap().as_ref() != Some(&text) {
+                if lock(&CONFIG_SOURCE).as_ref() != Some(&text) {
                     let posted = unsafe {
                         PostMessageW(
                             Some(hwnd(&HIDDEN)),
@@ -3301,6 +3308,22 @@ pub fn make_font_pub(size_px: i32, weight: i32) -> windows::Win32::Graphics::Gdi
 
 pub fn set_control_font_pub(control: HWND, font: windows::Win32::Graphics::Gdi::HFONT) -> bool {
     set_control_font(control, font)
+}
+
+#[cfg(test)]
+#[test]
+fn guarded_proc_catches_panics_and_degrades_to_default() {
+    let result = guarded_proc(
+        "test",
+        HWND(std::ptr::null_mut()),
+        0x0010,
+        WPARAM(1),
+        LPARAM(2),
+        || panic!("boom"),
+    );
+    // DefWindowProcW on a null HWND returns 0; reaching here at all proves
+    // the panic was caught instead of aborting the process.
+    assert_eq!(result.0, 0);
 }
 
 #[cfg(test)]
