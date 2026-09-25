@@ -22,6 +22,7 @@ static OVERRIDES: Mutex<auto::EffectiveState> = Mutex::new(auto::EffectiveState 
     enable_idle: false,
     idle_minutes: auto::DEFAULT_IDLE_MINUTES,
     pause_idle: false,
+    stay_awake_sources: Vec::new(),
 });
 static ACTIVE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 

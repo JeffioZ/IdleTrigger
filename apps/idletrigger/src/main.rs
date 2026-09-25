@@ -2821,7 +2821,26 @@ pub(crate) fn effective_power_state() -> EffectivePowerState {
 fn power_status() -> (String, String) {
     let power = effective_power_state();
     let idle_action = cfg_map(|c| c.idle_action.clone());
-    let awake_status = t(if !power.requested {
+    // Reason attribution: which task and/or the timed overlay is keeping the
+    // machine awake. Shown only while actually awake.
+    let mut reasons: Vec<String> = Vec::new();
+    let sources = automation::overrides().stay_awake_sources;
+    if !sources.is_empty() {
+        let separator = if i18n_is_chinese() { "、" } else { ", " };
+        reasons.push(t_args("status_reason_task", &[&sources.join(separator)]));
+    }
+    if let Some((remaining, _)) = timed_nosleep_state() {
+        reasons.push(t_args(
+            "status_reason_timed",
+            &[&format_remaining(remaining)],
+        ));
+    }
+    let reason_suffix = if power.awake && !reasons.is_empty() {
+        t_args("status_reason_suffix", &[&reasons.join("+")])
+    } else {
+        String::new()
+    };
+    let mut awake_status = t(if !power.requested {
         "status_disabled"
     } else if power.paused {
         "status_paused_by_automation"
@@ -2832,6 +2851,7 @@ fn power_status() -> (String, String) {
     } else {
         "status_enabled"
     });
+    awake_status.push_str(&reason_suffix);
     let idle_status = if !power.idle_requested {
         t("status_disabled")
     } else if power.awake {

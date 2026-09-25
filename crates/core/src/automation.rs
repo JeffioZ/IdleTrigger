@@ -50,6 +50,8 @@ pub struct EffectiveState {
     pub enable_idle: bool,
     pub pause_idle: bool,
     pub idle_minutes: i32,
+    /// Rule names requesting Stay Awake, for the panel's reason display.
+    pub stay_awake_sources: Vec<String>,
 }
 
 impl Default for EffectiveState {
@@ -61,6 +63,7 @@ impl Default for EffectiveState {
             enable_idle: false,
             pause_idle: false,
             idle_minutes: DEFAULT_IDLE_MINUTES,
+            stay_awake_sources: Vec::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ pub fn aggregate_state<'a>(rules: impl IntoIterator<Item = &'a Rule>) -> Effecti
             ACTION_STAY_AWAKE => {
                 result.stay_awake = true;
                 result.keep_screen_on |= rule.keep_screen_on;
+                result.stay_awake_sources.push(rule.name.clone());
             }
             ACTION_PAUSE_STAY_AWAKE => result.pause_stay_awake = true,
             ACTION_ENABLE_IDLE => {
@@ -750,6 +754,18 @@ mod tests {
         a.enabled = false;
         assert_eq!(aggregate_state([&a]), EffectiveState::default());
         assert_eq!(aggregate_state([]), EffectiveState::default());
+    }
+
+    #[test]
+    fn stay_awake_rules_report_their_names_for_reason_display() {
+        let mut a = rule("a", ACTION_STAY_AWAKE, TRIGGER_PROCESS_RUNNING);
+        a.name = "下载保持唤醒".into();
+        let b = rule("b", ACTION_SLEEP, TRIGGER_DAILY);
+        let state = aggregate_state([&a, &b]);
+        assert_eq!(state.stay_awake_sources, vec!["下载保持唤醒".to_string()]);
+        // Disabled rules contribute neither state nor attribution.
+        a.enabled = false;
+        assert!(aggregate_state([&a]).stay_awake_sources.is_empty());
     }
 
     #[test]
