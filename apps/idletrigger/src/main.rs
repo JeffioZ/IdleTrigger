@@ -37,7 +37,7 @@ use windows::Win32::UI::Controls::{
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW,
@@ -253,9 +253,11 @@ static BTN_NOSLEEP_TIMED_CANCEL: AtomicIsize = AtomicIsize::new(0);
 static BTN_THEME_SNOOZE_CANCEL: AtomicIsize = AtomicIsize::new(0);
 /// Workstation lock state (this session), kept current by WTS events.
 static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
-/// Which panel chip armed the timed overlay / snooze (control id, 0 = none
-/// or armed from the CLI). Drives the accent outline on the armed chip.
-static ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
+/// Which panel chip armed each preset row (control id, 0 = none or armed
+/// from the CLI). The two rows are independent features, so each tracks its
+/// own armed chip; within a row the latest click replaces the previous one.
+static TIMED_ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
+static SNOOZE_ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
 
 fn is_chip_id(id: usize) -> bool {
     matches!(
@@ -271,9 +273,17 @@ fn is_chip_id(id: usize) -> bool {
     )
 }
 
-/// The chip id whose preset is currently armed (0 when none is).
-fn armed_chip_id() -> usize {
-    ARMED_CHIP.load(Ordering::SeqCst)
+/// Whether this chip's preset is the armed one in its row.
+fn chip_armed(id: usize) -> bool {
+    match id {
+        IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H => {
+            TIMED_ARMED_CHIP.load(Ordering::SeqCst) == id
+        }
+        IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING => {
+            SNOOZE_ARMED_CHIP.load(Ordering::SeqCst) == id
+        }
+        _ => false,
+    }
 }
 
 /// Timed stay-awake override: a runtime-only overlay source above the saved
@@ -968,7 +978,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
         } else if is_chip_id(id) {
             let mut state = nativeform::control_state(item.control, item.state);
             // The armed preset keeps an accent outline until it expires.
-            state.active = armed_chip_id() == id;
+            state.active = chip_armed(id);
             paint::draw_chip(
                 dc,
                 bounds,
@@ -1152,7 +1162,7 @@ unsafe extern "system" fn panel_proc(
                         _ => 2 * 60 * 60,
                     };
                     set_timed_nosleep(seconds, false);
-                    ARMED_CHIP.store(code, Ordering::SeqCst);
+                    TIMED_ARMED_CHIP.store(code, Ordering::SeqCst);
                 } else if code == IDC_NOSLEEP_TIMED_CANCEL {
                     clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
@@ -1176,7 +1186,7 @@ unsafe extern "system" fn panel_proc(
                         IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
                         _ => theme_engine::snooze_until_morning(),
                     }
-                    ARMED_CHIP.store(code, Ordering::SeqCst);
+                    SNOOZE_ARMED_CHIP.store(code, Ordering::SeqCst);
                     refresh_status();
                 } else if code == IDC_THEME_SNOOZE_CANCEL {
                     theme_engine::snooze_cancel();
@@ -3040,25 +3050,21 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
-    // Cancel chips are only meaningful while their runtime state is armed;
+    // Cancel chips are only visible while their row has something armed;
     // expired presets also drop their chip accent outline.
     let timed_armed = timed_nosleep_state().is_some();
     let snooze_armed = theme_engine::snooze_deadline().is_some();
-    let armed = ARMED_CHIP.load(Ordering::SeqCst);
-    if (matches!(
-        armed,
-        IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
-    ) && !timed_armed)
-        || (matches!(
-            armed,
-            IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
-        ) && !snooze_armed)
-    {
-        ARMED_CHIP.store(0, Ordering::SeqCst);
+    if !timed_armed {
+        TIMED_ARMED_CHIP.store(0, Ordering::SeqCst);
+    }
+    if !snooze_armed {
+        SNOOZE_ARMED_CHIP.store(0, Ordering::SeqCst);
     }
     unsafe {
-        let _ = EnableWindow(hwnd(&BTN_NOSLEEP_TIMED_CANCEL), timed_armed);
-        let _ = EnableWindow(hwnd(&BTN_THEME_SNOOZE_CANCEL), snooze_armed);
+        let show = if timed_armed { SW_SHOW } else { SW_HIDE };
+        let _ = ShowWindow(hwnd(&BTN_NOSLEEP_TIMED_CANCEL), show);
+        let show = if snooze_armed { SW_SHOW } else { SW_HIDE };
+        let _ = ShowWindow(hwnd(&BTN_THEME_SNOOZE_CANCEL), show);
     }
     let (nosleep_status, idle_status) = power_status();
     let overview = format!(
