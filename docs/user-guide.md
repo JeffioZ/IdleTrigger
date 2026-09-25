@@ -13,20 +13,22 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 ## Power management / 电源管理
 
 - **Stay Awake** prevents automatic system sleep. Display-on is a separate option. Battery restrictions pause the effective state without changing your saved switch.
+- **Timed Stay Awake** chips arm a temporary overlay for 30 minutes, 1 hour, or 2 hours without touching the saved switch; it expires automatically, a restart clears it, and any request that turns Stay Awake off drops it. The panel status line and tray tooltip show what is keeping the machine awake — which task rule, or the timed overlay with its remaining time.
 - **Idle Monitoring** uses Windows keyboard/mouse inactivity and starts a fresh countdown when enabled. Input, cancellation, or a changed action invalidates an existing warning. The warning countdown runs at least 10 seconds and can always cancel the action.
 - Stay Awake takes precedence when both features are requested. The panel shows the effective state after task overrides and pauses.
 - Enhanced monitoring is optional, for periodic resets of the Windows idle counter; ordinary input still resets the timer.
 
 - **保持唤醒**阻止系统自动睡眠；屏幕常亮是单独选项。电池限制暂停实际状态，不改写已保存开关。
+- **限时保持唤醒**通过面板档位临时保持 30 分钟、1 小时或 2 小时，不改写已保存开关；到期自动恢复，重启后消失，任何关闭保持唤醒的请求都会同时取消限时。面板状态行与托盘 tooltip 会说明当前是谁在阻止睡眠——任务规则，或限时及其剩余时间。
 - **空闲监测**读取 Windows 键鼠空闲状态，启用时重新计时。输入、取消或修改动作会使已有提醒失效；提醒倒计时最少 10 秒，且始终可取消本次动作。
 - 两项功能同时收到启用请求时，保持唤醒优先。面板显示合并任务覆盖和暂停条件后的状态。
 - 增强监测用于空闲计数被周期性重置的情况，默认关闭；普通输入仍重置计时。
 
 ## Automatic tasks / 自动任务
 
-Use **Manage Tasks → New**, then choose an action and its trigger. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions with a cancellable countdown of at least 10 seconds. Disabling or changing a rule cancels an outdated pending action.
+Use **Manage Tasks → New**, which opens a template menu: keep awake while a process runs, a nightly shutdown, stay awake during work hours, or a blank rule. Templates only prefill the editor — every field stays editable. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions (lock, sleep, hibernate, shutdown, restart, turn off display, log off) with a cancellable countdown of at least 10 seconds. Disabling or changing a rule cancels an outdated pending action.
 
-在“管理任务 → 新建”中选择操作及触发条件。状态任务临时请求保持唤醒或空闲监测；事件任务只提供内置 Windows 操作，包含至少 10 秒的可取消倒计时。禁用或修改规则会取消已经失效的待执行动作。
+在“管理任务 → 新建”中先从模板菜单选择：进程运行时保持唤醒、每天定时关机、工作时段保持唤醒，或空白规则。模板只负责预填编辑器——所有字段仍可修改。状态任务临时请求保持唤醒或空闲监测；事件任务提供内置 Windows 操作（锁定、睡眠、休眠、关机、重启、关闭显示器、注销），包含至少 10 秒的可取消倒计时。禁用或修改规则会取消已经失效的待执行动作。
 
 Process-name targets match all instances of that name; Browse selects an exact EXE path. The picker reads names, counts, and file descriptions. It does not launch files, save PIDs, or inspect process memory. Search and sorting preserve checked targets, including those hidden by the filter.
 
@@ -46,9 +48,9 @@ Theme scheduling supports fixed times and sunrise/sunset. Optional IP lookup use
 
 昼夜主题支持固定时间和日出日落。可选 IP 定位使用 `ipwho.is`，成功结果在内存缓存 24 小时，失败后 30 分钟再试；依次使用 Windows 时区、UTC 偏移、默认位置兜底。极昼极夜使用配置中的固定时间。
 
-Fullscreen/presentation and foreground game activity can pause automatic switching. Battery dark mode can override the schedule. A manual switch lasts until the next scheduled transition. Theme repair is available on demand and reports failures. Automatic switching also coalesces display/resume events, waits for a stable display configuration, and limits repeated repairs. Lock-key notices can be enabled independently and hidden during fullscreen use.
+Fullscreen/presentation and foreground game activity can pause automatic switching. Battery dark mode can override the schedule. A manual switch lasts until the next scheduled transition, and the panel's snooze chips postpone the next scheduled switch by 30 minutes, 1 hour, or until the next light boundary — the schedule line shows the deadline and a cancel chip clears it. Win+Shift+D performs a manual switch when global hotkeys are enabled. Theme repair is available on demand and reports failures. Automatic switching also coalesces display/resume events, waits for a stable display configuration, and limits repeated repairs. Lock-key notices can be enabled independently and hidden during fullscreen use.
 
-全屏、演示和前台游戏活动可暂停自动切换。电池深色选项可覆盖计划，手动切换保留至下一次计划转换。可手动运行主题修复并查看失败提示；自动切换也会合并显示器和恢复事件，等待显示配置稳定，并限制重复修复。锁定键提示可单独启用，并在全屏时隐藏。
+全屏、演示和前台游戏活动可暂停自动切换。电池深色选项可覆盖计划。手动切换保留至下一次计划转换；面板上的推迟档位可将下一次计划切换延后 30 分钟、1 小时或直至下一次浅色边界——调度行显示截止时间，取消档位可立即恢复。启用全局热键时，Win+Shift+D 可手动切换昼夜。可手动运行主题修复并查看失败提示；自动切换也会合并显示器和恢复事件，等待显示配置稳定，并限制重复修复。锁定键提示可单独启用，并在全屏时隐藏。
 
 ## Files and saves / 文件与保存
 
@@ -74,11 +76,12 @@ Run from a terminal; `help` lists options. Tray-state commands require a running
 | --- | --- |
 | `help`, `version` | Usage and version / 用法与版本 |
 | `status` | Effective status / 实际状态 |
-| `nosleep on\|off\|toggle\|status` | Stay Awake; `--screen` also requests display-on / 保持唤醒，`--screen` 同时请求屏幕常亮 |
+| `nosleep on\|off\|toggle\|status` | Stay Awake; `--screen` also requests display-on; `on --for <n>[m\|h\|s]` keeps awake for a limited time (bare numbers are minutes) and expires automatically / 保持唤醒，`--screen` 同时请求屏幕常亮；`on --for <n>[m\|h\|s]` 限时保持（不带单位按分钟），到期自动恢复 |
 | `monitor on\|off\|toggle\|status` | Idle Monitoring / 空闲监测 |
 | `config:reload` | Reload settings / 重载配置 |
 | `autostart enable\|disable\|status` | Login startup / 登录自启动 |
-| `lock`, `sleep`, `hibernate`, `shutdown`, `restart` | Direct Windows action / 直接执行系统操作 |
+| `lock`, `sleep`, `hibernate`, `shutdown`, `restart`, `logoff` | Direct Windows action / 直接执行系统操作 |
+| `screen off` | Turn off the display / 关闭显示器 |
 
 For reports, include Windows/app versions, language, display scaling, reproduction steps, and relevant screenshots. Review logs and configuration for private paths before sharing.
 
