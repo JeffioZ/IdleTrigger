@@ -50,7 +50,7 @@ theme_dark_on_battery = true
 theme_skip_fullscreen = true
 
 # -- 设置 / Settings --
-# 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake
+# 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒，Win+Shift+D 切换昼夜 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake, Win+Shift+D switch day/night
 hotkeys_enabled = false
 # 锁定键状态变化时显示短暂提示 / Briefly show Caps Lock, Num Lock and Scroll Lock state changes
 lock_keys_enabled = false

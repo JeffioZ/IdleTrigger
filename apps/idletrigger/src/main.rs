@@ -790,6 +790,10 @@ unsafe extern "system" fn hidden_proc(
                         log_line("hotkey: toggle stay awake");
                         on_toggle(IDC_NOSLEEP);
                     }
+                    13 => {
+                        log_line("hotkey: manual theme switch");
+                        theme_engine::manual_switch();
+                    }
                     _ => {}
                 }
                 LRESULT(0)

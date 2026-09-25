@@ -1,18 +1,18 @@
 //! Global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock,
-//! Win+Shift+N toggle Stay Awake.
+//! Win+Shift+N toggle Stay Awake, Win+Shift+D manual day/night switch.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
 
-pub const HOTKEY_IDS: [u32; 3] = [10, 11, 12];
+pub const HOTKEY_IDS: [u32; 4] = [10, 11, 12, 13];
 
 struct Binding {
     vk: u16,
     modifiers: u32,
 }
 
-fn bindings() -> [Binding; 3] {
+fn bindings() -> [Binding; 4] {
     [
         Binding {
             vk: b'S' as u16,
@@ -24,6 +24,10 @@ fn bindings() -> [Binding; 3] {
         },
         Binding {
             vk: b'N' as u16,
+            modifiers: MOD_WIN.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0,
+        },
+        Binding {
+            vk: b'D' as u16,
             modifiers: MOD_WIN.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0,
         },
     ]
@@ -42,7 +46,14 @@ pub fn register_all() -> Vec<&'static str> {
             )
             .is_ok();
             if !ok {
-                failed.push(["Ctrl+Win+Shift+S", "Win+Shift+L", "Win+Shift+N"][index]);
+                failed.push(
+                    [
+                        "Ctrl+Win+Shift+S",
+                        "Win+Shift+L",
+                        "Win+Shift+N",
+                        "Win+Shift+D",
+                    ][index],
+                );
             }
         }
     }

@@ -114,7 +114,7 @@
   "tip_battery_theme": "Use dark mode on battery; restore the schedule on AC power",
   "tip_theme_switch": "Switch between Windows light and dark themes; when auto switching is enabled, keep this choice until the next scheduled transition",
   "tip_theme_repair": "Repair the current theme when some windows or displays did not update; this does not change light/dark mode or the schedule",
-  "tip_hotkeys": "Ctrl+Win+Shift+S sleep; Win+Shift+L lock; Win+Shift+N toggles Stay Awake",
+  "tip_hotkeys": "Ctrl+Win+Shift+S sleep; Win+Shift+L lock; Win+Shift+N toggles Stay Awake; Win+Shift+D switches day/night",
   "tip_autostart": "Start in the tray after Windows sign-in; repair the path automatically",
   "tip_logging": "Write diagnostics to IdleTrigger.log. Keep this off normally",
   "tip_language": "Apply the selected language when you save settings",

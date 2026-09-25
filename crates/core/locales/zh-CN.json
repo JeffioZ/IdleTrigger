@@ -114,7 +114,7 @@
   "tip_battery_theme": "电池供电时切换深色；接入电源后按计划恢复",
   "tip_theme_switch": "在 Windows 浅色与深色主题间切换；启用自动切换时，本次选择保持到下个计划时间",
   "tip_theme_repair": "部分窗口或显示器未正确更新时修复当前主题；不会改变深浅色或切换计划",
-  "tip_hotkeys": "Ctrl+Win+Shift+S 睡眠；Win+Shift+L 锁定；Win+Shift+N 切换保持唤醒",
+  "tip_hotkeys": "Ctrl+Win+Shift+S 睡眠；Win+Shift+L 锁定；Win+Shift+N 切换保持唤醒；Win+Shift+D 切换昼夜",
   "tip_autostart": "登录 Windows 后启动到托盘，并自动修正路径",
   "tip_logging": "写入 IdleTrigger.log 供排查使用；平时建议关闭",
   "tip_language": "保存设置后应用所选语言",
