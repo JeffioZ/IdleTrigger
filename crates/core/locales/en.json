@@ -31,7 +31,7 @@
   "menu_theme_snooze_30m": "Snooze 30m",
   "menu_theme_snooze_1h": "Snooze 1 h",
   "menu_theme_snooze_morning": "Until morning",
-  "menu_theme_snooze_cancel": "Cancel snooze",
+  "menu_theme_snooze_cancel": "Cancel",
   "theme_schedule_snoozed": "snoozed until %s",
   "automation_template_blank": "Blank rule",
   "automation_template_process_awake": "Keep awake while a process runs",

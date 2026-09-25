@@ -112,9 +112,9 @@ fn panel_font_subtitle() -> HFONT {
 // Layout tokens, identical to the Go control panel (96-DPI logical pixels):
 // visual style may differ between toolkits, geometry must not.
 const PANEL_CLIENT_WIDTH: i32 = 486;
-// pad18 + (22+2 + 36+2 + 18 + 14) ×3 sections … exact Go flow ends at 344
-// including the theme schedule subtitle.
-const PANEL_CLIENT_HEIGHT: i32 = 344;
+// pad18 + (22+2 + 36+2 + 28+2 + 18 + 14) ×3 sections … exact flow ends at
+// 404 including the theme schedule subtitle and the two compact chip rows.
+const PANEL_CLIENT_HEIGHT: i32 = 404;
 const PAD: i32 = 18;
 const GAP: i32 = 8;
 const SECTION_GAP: i32 = 14;
@@ -122,6 +122,9 @@ const LABEL_GAP: i32 = 2;
 const SECTION_H: i32 = 22;
 const SUBTITLE_H: i32 = 18;
 const BUTTON_H: i32 = 36;
+/// Preset chips are secondary shortcuts: shorter than real buttons so they
+/// read as a quiet toolbar strip under their section row.
+const CHIP_H: i32 = 28;
 
 // Internal window messages (WM_APP range).
 const WM_IDLE_WARN: u32 = 0x8002;
@@ -1475,33 +1478,38 @@ fn create_windows() {
         CHK_IDLE.store(chk_idle.0 as isize, Ordering::SeqCst);
         y += BUTTON_H + LABEL_GAP;
         // Timed stay-awake preset chips: one click arms the runtime overlay
-        // (set_timed_nosleep) without touching the saved switches.
+        // (set_timed_nosleep) without touching the saved switches. Sized to
+        // their labels and left-aligned so the strip reads as a quiet
+        // toolbar, not a row of primary actions.
         let timed_buttons = [
             (IDC_NOSLEEP_TIMED_30M, "menu_nosleep_timed_30m"),
             (IDC_NOSLEEP_TIMED_1H, "menu_nosleep_timed_1h"),
             (IDC_NOSLEEP_TIMED_2H, "menu_nosleep_timed_2h"),
             (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
         ];
-        let timed_w = (row_width - 3 * GAP) / 4;
-        for (index, (id, key)) in timed_buttons.iter().enumerate() {
+        let mut chip_x = PAD;
+        for (id, key) in timed_buttons {
+            let label = t(key);
+            let width = chip_width(panel, font, &label);
             let button = owner_button(
                 &ControlSpec {
                     parent: panel,
-                    label: t(key),
-                    x: scale(PAD + index as i32 * (timed_w + GAP)),
+                    label,
+                    x: scale(chip_x),
                     y: scale(y),
-                    width: scale(timed_w),
-                    id: *id,
+                    width: scale(width),
+                    id,
                     instance,
                     font,
                 },
-                scale(BUTTON_H),
+                scale(CHIP_H),
             );
-            if *id == IDC_NOSLEEP_TIMED_CANCEL {
+            if id == IDC_NOSLEEP_TIMED_CANCEL {
                 BTN_NOSLEEP_TIMED_CANCEL.store(button.0 as isize, Ordering::SeqCst);
             }
+            chip_x += width + GAP;
         }
-        y += BUTTON_H + LABEL_GAP;
+        y += CHIP_H + LABEL_GAP;
         let power_summary = owner_static(
             &ControlSpec {
                 parent: panel,
@@ -1650,33 +1658,37 @@ fn create_windows() {
         let theme_repair_label = t("menu_theme_repair");
         set_control_text(theme_repair_btn, &theme_repair_label);
         y += BUTTON_H + LABEL_GAP;
-        // Snooze chips: postpone the next scheduled switch (runtime-only).
+        // Snooze chips: postpone the next scheduled switch (runtime-only),
+        // same quiet toolbar treatment as the timed row.
         let snooze_buttons = [
             (IDC_THEME_SNOOZE_30M, "menu_theme_snooze_30m"),
             (IDC_THEME_SNOOZE_1H, "menu_theme_snooze_1h"),
             (IDC_THEME_SNOOZE_MORNING, "menu_theme_snooze_morning"),
             (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
         ];
-        let snooze_w = (row_width - 3 * GAP) / 4;
-        for (index, (id, key)) in snooze_buttons.iter().enumerate() {
+        let mut chip_x = PAD;
+        for (id, key) in snooze_buttons {
+            let label = t(key);
+            let width = chip_width(panel, font, &label);
             let button = owner_button(
                 &ControlSpec {
                     parent: panel,
-                    label: t(key),
-                    x: scale(PAD + index as i32 * (snooze_w + GAP)),
+                    label,
+                    x: scale(chip_x),
                     y: scale(y),
-                    width: scale(snooze_w),
-                    id: *id,
+                    width: scale(width),
+                    id,
                     instance,
                     font,
                 },
-                scale(BUTTON_H),
+                scale(CHIP_H),
             );
-            if *id == IDC_THEME_SNOOZE_CANCEL {
+            if id == IDC_THEME_SNOOZE_CANCEL {
                 BTN_THEME_SNOOZE_CANCEL.store(button.0 as isize, Ordering::SeqCst);
             }
+            chip_x += width + GAP;
         }
-        y += BUTTON_H + LABEL_GAP;
+        y += CHIP_H + LABEL_GAP;
         // Schedule subtitle under the theme row (Go p.themeSchedule).
         let theme_schedule = owner_static(
             &ControlSpec {
@@ -2089,7 +2101,9 @@ fn checkbox(spec: &ControlSpec) -> HWND {
 
 /// Logical width that tightly contains the checkbox glyph + label + focus
 /// inset (Go CheckboxHitWidth), so toggle hit areas match what is drawn.
-fn checkbox_hit_width(parent: HWND, font: HFONT, label: &str) -> i32 {
+/// Logical pixel width of a single-line label at the given font (Go
+/// GetTextExtent-based measuring shared by the hit-width helpers).
+fn measured_text_width(parent: HWND, font: HFONT, label: &str) -> i32 {
     unsafe {
         let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(parent));
         if hdc.is_invalid() {
@@ -2115,10 +2129,19 @@ fn checkbox_hit_width(parent: HWND, font: HFONT, label: &str) -> i32 {
             return 0;
         }
         let dpi = scale(96).max(96);
-        let logical = (bounds.right - bounds.left) * 96 / dpi;
-        // 2 before the glyph, 16 glyph, 8 before label, 2 focus inset.
-        2 + 16 + 8 + logical + 2
+        (bounds.right - bounds.left) * 96 / dpi
     }
+}
+
+fn checkbox_hit_width(parent: HWND, font: HFONT, label: &str) -> i32 {
+    // 2 before the glyph, 16 glyph, 8 before label, 2 focus inset.
+    measured_text_width(parent, font, label) + 2 + 16 + 8 + 2
+}
+
+/// Width that fits a chip label inside draw_button's 10px side insets, with
+/// a floor so tiny labels still read as clickable.
+fn chip_width(parent: HWND, font: HFONT, label: &str) -> i32 {
+    (measured_text_width(parent, font, label) + 20).max(60)
 }
 
 fn static_text(spec: &ControlSpec) -> HWND {
