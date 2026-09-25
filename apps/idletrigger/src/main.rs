@@ -9,7 +9,9 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicUsize, Ordering,
+};
 use std::time::Duration;
 
 use idletrigger_core::config;
@@ -251,6 +253,28 @@ static BTN_NOSLEEP_TIMED_CANCEL: AtomicIsize = AtomicIsize::new(0);
 static BTN_THEME_SNOOZE_CANCEL: AtomicIsize = AtomicIsize::new(0);
 /// Workstation lock state (this session), kept current by WTS events.
 static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
+/// Which panel chip armed the timed overlay / snooze (control id, 0 = none
+/// or armed from the CLI). Drives the accent outline on the armed chip.
+static ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
+
+fn is_chip_id(id: usize) -> bool {
+    matches!(
+        id,
+        IDC_NOSLEEP_TIMED_30M
+            | IDC_NOSLEEP_TIMED_1H
+            | IDC_NOSLEEP_TIMED_2H
+            | IDC_NOSLEEP_TIMED_CANCEL
+            | IDC_THEME_SNOOZE_30M
+            | IDC_THEME_SNOOZE_1H
+            | IDC_THEME_SNOOZE_MORNING
+            | IDC_THEME_SNOOZE_CANCEL
+    )
+}
+
+/// The chip id whose preset is currently armed (0 when none is).
+fn armed_chip_id() -> usize {
+    ARMED_CHIP.load(Ordering::SeqCst)
+}
 
 /// Timed stay-awake override: a runtime-only overlay source above the saved
 /// switch. Expiry rides a one-shot timer on the hidden window; restarts drop
@@ -941,6 +965,20 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             );
         } else if id == IDC_EXIT_BUTTON {
             draw_exit_button(item, dc, bounds, &label, p, scale);
+        } else if is_chip_id(id) {
+            let mut state = nativeform::control_state(item.control, item.state);
+            // The armed preset keeps an accent outline until it expires.
+            state.active = armed_chip_id() == id;
+            paint::draw_chip(
+                dc,
+                bounds,
+                panel_font_body(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                paint::control_radius(),
+            );
         } else {
             let state = nativeform::control_state(item.control, item.state);
             paint::draw_button(
@@ -1114,6 +1152,7 @@ unsafe extern "system" fn panel_proc(
                         _ => 2 * 60 * 60,
                     };
                     set_timed_nosleep(seconds, false);
+                    ARMED_CHIP.store(code, Ordering::SeqCst);
                 } else if code == IDC_NOSLEEP_TIMED_CANCEL {
                     clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
@@ -1137,6 +1176,7 @@ unsafe extern "system" fn panel_proc(
                         IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
                         _ => theme_engine::snooze_until_morning(),
                     }
+                    ARMED_CHIP.store(code, Ordering::SeqCst);
                     refresh_status();
                 } else if code == IDC_THEME_SNOOZE_CANCEL {
                     theme_engine::snooze_cancel();
@@ -2357,9 +2397,21 @@ fn build_tray_tooltip(
         format!("IdleTrigger v{APP_VERSION}")
     }];
 
-    // Stay awake: effective state, paused wording under battery block.
+    // Stay awake: effective state, paused wording under battery block. When
+    // the saved switch is off and only the timed overlay is awake, the line
+    // says so directly.
+    let manual_on = cfg_map(|c| c.nosleep_enabled);
+    let task_awake = !automation::overrides().stay_awake_sources.is_empty();
+    let timed = timed_nosleep_state();
     let stay_awake = if effective_nosleep {
-        t("status_short_on")
+        if !manual_on
+            && !task_awake
+            && let Some((remaining, _)) = timed
+        {
+            t_args("status_short_timed", &[&format_remaining(remaining)])
+        } else {
+            t("status_short_on")
+        }
     } else if power.requested && !power.awake {
         t("status_paused")
     } else {
@@ -2367,8 +2419,12 @@ fn build_tray_tooltip(
     };
     lines.push(line("tooltip_nosleep", stay_awake));
 
-    // Timed override: a distinct line while it is the active overlay source.
-    if let Some((remaining, _)) = timed_nosleep_state() {
+    // Timed override: a distinct line only when the first line doesn't
+    // already carry it (manual switch or a task is the primary source).
+    if effective_nosleep
+        && (manual_on || task_awake)
+        && let Some((remaining, _)) = timed
+    {
         lines.push(line("tooltip_nosleep_timed", format_remaining(remaining)));
     }
 
@@ -2943,25 +2999,28 @@ fn power_status() -> (String, String) {
             &[&format_remaining(remaining)],
         ));
     }
-    let reason_suffix = if power.awake && !reasons.is_empty() {
-        t_args("status_reason_suffix", &[&reasons.join("+")])
-    } else {
-        String::new()
-    };
-    let mut awake_status = t(if !power.requested {
-        "status_disabled"
+    let manual_on = cfg_map(|c| c.nosleep_enabled);
+    // When the saved switch is off, the machine is kept awake purely by task
+    // rules and/or the timed overlay — say so directly instead of claiming
+    // the switch is "enabled".
+    let mut awake_status = if !power.requested {
+        t("status_disabled")
     } else if power.paused {
-        "status_paused_by_automation"
+        t("status_paused_by_automation")
     } else if power.lock_paused {
-        "status_paused_by_lock"
+        t("status_paused_by_lock")
     } else if !power.battery_allowed {
-        "status_paused_by_battery"
+        t("status_paused_by_battery")
+    } else if !manual_on && !reasons.is_empty() {
+        t_args("status_awake_overrides", &[&reasons.join("+")])
     } else if power.keep_screen {
-        "status_enabled_keep_screen"
+        t("status_enabled_keep_screen")
     } else {
-        "status_enabled"
-    });
-    awake_status.push_str(&reason_suffix);
+        t("status_enabled")
+    };
+    if power.awake && manual_on && !reasons.is_empty() {
+        awake_status.push_str(&t_args("status_reason_suffix", &[&reasons.join("+")]));
+    }
     let idle_status = if !power.idle_requested {
         t("status_disabled")
     } else if power.awake {
@@ -2981,16 +3040,25 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
-    // Cancel chips are only meaningful while their runtime state is armed.
+    // Cancel chips are only meaningful while their runtime state is armed;
+    // expired presets also drop their chip accent outline.
+    let timed_armed = timed_nosleep_state().is_some();
+    let snooze_armed = theme_engine::snooze_deadline().is_some();
+    let armed = ARMED_CHIP.load(Ordering::SeqCst);
+    if (matches!(
+        armed,
+        IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
+    ) && !timed_armed)
+        || (matches!(
+            armed,
+            IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
+        ) && !snooze_armed)
+    {
+        ARMED_CHIP.store(0, Ordering::SeqCst);
+    }
     unsafe {
-        let _ = EnableWindow(
-            hwnd(&BTN_NOSLEEP_TIMED_CANCEL),
-            timed_nosleep_state().is_some(),
-        );
-        let _ = EnableWindow(
-            hwnd(&BTN_THEME_SNOOZE_CANCEL),
-            theme_engine::snooze_deadline().is_some(),
-        );
+        let _ = EnableWindow(hwnd(&BTN_NOSLEEP_TIMED_CANCEL), timed_armed);
+        let _ = EnableWindow(hwnd(&BTN_THEME_SNOOZE_CANCEL), snooze_armed);
     }
     let (nosleep_status, idle_status) = power_status();
     let overview = format!(
@@ -3048,13 +3116,13 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 }
 
 /// Theme schedule subtitle under the theme row (Go formatThemeSchedule,
-/// showSource = true). Fixed mode lists both times; sunrise mode lists the
-/// solved solar times plus the location source.
+/// showSource = true). While a snooze is armed it replaces the whole line so
+/// the postponed state is unmistakable; otherwise the schedule shows with
+/// its location source.
 fn theme_schedule_text() -> String {
-    let base = theme_schedule_summary(false);
     match theme_engine::snooze_deadline_text() {
-        Some(until) => format!("{} · {}", base, t_args("theme_schedule_snoozed", &[&until])),
-        None => base,
+        Some(until) => t_args("theme_schedule_snoozed_line", &[&until]),
+        None => theme_schedule_summary(false),
     }
 }
 

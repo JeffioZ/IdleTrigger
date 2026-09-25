@@ -1519,31 +1519,34 @@ fn save_rules_to_config(base: &[auto::Rule], rules: Vec<auto::Rule>) -> Result<(
 // ---- New-task templates ---------------------------------------------------
 
 /// New-task recipes as prefilled partial rules. Data-driven on purpose: the
-/// planned single-window editor reuses these verbatim.
-const TEMPLATE_KEYS: [&str; 4] = [
-    "automation_template_blank",
+/// planned single-window editor reuses these verbatim. The blank rule stays
+/// last, below a separator, as the escape hatch.
+const TEMPLATE_KEYS: [&str; 5] = [
     "automation_template_process_awake",
     "automation_template_night_shutdown",
     "automation_template_work_awake",
+    "automation_template_low_battery",
+    "automation_template_blank",
 ];
-static PENDING_TEMPLATE: Mutex<usize> = Mutex::new(0);
+const TEMPLATE_BLANK: usize = 4;
+static PENDING_TEMPLATE: Mutex<usize> = Mutex::new(TEMPLATE_BLANK);
 
 fn template_rule(index: usize) -> auto::Rule {
     let mut rule = default_rule();
     match index {
-        1 => {
+        0 => {
             rule.name = t_pub("automation_template_process_awake");
             rule.action = auto::ACTION_STAY_AWAKE.into();
             rule.trigger = auto::TRIGGER_PROCESS_RUNNING.into();
         }
-        2 => {
+        1 => {
             rule.name = t_pub("automation_template_night_shutdown");
             rule.action = auto::ACTION_SHUTDOWN.into();
             rule.trigger = auto::TRIGGER_DAILY.into();
             rule.time = "23:30".into();
             rule.warning_seconds = 60;
         }
-        3 => {
+        2 => {
             rule.name = t_pub("automation_template_work_awake");
             rule.action = auto::ACTION_STAY_AWAKE.into();
             rule.trigger = auto::TRIGGER_TIME_WINDOW.into();
@@ -1553,6 +1556,13 @@ fn template_rule(index: usize) -> auto::Rule {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
+        }
+        3 => {
+            rule.name = t_pub("automation_template_low_battery");
+            rule.action = auto::ACTION_HIBERNATE.into();
+            rule.trigger = auto::TRIGGER_BATTERY_BELOW.into();
+            rule.battery_level = 20;
+            rule.warning_seconds = 60;
         }
         _ => {}
     }
@@ -1565,11 +1575,15 @@ fn show_new_menu(owner: HWND) {
         let menu = CreatePopupMenu().unwrap_or_default();
         if menu.is_invalid() {
             // Fall back to the blank editor if menu creation failed.
+            *crate::runtime::lock(&PENDING_TEMPLATE) = TEMPLATE_BLANK;
             begin_edit(-1, Vec::new());
             show_editor();
             return;
         }
         for (index, key) in TEMPLATE_KEYS.iter().enumerate() {
+            if index == TEMPLATE_BLANK {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
@@ -1593,7 +1607,7 @@ fn show_new_menu(owner: HWND) {
         .0;
         let _ = DestroyMenu(menu);
         if choice > 0 {
-            *crate::runtime::lock(&PENDING_TEMPLATE) = (choice - 1) as usize;
+            *crate::runtime::lock(&PENDING_TEMPLATE) = choice as usize - 1;
             begin_edit(-1, Vec::new());
             show_editor();
         }
@@ -2054,7 +2068,10 @@ fn populate_editor() {
             None
         };
         let rule = rule.unwrap_or_else(|| {
-            let template = std::mem::replace(&mut *crate::runtime::lock(&PENDING_TEMPLATE), 0);
+            let template = std::mem::replace(
+                &mut *crate::runtime::lock(&PENDING_TEMPLATE),
+                TEMPLATE_BLANK,
+            );
             template_rule(template)
         });
         complete_edit(idx, rules, rule.clone());

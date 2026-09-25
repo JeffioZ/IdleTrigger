@@ -544,6 +544,45 @@ pub fn draw_button(
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
 }
 
+/// Ghost chip for secondary quick actions (preset strips): transparent fill,
+/// hairline border, muted text at rest — one step below the primary buttons
+/// in weight at every state, with an accent outline while armed.
+pub fn draw_chip(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    radius: i32,
+) {
+    let (mut fill, mut border, mut text) = (background, p.subtle_border, p.text2);
+    if state.hovered {
+        fill = p.hover_surface;
+        border = p.border;
+        text = p.text;
+    }
+    if state.active {
+        border = p.accent;
+        text = p.accent;
+    }
+    if state.pressed {
+        fill = p.hover_surface;
+        border = p.accent;
+        text = p.text;
+    }
+    if state.disabled {
+        border = background;
+        text = p.disabled_text;
+    }
+    if state.focused && !state.disabled {
+        border = p.focus;
+    }
+    draw_surface(hdc, bounds, background, fill, border, radius);
+    draw_button_label(hdc, bounds, font, label, text, false, 8, 8);
+}
+
 /// Choice (combo) closed state with the drop arrow (Go DrawChoice).
 /// Draws a choice button and its popup-state arrow.
 pub fn draw_choice(
