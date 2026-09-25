@@ -35,7 +35,7 @@ use windows::Win32::UI::Controls::{
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW,
@@ -69,6 +69,10 @@ const IDC_SETTINGS_BUTTON: usize = 148;
 const IDC_THEME_ENABLE: usize = 149;
 const IDC_THEME_SWITCH: usize = 150;
 const IDC_THEME_REPAIR: usize = 151;
+const IDC_NOSLEEP_TIMED_30M: usize = 152;
+const IDC_NOSLEEP_TIMED_1H: usize = 153;
+const IDC_NOSLEEP_TIMED_2H: usize = 154;
+const IDC_NOSLEEP_TIMED_CANCEL: usize = 155;
 const IDC_EXIT_BUTTON: usize = 140;
 const IDC_WARN_TEXT: usize = 130;
 const IDC_WARN_CANCEL: usize = 131;
@@ -235,6 +239,7 @@ static BATTERY_PERCENT: AtomicI32 = AtomicI32::new(100);
 static BATTERY_BLOCKED: AtomicBool = AtomicBool::new(false);
 static NOSLEEP_EXECUTION_ON: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
+static BTN_NOSLEEP_TIMED_CANCEL: AtomicIsize = AtomicIsize::new(0);
 
 /// Timed stay-awake override: a runtime-only overlay source above the saved
 /// switch. Expiry rides a one-shot timer on the hidden window; restarts drop
@@ -1062,6 +1067,18 @@ unsafe extern "system" fn panel_proc(
                     on_toggle(code);
                     // Owner-drawn toggles need a repaint after the state flip.
                     invalidate_control(code);
+                } else if matches!(
+                    code,
+                    IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
+                ) {
+                    let seconds = match code {
+                        IDC_NOSLEEP_TIMED_30M => 30 * 60,
+                        IDC_NOSLEEP_TIMED_1H => 60 * 60,
+                        _ => 2 * 60 * 60,
+                    };
+                    set_timed_nosleep(seconds, false);
+                } else if code == IDC_NOSLEEP_TIMED_CANCEL {
+                    clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
                     automation_ui::show();
                 } else if code == IDC_SETTINGS_BUTTON {
@@ -1402,6 +1419,34 @@ fn create_windows() {
             font,
         });
         CHK_IDLE.store(chk_idle.0 as isize, Ordering::SeqCst);
+        y += BUTTON_H + LABEL_GAP;
+        // Timed stay-awake preset chips: one click arms the runtime overlay
+        // (set_timed_nosleep) without touching the saved switches.
+        let timed_buttons = [
+            (IDC_NOSLEEP_TIMED_30M, "menu_nosleep_timed_30m"),
+            (IDC_NOSLEEP_TIMED_1H, "menu_nosleep_timed_1h"),
+            (IDC_NOSLEEP_TIMED_2H, "menu_nosleep_timed_2h"),
+            (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
+        ];
+        let timed_w = (row_width - 3 * GAP) / 4;
+        for (index, (id, key)) in timed_buttons.iter().enumerate() {
+            let button = owner_button(
+                &ControlSpec {
+                    parent: panel,
+                    label: t(key),
+                    x: scale(PAD + index as i32 * (timed_w + GAP)),
+                    y: scale(y),
+                    width: scale(timed_w),
+                    id: *id,
+                    instance,
+                    font,
+                },
+                scale(BUTTON_H),
+            );
+            if *id == IDC_NOSLEEP_TIMED_CANCEL {
+                BTN_NOSLEEP_TIMED_CANCEL.store(button.0 as isize, Ordering::SeqCst);
+            }
+        }
         y += BUTTON_H + LABEL_GAP;
         let power_summary = owner_static(
             &ControlSpec {
@@ -2806,6 +2851,13 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
+    // The cancel chip is only meaningful while a timed overlay is armed.
+    unsafe {
+        let _ = EnableWindow(
+            hwnd(&BTN_NOSLEEP_TIMED_CANCEL),
+            timed_nosleep_state().is_some(),
+        );
+    }
     let (nosleep_status, idle_status) = power_status();
     let overview = format!(
         "{}{}{}{}",
