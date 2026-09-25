@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use idletrigger_core::automation as auto;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -1191,9 +1191,8 @@ unsafe extern "system" fn mgr_proc(
                     let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
                     match code {
                         MGR_NEW if hi == BN_CLICKED => {
-                            begin_edit(-1, Vec::new());
-                            crate::log_line("automation: new rule editor");
-                            show_editor();
+                            crate::log_line("automation: new rule menu");
+                            show_new_menu(hwnd);
                         }
                         MGR_EDIT if hi == BN_CLICKED => edit_selected(),
                         MGR_DELETE if hi == BN_CLICKED => delete_selected(hwnd),
@@ -1495,6 +1494,90 @@ fn save_rules_to_config(base: &[auto::Rule], rules: Vec<auto::Rule>) -> Result<(
     Ok(())
 }
 // ===== Editor ===============================================================
+
+// ---- New-task templates ---------------------------------------------------
+
+/// New-task recipes as prefilled partial rules. Data-driven on purpose: the
+/// planned single-window editor reuses these verbatim.
+const TEMPLATE_KEYS: [&str; 4] = [
+    "automation_template_blank",
+    "automation_template_process_awake",
+    "automation_template_night_shutdown",
+    "automation_template_work_awake",
+];
+static PENDING_TEMPLATE: Mutex<usize> = Mutex::new(0);
+
+fn template_rule(index: usize) -> auto::Rule {
+    let mut rule = default_rule();
+    match index {
+        1 => {
+            rule.name = t_pub("automation_template_process_awake");
+            rule.action = auto::ACTION_STAY_AWAKE.into();
+            rule.trigger = auto::TRIGGER_PROCESS_RUNNING.into();
+        }
+        2 => {
+            rule.name = t_pub("automation_template_night_shutdown");
+            rule.action = auto::ACTION_SHUTDOWN.into();
+            rule.trigger = auto::TRIGGER_DAILY.into();
+            rule.time = "23:30".into();
+            rule.warning_seconds = 60;
+        }
+        3 => {
+            rule.name = t_pub("automation_template_work_awake");
+            rule.action = auto::ACTION_STAY_AWAKE.into();
+            rule.trigger = auto::TRIGGER_TIME_WINDOW.into();
+            rule.time = "09:00".into();
+            rule.end_time = "18:00".into();
+            rule.days = ["mon", "tue", "wed", "thu", "fri"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        _ => {}
+    }
+    rule
+}
+
+/// The New button opens a themed template menu instead of a blank editor.
+fn show_new_menu(owner: HWND) {
+    unsafe {
+        let menu = CreatePopupMenu().unwrap_or_default();
+        if menu.is_invalid() {
+            // Fall back to the blank editor if menu creation failed.
+            begin_edit(-1, Vec::new());
+            show_editor();
+            return;
+        }
+        for (index, key) in TEMPLATE_KEYS.iter().enumerate() {
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                index + 1,
+                PCWSTR(wide(&t_pub(key)).as_ptr()),
+            );
+        }
+        theme::prepare_popup_menu(owner, theme::is_dark());
+        let mut point = POINT::default();
+        let _ = GetCursorPos(&mut point);
+        // TPM_RETURNCMD: the BOOL payload carries the chosen command id.
+        let choice = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+            point.x,
+            point.y,
+            None,
+            owner,
+            None,
+        )
+        .0;
+        let _ = DestroyMenu(menu);
+        if choice > 0 {
+            *crate::runtime::lock(&PENDING_TEMPLATE) = (choice - 1) as usize;
+            begin_edit(-1, Vec::new());
+            show_editor();
+        }
+    }
+}
 
 fn show_editor() {
     let _dpi = crate::dpi::Scope::window(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _));
@@ -1942,7 +2025,10 @@ fn populate_editor() {
         } else {
             None
         };
-        let rule = rule.unwrap_or_else(default_rule);
+        let rule = rule.unwrap_or_else(|| {
+            let template = std::mem::replace(&mut *crate::runtime::lock(&PENDING_TEMPLATE), 0);
+            template_rule(template)
+        });
         complete_edit(idx, rules, rule.clone());
 
         // Title follows new/edit mode (Go setCaption).
