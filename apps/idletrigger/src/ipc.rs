@@ -242,6 +242,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         // nosleep validates its own flags below (allows --for plus --screen).
         "nosleep" => true,
         "monitor" | "autostart" => rest.len() <= 1,
+        "screen" => rest.len() == 1 && rest[0] == "off",
+        "logoff" => rest.is_empty(),
         _ => rest.is_empty(),
     };
     if !arguments_valid {
@@ -254,6 +256,15 @@ pub fn run_cli(args: &[String]) -> i32 {
         "shutdown" => direct_action("shutdown"),
         "restart" => direct_action("restart"),
         "lock" => direct_action("lock"),
+        "screen" => {
+            if rest.first().map(String::as_str) == Some("off") {
+                direct_action("screen_off")
+            } else {
+                console_println(&crate::t_pub("cli_usage"));
+                1
+            }
+        }
+        "logoff" => direct_action("logoff"),
         "nosleep" => {
             let mode = rest.first().map(String::as_str).unwrap_or("status");
             let mut screen = false;
@@ -408,6 +419,8 @@ fn direct_action(action: &str) -> i32 {
         "shutdown" => Some("msg_shutting_down"),
         "restart" => Some("msg_restarting"),
         "lock" => Some("msg_locking"),
+        "screen_off" => Some("msg_screen_off"),
+        "logoff" => Some("msg_logging_off"),
         _ => None,
     };
     if let Some(key) = progress_key {

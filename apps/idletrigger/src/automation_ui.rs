@@ -471,6 +471,8 @@ fn action_label(value: &str) -> String {
         "hibernate" => "menu_hibernate",
         "shutdown" => "menu_shutdown",
         "restart" => "menu_restart",
+        "screen_off" => "menu_action_screen_off",
+        "logoff" => "menu_action_logoff",
         _ => return value.to_string(),
     };
     t_pub(key)
@@ -520,6 +522,8 @@ fn action_keys() -> Vec<&'static str> {
         "hibernate",
         "shutdown",
         "restart",
+        "screen_off",
+        "logoff",
     ]
 }
 

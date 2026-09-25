@@ -78,7 +78,7 @@ impl Config {
         }
         if !matches!(
             self.idle_action.as_str(),
-            "sleep" | "hibernate" | "shutdown" | "lock" | "restart"
+            "sleep" | "hibernate" | "shutdown" | "lock" | "restart" | "screen_off"
         ) {
             self.idle_action = "lock".into();
         }

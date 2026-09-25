@@ -23,6 +23,8 @@ pub const ACTION_SLEEP: &str = "sleep";
 pub const ACTION_HIBERNATE: &str = "hibernate";
 pub const ACTION_SHUTDOWN: &str = "shutdown";
 pub const ACTION_RESTART: &str = "restart";
+pub const ACTION_SCREEN_OFF: &str = "screen_off";
+pub const ACTION_LOGOFF: &str = "logoff";
 
 pub const TRIGGER_PROCESS_RUNNING: &str = "process_running";
 pub const TRIGGER_PROCESS_STARTED: &str = "process_started";
@@ -201,6 +203,8 @@ pub fn valid_action(action: &str) -> bool {
             | ACTION_HIBERNATE
             | ACTION_SHUTDOWN
             | ACTION_RESTART
+            | ACTION_SCREEN_OFF
+            | ACTION_LOGOFF
     )
 }
 

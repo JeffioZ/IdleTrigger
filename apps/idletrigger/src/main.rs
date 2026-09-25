@@ -25,7 +25,7 @@ use windows::Win32::System::Power::{
     SYSTEM_POWER_STATUS, SetSuspendState, SetThreadExecutionState,
 };
 use windows::Win32::System::Shutdown::{
-    EWX_FORCEIFHUNG, EWX_POWEROFF, EWX_REBOOT, ExitWindowsEx, LockWorkStation,
+    EWX_FORCEIFHUNG, EWX_LOGOFF, EWX_POWEROFF, EWX_REBOOT, ExitWindowsEx, LockWorkStation,
 };
 use windows::Win32::System::StationsAndDesktops::{
     BSF_POSTMESSAGE, BSM_APPLICATIONS, BroadcastSystemMessageW,
@@ -39,12 +39,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW,
-    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
-    SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
+    LoadIconW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+    SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOMOVE,
+    SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -3342,7 +3343,7 @@ pub fn execute_system_action(action: &str) {
 fn try_system_action(action: &str) -> Result<(), String> {
     if !matches!(
         action,
-        "lock" | "sleep" | "hibernate" | "shutdown" | "restart"
+        "lock" | "sleep" | "hibernate" | "shutdown" | "restart" | "screen_off" | "logoff"
     ) {
         return Err(format!("unsupported system action: {action}"));
     }
@@ -3354,6 +3355,27 @@ fn try_system_action(action: &str) -> Result<(), String> {
     unsafe {
         match action {
             "lock" => LockWorkStation().map_err(|error| error.to_string()),
+            "screen_off" => {
+                // Broadcast-only: SC_MONITORPOWER(2) powers the display(s)
+                // down. Any input wakes them again; a hung window must not
+                // stall the request, hence the timeout variant. The call has
+                // no useful failure signal, so it always reports success.
+                SendMessageTimeoutW(
+                    HWND_BROADCAST,
+                    WM_SYSCOMMAND,
+                    WPARAM(SC_MONITORPOWER as usize),
+                    LPARAM(2),
+                    SMTO_ABORTIFHUNG,
+                    1000,
+                    None,
+                );
+                Ok(())
+            }
+            "logoff" => {
+                // Logging off ends this session (and this process); no
+                // shutdown privilege is required for it.
+                ExitWindowsEx(EWX_LOGOFF, Default::default()).map_err(|error| error.to_string())
+            }
             "sleep" | "hibernate" => {
                 if !ipc::suspend_available(action == "hibernate") {
                     return Err(t_pub(if action == "hibernate" {

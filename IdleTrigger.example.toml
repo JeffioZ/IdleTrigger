@@ -1,7 +1,7 @@
 # IdleTrigger 配置示例 / Configuration Example
 # 常用设置可直接在应用界面中完成；如需手工维护，复制为 IdleTrigger.toml 并放在 EXE 同目录
 # Common settings are available in the app UI; for manual maintenance, copy this file to IdleTrigger.toml beside the EXE
-# config_template_version = 16
+# config_template_version = 17
 
 # -- 保持唤醒 / Stay Awake --
 # 手动启用保持唤醒，阻止系统自动睡眠 / Manually keep the system awake and prevent automatic sleep
@@ -26,7 +26,7 @@ automation_enabled = true
 idle_enabled = false
 # 空闲时长：无键鼠操作多少分钟后触发动作 / Idle time in minutes before triggering after no keyboard or mouse input
 idle_timeout_minutes = 30
-# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: "sleep", "hibernate", "shutdown", "lock", "restart"
+# 达到空闲时长后执行的动作 / Action to run after the idle time is reached: "sleep", "hibernate", "shutdown", "lock", "restart", "screen_off"
 idle_action = "sleep"
 # 触发前多少秒显示不抢焦点的应用内提醒；键鼠操作或关闭提醒会取消本次动作，最少 10 秒 / Seconds before trigger to show a non-activating in-app reminder; keyboard/mouse input or closing it cancels this action, 10 seconds minimum
 idle_warning_seconds = 30

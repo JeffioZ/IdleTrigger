@@ -94,7 +94,14 @@ const FIELD_H: i32 = 34;
 const DIALOG_BTN_W: i32 = 104;
 const FOOTER_Y: i32 = CLIENT_H - 18 - BTN_H;
 
-const IDLE_ACTIONS: [&str; 5] = ["lock", "sleep", "hibernate", "shutdown", "restart"];
+const IDLE_ACTIONS: [&str; 6] = [
+    "lock",
+    "sleep",
+    "hibernate",
+    "shutdown",
+    "restart",
+    "screen_off",
+];
 const LANG_VALUES: [&str; 3] = ["auto", "en", "zh-CN"];
 const PROJECT_URL: &str = "https://github.com/JeffioZ/IdleTrigger";
 
