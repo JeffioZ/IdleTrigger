@@ -17,6 +17,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 static THEME_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Snoozed automatic switching: an absolute-minute deadline after which the
+/// schedule resumes. Runtime-only, so a restart clears it. Manual switches
+/// bypass this suppression entirely (they never consult the schedule).
+static SNOOZE: Mutex<Option<i64>> = Mutex::new(None);
 #[derive(Default)]
 struct ManualRequests {
     pending: Option<bool>,
@@ -420,7 +425,15 @@ fn tick() {
         }
         manual.map(|(dark, _)| dark)
     };
-    let target = manual.or_else(scheduled_dark);
+    let target = manual.or_else(|| {
+        // Snooze suppresses only the schedule; a pending manual request or
+        // active manual override still applies.
+        if snooze_active() {
+            None
+        } else {
+            scheduled_dark()
+        }
+    });
     let Some(target) = target else { return };
 
     // Battery-based dark preference (Go contract: battery → dark).
@@ -538,6 +551,63 @@ fn set_manual_override(dark: bool) -> Result<(), String> {
         (expiry % (24 * 60)) % 60
     ));
     Ok(())
+}
+
+/// True while automatic switching is snoozed; an expired deadline clears.
+fn snooze_active() -> bool {
+    let mut snooze = crate::runtime::lock(&SNOOZE);
+    match *snooze {
+        Some(deadline) if local_time().absolute_minutes >= deadline => {
+            *snooze = None;
+            false
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Snooze deadline in absolute minutes for status text, without mutating.
+pub fn snooze_deadline() -> Option<i64> {
+    let deadline = (*crate::runtime::lock(&SNOOZE))?;
+    if local_time().absolute_minutes >= deadline {
+        Some(deadline)
+    } else {
+        None
+    }
+}
+
+/// Deadline as local HH:MM for the panel schedule subtitle.
+pub fn snooze_deadline_text() -> Option<String> {
+    let deadline = snooze_deadline()?;
+    let now = local_time();
+    let minutes =
+        ((now.minutes as i64 + (deadline - now.absolute_minutes)).rem_euclid(24 * 60)) as i32;
+    Some(format!("{:02}:{:02}", minutes / 60, minutes % 60))
+}
+
+/// Arms (or re-arms) the snooze with a delay in minutes.
+pub fn snooze(delta_minutes: i64) {
+    *crate::runtime::lock(&SNOOZE) = Some(local_time().absolute_minutes + delta_minutes.max(1));
+    crate::log_line(&format!("theme schedule snoozed for {delta_minutes} min"));
+}
+
+/// Snoozes until the next light-theme boundary ("until morning"): the dark
+/// switch due tonight is postponed, and morning resolves to light anyway.
+pub fn snooze_until_morning() {
+    let now = local_time();
+    let light = light_window().map(|(start, _)| start).unwrap_or(7 * 60);
+    let delta = if now.minutes < light {
+        light - now.minutes
+    } else {
+        24 * 60 - now.minutes + light
+    };
+    snooze(delta as i64 + 1);
+}
+
+pub fn snooze_cancel() {
+    if crate::runtime::lock(&SNOOZE).take().is_some() {
+        crate::log_line("theme schedule snooze cancelled");
+    }
 }
 
 /// The three panel theme buttons: enable is the master toggle; switch/repair

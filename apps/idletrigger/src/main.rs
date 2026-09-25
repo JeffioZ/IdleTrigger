@@ -74,6 +74,10 @@ const IDC_NOSLEEP_TIMED_30M: usize = 152;
 const IDC_NOSLEEP_TIMED_1H: usize = 153;
 const IDC_NOSLEEP_TIMED_2H: usize = 154;
 const IDC_NOSLEEP_TIMED_CANCEL: usize = 155;
+const IDC_THEME_SNOOZE_30M: usize = 156;
+const IDC_THEME_SNOOZE_1H: usize = 157;
+const IDC_THEME_SNOOZE_MORNING: usize = 158;
+const IDC_THEME_SNOOZE_CANCEL: usize = 159;
 const IDC_EXIT_BUTTON: usize = 140;
 const IDC_WARN_TEXT: usize = 130;
 const IDC_WARN_CANCEL: usize = 131;
@@ -241,6 +245,7 @@ static BATTERY_BLOCKED: AtomicBool = AtomicBool::new(false);
 static NOSLEEP_EXECUTION_ON: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
 static BTN_NOSLEEP_TIMED_CANCEL: AtomicIsize = AtomicIsize::new(0);
+static BTN_THEME_SNOOZE_CANCEL: AtomicIsize = AtomicIsize::new(0);
 
 /// Timed stay-awake override: a runtime-only overlay source above the saved
 /// switch. Expiry rides a one-shot timer on the hidden window; restarts drop
@@ -1096,6 +1101,19 @@ unsafe extern "system" fn panel_proc(
                     theme_engine::manual_switch();
                 } else if code == IDC_THEME_REPAIR {
                     theme_engine::repair();
+                } else if matches!(
+                    code,
+                    IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
+                ) {
+                    match code {
+                        IDC_THEME_SNOOZE_30M => theme_engine::snooze(30),
+                        IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
+                        _ => theme_engine::snooze_until_morning(),
+                    }
+                    refresh_status();
+                } else if code == IDC_THEME_SNOOZE_CANCEL {
+                    theme_engine::snooze_cancel();
+                    refresh_status();
                 } else if code == IDC_EXIT_BUTTON {
                     log_line("exit via panel button");
                     PostQuitMessage(0);
@@ -1600,6 +1618,33 @@ fn create_windows() {
         nativeform::track(theme_repair_btn);
         let theme_repair_label = t("menu_theme_repair");
         set_control_text(theme_repair_btn, &theme_repair_label);
+        y += BUTTON_H + LABEL_GAP;
+        // Snooze chips: postpone the next scheduled switch (runtime-only).
+        let snooze_buttons = [
+            (IDC_THEME_SNOOZE_30M, "menu_theme_snooze_30m"),
+            (IDC_THEME_SNOOZE_1H, "menu_theme_snooze_1h"),
+            (IDC_THEME_SNOOZE_MORNING, "menu_theme_snooze_morning"),
+            (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
+        ];
+        let snooze_w = (row_width - 3 * GAP) / 4;
+        for (index, (id, key)) in snooze_buttons.iter().enumerate() {
+            let button = owner_button(
+                &ControlSpec {
+                    parent: panel,
+                    label: t(key),
+                    x: scale(PAD + index as i32 * (snooze_w + GAP)),
+                    y: scale(y),
+                    width: scale(snooze_w),
+                    id: *id,
+                    instance,
+                    font,
+                },
+                scale(BUTTON_H),
+            );
+            if *id == IDC_THEME_SNOOZE_CANCEL {
+                BTN_THEME_SNOOZE_CANCEL.store(button.0 as isize, Ordering::SeqCst);
+            }
+        }
         y += BUTTON_H + LABEL_GAP;
         // Schedule subtitle under the theme row (Go p.themeSchedule).
         let theme_schedule = owner_static(
@@ -2876,11 +2921,15 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
-    // The cancel chip is only meaningful while a timed overlay is armed.
+    // Cancel chips are only meaningful while their runtime state is armed.
     unsafe {
         let _ = EnableWindow(
             hwnd(&BTN_NOSLEEP_TIMED_CANCEL),
             timed_nosleep_state().is_some(),
+        );
+        let _ = EnableWindow(
+            hwnd(&BTN_THEME_SNOOZE_CANCEL),
+            theme_engine::snooze_deadline().is_some(),
         );
     }
     let (nosleep_status, idle_status) = power_status();
@@ -2942,7 +2991,11 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 /// showSource = true). Fixed mode lists both times; sunrise mode lists the
 /// solved solar times plus the location source.
 fn theme_schedule_text() -> String {
-    theme_schedule_summary(false)
+    let base = theme_schedule_summary(false);
+    match theme_engine::snooze_deadline_text() {
+        Some(until) => format!("{} · {}", base, t_args("theme_schedule_snoozed", &[&until])),
+        None => base,
+    }
 }
 
 /// Go formatThemeSchedule for both consumers: the panel schedule row (long,
