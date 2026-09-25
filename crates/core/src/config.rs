@@ -490,6 +490,54 @@ mod save_tests {
         assert_eq!(loaded.config.nosleep_battery_threshold, 0);
     }
     #[test]
+    fn every_config_field_roundtrips_through_save() {
+        // Every field set non-default with no `..Default` spread: adding a
+        // Config field must extend this literal (compilation fails otherwise),
+        // so a field missed in read_config or the save path fails here instead
+        // of silently keeping its default.
+        let config = Config {
+            language: "en".into(),
+            logging_enabled: true,
+            nosleep_enabled: true,
+            keep_screen_on: true,
+            nosleep_on_battery: true,
+            nosleep_battery_threshold: 55,
+            idle_enabled: true,
+            idle_timeout_minutes: 120,
+            idle_action: "hibernate".into(),
+            idle_warning_seconds: 45,
+            idle_enhanced_monitor: true,
+            automation_enabled: false,
+            hotkeys_enabled: true,
+            lock_keys_enabled: true,
+            lock_keys_caps_enabled: false,
+            lock_keys_num_enabled: false,
+            lock_keys_scroll_enabled: false,
+            lock_keys_skip_fullscreen: false,
+            theme_switch_enabled: true,
+            theme_mode: "fixed".into(),
+            theme_light_time: "06:30".into(),
+            theme_dark_time: "20:30".into(),
+            theme_ip_location_enabled: true,
+            theme_dark_on_battery: false,
+            theme_skip_fullscreen: false,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "idletrigger-full-field-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut doc: toml_edit::DocumentMut = "custom = 7\n".parse().unwrap();
+        save(&path, &mut doc, &config).unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.config, config);
+        assert_eq!(loaded.document["custom"].as_integer(), Some(7));
+    }
+    #[test]
     fn failed_save_does_not_publish_candidate_document() {
         let mut doc: toml_edit::DocumentMut =
             "nosleep_enabled = false # preserved\n".parse().unwrap();
