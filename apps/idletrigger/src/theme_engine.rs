@@ -569,7 +569,7 @@ fn snooze_active() -> bool {
 /// Snooze deadline in absolute minutes for status text, without mutating.
 pub fn snooze_deadline() -> Option<i64> {
     let deadline = (*crate::runtime::lock(&SNOOZE))?;
-    if local_time().absolute_minutes >= deadline {
+    if local_time().absolute_minutes < deadline {
         Some(deadline)
     } else {
         None
@@ -704,6 +704,21 @@ pub fn finish_repair() {
 }
 #[cfg(test)]
 mod solar_tests {
+    #[test]
+    fn snooze_deadline_reports_only_while_active() {
+        // Regression: the branches were once inverted, so an armed snooze
+        // reported None everywhere and the panel showed no feedback at all.
+        let now = local_time();
+        *crate::runtime::lock(&SNOOZE) = Some(now.absolute_minutes + 30);
+        assert!(snooze_deadline().is_some());
+        assert!(snooze_deadline_text().is_some());
+        *crate::runtime::lock(&SNOOZE) = Some(now.absolute_minutes - 1);
+        assert!(snooze_deadline().is_none());
+        assert!(snooze_deadline_text().is_none());
+        *crate::runtime::lock(&SNOOZE) = None;
+        assert!(snooze_deadline().is_none());
+    }
+
     #[test]
     fn completion_cannot_clear_the_target_after_a_click_reads_the_old_theme() {
         use std::sync::{Arc, Mutex, mpsc};
