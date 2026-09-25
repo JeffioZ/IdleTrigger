@@ -1162,7 +1162,13 @@ unsafe extern "system" fn panel_proc(
                         _ => 2 * 60 * 60,
                     };
                     set_timed_nosleep(seconds, false);
-                    TIMED_ARMED_CHIP.store(code, Ordering::SeqCst);
+                    // Repaint both ends of the swap: the newly armed chip
+                    // gains the outline, the previous one must lose it.
+                    let previous = TIMED_ARMED_CHIP.swap(code, Ordering::SeqCst);
+                    if previous != code {
+                        invalidate_control(previous);
+                    }
+                    invalidate_control(code);
                 } else if code == IDC_NOSLEEP_TIMED_CANCEL {
                     clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
@@ -1186,7 +1192,11 @@ unsafe extern "system" fn panel_proc(
                         IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
                         _ => theme_engine::snooze_until_morning(),
                     }
-                    SNOOZE_ARMED_CHIP.store(code, Ordering::SeqCst);
+                    let previous = SNOOZE_ARMED_CHIP.swap(code, Ordering::SeqCst);
+                    if previous != code {
+                        invalidate_control(previous);
+                    }
+                    invalidate_control(code);
                     refresh_status();
                 } else if code == IDC_THEME_SNOOZE_CANCEL {
                     theme_engine::snooze_cancel();
@@ -3050,15 +3060,20 @@ fn power_status() -> (String, String) {
 }
 
 fn refresh_status() {
-    // Cancel chips are only visible while their row has something armed;
-    // expired presets also drop their chip accent outline.
+    // Cancel chips are only visible while their row has something armed. An
+    // expired preset must also lose its accent outline: the chip never
+    // repaints on its own, so invalidate it when the marker is cleared.
     let timed_armed = timed_nosleep_state().is_some();
     let snooze_armed = theme_engine::snooze_deadline().is_some();
-    if !timed_armed {
+    let previous_timed = TIMED_ARMED_CHIP.load(Ordering::SeqCst);
+    if previous_timed != 0 && !timed_armed {
         TIMED_ARMED_CHIP.store(0, Ordering::SeqCst);
+        invalidate_control(previous_timed);
     }
-    if !snooze_armed {
+    let previous_snooze = SNOOZE_ARMED_CHIP.load(Ordering::SeqCst);
+    if previous_snooze != 0 && !snooze_armed {
         SNOOZE_ARMED_CHIP.store(0, Ordering::SeqCst);
+        invalidate_control(previous_snooze);
     }
     unsafe {
         let show = if timed_armed { SW_SHOW } else { SW_HIDE };
