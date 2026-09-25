@@ -25,6 +25,10 @@ static OVERRIDES: Mutex<auto::EffectiveState> = Mutex::new(auto::EffectiveState 
     stay_awake_sources: Vec::new(),
 });
 static ACTIVE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
+/// Rules whose battery threshold already fired; cleared on recovery so each
+/// threshold crossing triggers exactly once until the percentage recovers.
+static BATTERY_FIRED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 pub fn overrides() -> auto::EffectiveState {
     crate::runtime::lock(&OVERRIDES).clone()
@@ -411,6 +415,38 @@ pub fn on_session_event(locked: bool) {
     let rules = crate::runtime::lock(&RULES).clone();
     for rule in rules.iter().filter(|r| r.enabled && r.trigger == trigger) {
         fire_event(rule, None);
+    }
+}
+
+/// Resume from sleep fires matching rules (no checkpoint, like session
+/// events).
+pub fn on_resume() {
+    let rules = crate::runtime::lock(&RULES).clone();
+    for rule in rules
+        .iter()
+        .filter(|r| r.enabled && r.trigger == auto::TRIGGER_ON_RESUME)
+    {
+        fire_event(rule, None);
+    }
+}
+
+/// Battery transitions edge-detect per rule: a rule fires once when the
+/// percentage drops below its level, then re-arms when it climbs back to the
+/// level. Replaces the armed bookkeeping with a small fired set.
+pub fn on_battery(percent: i32) {
+    let rules = crate::runtime::lock(&RULES).clone();
+    let mut fired = crate::runtime::lock(&BATTERY_FIRED);
+    for rule in rules
+        .iter()
+        .filter(|r| r.enabled && r.trigger == auto::TRIGGER_BATTERY_BELOW && r.battery_level > 0)
+    {
+        if percent < rule.battery_level {
+            if fired.insert(rule.id.clone()) {
+                fire_event(rule, None);
+            }
+        } else {
+            fired.remove(&rule.id);
+        }
     }
 }
 

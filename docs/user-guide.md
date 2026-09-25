@@ -26,9 +26,9 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 
 ## Automatic tasks / 自动任务
 
-Use **Manage Tasks → New**, which opens a template menu: keep awake while a process runs, a nightly shutdown, stay awake during work hours, or a blank rule. Templates only prefill the editor — every field stays editable. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions (lock, sleep, hibernate, shutdown, restart, turn off display, log off) plus lock/unlock session triggers, with a cancellable countdown of at least 10 seconds. Disabling or changing a rule cancels an outdated pending action.
+Use **Manage Tasks → New**, which opens a template menu: keep awake while a process runs, a nightly shutdown, stay awake during work hours, or a blank rule. Templates only prefill the editor — every field stays editable. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions (lock, sleep, hibernate, shutdown, restart, turn off display, log off) plus session, resume, and battery-threshold triggers, with a cancellable countdown of at least 10 seconds. A battery rule fires once when the percentage drops below its level and re-arms after recovery. Disabling or changing a rule cancels an outdated pending action.
 
-在“管理任务 → 新建”中先从模板菜单选择：进程运行时保持唤醒、每天定时关机、工作时段保持唤醒，或空白规则。模板只负责预填编辑器——所有字段仍可修改。状态任务临时请求保持唤醒或空闲监测；事件任务提供内置 Windows 操作（锁定、睡眠、休眠、关机、重启、关闭显示器、注销）与锁定/解锁事件触发器，包含至少 10 秒的可取消倒计时。禁用或修改规则会取消已经失效的待执行动作。
+在“管理任务 → 新建”中先从模板菜单选择：进程运行时保持唤醒、每天定时关机、工作时段保持唤醒，或空白规则。模板只负责预填编辑器——所有字段仍可修改。状态任务临时请求保持唤醒或空闲监测；事件任务提供内置 Windows 操作（锁定、睡眠、休眠、关机、重启、关闭显示器、注销）与锁定/解锁、从睡眠恢复、电量阈值触发器，包含至少 10 秒的可取消倒计时。电量规则在百分比低于阈值时触发一次，回充到阈值后重新武装。禁用或修改规则会取消已经失效的待执行动作。
 
 Process-name targets match all instances of that name; Browse selects an exact EXE path. The picker reads names, counts, and file descriptions. It does not launch files, save PIDs, or inspect process memory. Search and sorting preserve checked targets, including those hidden by the filter.
 

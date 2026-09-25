@@ -35,6 +35,8 @@ pub const TRIGGER_DAILY: &str = "daily";
 pub const TRIGGER_WEEKLY: &str = "weekly";
 pub const TRIGGER_SESSION_LOCKED: &str = "session_locked";
 pub const TRIGGER_SESSION_UNLOCKED: &str = "session_unlocked";
+pub const TRIGGER_ON_RESUME: &str = "on_resume";
+pub const TRIGGER_BATTERY_BELOW: &str = "battery_below";
 
 pub const MATCH_NAME: &str = "name";
 pub const MATCH_PATH: &str = "path";
@@ -152,6 +154,8 @@ pub struct Rule {
     pub blocked_policy: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub max_wait_minutes: i32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub battery_level: i32,
 }
 
 fn is_zero(v: &i32) -> bool {
@@ -222,6 +226,8 @@ pub fn valid_trigger(trigger: &str) -> bool {
             | TRIGGER_WEEKLY
             | TRIGGER_SESSION_LOCKED
             | TRIGGER_SESSION_UNLOCKED
+            | TRIGGER_ON_RESUME
+            | TRIGGER_BATTERY_BELOW
     )
 }
 
@@ -465,6 +471,12 @@ fn validate_prepared_rule(raw: &Rule, normalized: &Rule) -> Result<(), String> {
     }
     if !(0..=7 * 24 * 60).contains(&raw.max_wait_minutes) {
         return Err("max_wait_minutes must be between 0 and 10080".into());
+    }
+    if raw.battery_level < 0 || raw.battery_level > 100 {
+        return Err("battery_level must be between 0 and 100".into());
+    }
+    if raw.trigger == TRIGGER_BATTERY_BELOW && (raw.battery_level == 0 || raw.battery_level > 95) {
+        return Err("battery_below requires battery_level between 1 and 95".into());
     }
     if is_event_action(&raw.action)
         && !raw.processes.is_empty()
@@ -740,6 +752,7 @@ mod tests {
             warning_seconds: MIN_WARNING_SECONDS,
             blocked_policy: String::new(),
             max_wait_minutes: 0,
+            battery_level: 0,
         }
     }
 

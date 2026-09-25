@@ -302,6 +302,7 @@ unknown = 123 # keep this
             warning_seconds: 120,
             blocked_policy: "skip".into(),
             max_wait_minutes: 10,
+            battery_level: 20,
         };
         let mut doc = DocumentMut::new();
         update(&mut doc, &[], std::slice::from_ref(&rule)).unwrap();

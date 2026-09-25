@@ -79,9 +79,11 @@ const ED_DAYS_EVERYDAY: usize = 360;
 const ED_VALIDATION: usize = 361;
 const ED_CHOOSE: usize = 362;
 const ED_PROC_INFO: usize = 363;
+const ED_BATTERY: usize = 364;
+const ED_BATTERY_LBL: usize = 365;
 
 /// Every editor control laid out by layout_editor (Go editorControlIDs).
-const ED_LAYOUT_IDS: [usize; 44] = [
+const ED_LAYOUT_IDS: [usize; 46] = [
     ED_BASICS_TITLE,
     ED_NAME_LBL,
     ED_NAME,
@@ -117,6 +119,8 @@ const ED_LAYOUT_IDS: [usize; 44] = [
     ED_WARNING,
     ED_IDLE_LBL,
     ED_IDLE_MIN,
+    ED_BATTERY_LBL,
+    ED_BATTERY,
     ED_BLOCKED_LBL,
     ED_BLOCKED,
     ED_MAX_LBL,
@@ -489,6 +493,8 @@ fn trigger_label(value: &str) -> String {
         "weekly" => "trigger_weekly",
         "session_locked" => "trigger_session_locked",
         "session_unlocked" => "trigger_session_unlocked",
+        "on_resume" => "trigger_on_resume",
+        "battery_below" => "trigger_battery_below",
         _ => return value.to_string(),
     };
     t_pub(key)
@@ -542,6 +548,8 @@ pub fn trigger_keys_for(action: &str) -> Vec<&'static str> {
             "process_exited",
             "session_locked",
             "session_unlocked",
+            "on_resume",
+            "battery_below",
         ]
     }
 }
@@ -1086,6 +1094,11 @@ fn rule_summary(rule: &auto::Rule) -> String {
         "session_unlocked" => {
             fill_template(&t_pub("automation_summary_session_unlocked"), &[&action])
         }
+        "on_resume" => fill_template(&t_pub("automation_summary_on_resume"), &[&action]),
+        "battery_below" => fill_template(
+            &t_pub("automation_summary_battery"),
+            &[&action, &rule.battery_level.to_string()],
+        ),
         _ => action,
     }
 }
@@ -1846,6 +1859,11 @@ fn create_editor() {
             font,
         );
         mk_label(
+            ED_BATTERY_LBL,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_BATTERY_LBL)),
+            font,
+        );
+        mk_label(
             ED_MAX_LBL,
             &t_pub(caption_key(EDITOR_TEXTS, ED_MAX_LBL)),
             font,
@@ -1882,6 +1900,7 @@ fn create_editor() {
         mk_edit(ED_WARNING, true);
         mk_edit(ED_IDLE_MIN, true);
         mk_edit(ED_MAX_WAIT, true);
+        mk_edit(ED_BATTERY, true);
 
         // Choice fields (Go combo: owner-draw BUTTON + popup).
         let _ = crate::choice::create_rows(
@@ -2016,6 +2035,7 @@ fn default_rule() -> auto::Rule {
         warning_seconds: auto::DEFAULT_WARNING_SECONDS,
         blocked_policy: "skip".into(),
         max_wait_minutes: 60,
+        battery_level: 0,
     }
 }
 
@@ -2054,6 +2074,10 @@ fn populate_editor() {
         set_text(
             get_dlg_item(ed, ED_IDLE_MIN),
             &rule.idle_minutes.to_string(),
+        );
+        set_text(
+            get_dlg_item(ed, ED_BATTERY),
+            &rule.battery_level.to_string(),
         );
         set_text(
             get_dlg_item(ed, ED_WARNING),
@@ -2143,6 +2167,10 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
         .parse()
         .unwrap_or(0);
     draft.max_wait_minutes = window_text(get_dlg_item(ed, ED_MAX_WAIT))
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    draft.battery_level = window_text(get_dlg_item(ed, ED_BATTERY))
         .trim()
         .parse()
         .unwrap_or(0);
@@ -2458,6 +2486,16 @@ pub fn layout_editor() {
                 );
                 y = layout_weekdays(&mut place, y, content_w);
             }
+            "battery_below" => {
+                set_text(
+                    get_dlg_item(ed, ED_BATTERY_LBL),
+                    &t_pub("automation_battery_level"),
+                );
+                place(ED_BATTERY_LBL, ED_PAD, y, column_w, ED_LABEL_H);
+                y += ED_LABEL_H + ED_LABEL_GAP;
+                place(ED_BATTERY, ED_PAD, y, column_w, ED_FIELD_H);
+                y += ED_FIELD_H + ED_RELATED_GAP;
+            }
             _ => {}
         }
 
@@ -2758,7 +2796,14 @@ fn checkbox_hit_width(ed: HWND, label: &str) -> Option<i32> {
 fn field_surface_of(edit_id: usize) -> Option<usize> {
     if matches!(
         edit_id,
-        ED_NAME | ED_TIME | ED_END_TIME | ED_DATE | ED_WARNING | ED_IDLE_MIN | ED_MAX_WAIT
+        ED_NAME
+            | ED_TIME
+            | ED_END_TIME
+            | ED_DATE
+            | ED_WARNING
+            | ED_IDLE_MIN
+            | ED_MAX_WAIT
+            | ED_BATTERY
     ) {
         Some((FIELD_SURFACE_BASE + edit_id as i32) as usize)
     } else {
@@ -2846,7 +2891,7 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
                         // Numeric edits: filter digits and clear errors (Go
                         // sanitizeNumericEdit).
-                        ED_WARNING | ED_IDLE_MIN | ED_MAX_WAIT if hi == EN_CHANGE => {
+                        ED_WARNING | ED_IDLE_MIN | ED_MAX_WAIT | ED_BATTERY if hi == EN_CHANGE => {
                             sanitize_numeric_edit(hwnd, code);
                             clear_editor_error(hwnd);
                         }
@@ -5036,6 +5081,7 @@ pub fn devtools_seed_demo_rule() {
         warning_seconds: 0,
         blocked_policy: String::new(),
         max_wait_minutes: 0,
+        battery_level: 0,
     };
     let mut rules = crate::runtime::lock(&crate::automation::RULES);
     rules.push(rule);
@@ -5056,6 +5102,7 @@ pub fn devtools_seed_demo_rule() {
         warning_seconds: 0,
         blocked_policy: String::new(),
         max_wait_minutes: 0,
+        battery_level: 0,
     });
     drop(rules);
     refresh_list();
@@ -5114,6 +5161,7 @@ const EDITOR_TEXTS: &[(usize, &str)] = &[
     (ED_LOGIC_LBL, "automation_process_logic"),
     (ED_WARN_LBL, "automation_warning_seconds"),
     (ED_IDLE_LBL, "automation_idle_minutes"),
+    (ED_BATTERY_LBL, "automation_battery_level"),
     (ED_MAX_LBL, "automation_max_wait"),
     (ED_DAYS_LBL, "automation_days"),
     (ED_BLOCKED_LBL, "automation_blocked_policy"),

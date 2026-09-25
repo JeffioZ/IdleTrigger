@@ -763,6 +763,7 @@ unsafe extern "system" fn hidden_proc(
                 // refresh battery + theme state.
                 if wparam.0 == 18 || wparam.0 == 7 {
                     log_line("power resume detected");
+                    automation::on_resume();
                     refresh_battery();
                     apply_stay_awake();
                     theme_recovery::environment_changed(false, true);
@@ -3304,6 +3305,13 @@ fn refresh_battery() {
                     "stay awake {} by low battery (runtime pause)",
                     if blocked { "paused" } else { "resumed" }
                 ));
+            }
+            // Battery-threshold triggers edge-detect on the polled percent;
+            // on AC the battery percent is meaningless, so skip dispatch.
+            if status.ACLineStatus != 0 {
+                automation::on_battery(100);
+            } else {
+                automation::on_battery(percent);
             }
             if blocked != was_blocked
                 || old_ac != (status.ACLineStatus != 0)
