@@ -246,6 +246,8 @@ static NOSLEEP_EXECUTION_ON: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
 static BTN_NOSLEEP_TIMED_CANCEL: AtomicIsize = AtomicIsize::new(0);
 static BTN_THEME_SNOOZE_CANCEL: AtomicIsize = AtomicIsize::new(0);
+/// Workstation lock state (this session), kept current by WTS events.
+static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
 
 /// Timed stay-awake override: a runtime-only overlay source above the saved
 /// switch. Expiry rides a one-shot timer on the hidden window; restarts drop
@@ -696,6 +698,27 @@ unsafe extern "system" fn hidden_proc(
             WM_TIMER if wparam.0 == LOCK_POLL_TIMER => {
                 // Lock-key sampling must stay on this message-pumping thread.
                 popups::poll();
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE => {
+                // WTS_SESSION_LOCK (0x7) / WTS_SESSION_UNLOCK (0x8) for this
+                // session. The lock pause re-merges the effective state; the
+                // lock/unlock triggers fire their rules directly.
+                let locked = match wparam.0 {
+                    0x7 => Some(true),
+                    0x8 => Some(false),
+                    _ => None,
+                };
+                if let Some(locked) = locked {
+                    SESSION_LOCKED.store(locked, Ordering::SeqCst);
+                    log_line(&format!(
+                        "session {}",
+                        if locked { "locked" } else { "unlocked" }
+                    ));
+                    automation::on_session_event(locked);
+                    apply_stay_awake();
+                    refresh_status();
+                }
                 LRESULT(0)
             }
             WM_IDLE_WARN => {
@@ -1328,6 +1351,13 @@ fn create_windows() {
             // Lock-key polling lives here on the UI thread; Go used a 50ms
             // timer on the notification window itself.
             let _ = SetTimer(Some(hidden), LOCK_POLL_TIMER, 50, None);
+            // Session notifications feed the lock pause and the lock/unlock
+            // triggers. The session starts unlocked (auto-start runs at
+            // logon); events keep the flag current from here on.
+            let _ = windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification(
+                hidden,
+                windows::Win32::System::RemoteDesktop::NOTIFY_FOR_THIS_SESSION,
+            );
         }
 
         // Floating-panel shell copied from Go: a topmost popup with a slim
@@ -2820,6 +2850,8 @@ pub(crate) struct EffectivePowerState {
     pub requested: bool,
     /// Automation asked to pause Stay Awake.
     pub paused: bool,
+    /// The workstation is locked and the lock pause is enabled.
+    pub lock_paused: bool,
     /// Battery allows Stay Awake right now.
     pub battery_allowed: bool,
     /// Stay Awake is actually in effect.
@@ -2850,11 +2882,13 @@ pub(crate) fn effective_power_state() -> EffectivePowerState {
     let battery_allowed = ON_AC.load(Ordering::SeqCst)
         || (config.nosleep_on_battery
             && BATTERY_PERCENT.load(Ordering::SeqCst) >= config.nosleep_battery_threshold);
+    let lock_paused = config.nosleep_pause_on_lock && SESSION_LOCKED.load(Ordering::SeqCst);
     EffectivePowerState {
         requested,
         paused: overrides.pause_stay_awake,
+        lock_paused,
         battery_allowed,
-        awake: requested && !overrides.pause_stay_awake && battery_allowed,
+        awake: requested && !overrides.pause_stay_awake && !lock_paused && battery_allowed,
         keep_screen: (config.nosleep_enabled && config.keep_screen_on)
             || (overrides.stay_awake && overrides.keep_screen_on)
             || timed.is_some_and(|(_, keep_screen)| keep_screen),
@@ -2894,6 +2928,8 @@ fn power_status() -> (String, String) {
         "status_disabled"
     } else if power.paused {
         "status_paused_by_automation"
+    } else if power.lock_paused {
+        "status_paused_by_lock"
     } else if !power.battery_allowed {
         "status_paused_by_battery"
     } else if power.keep_screen {

@@ -400,6 +400,20 @@ fn clear_overrides() {
     publish_overrides(auto::EffectiveState::default());
 }
 
+/// WTS session events fire matching rules immediately: no occurrence
+/// checkpoint (like process edges) and no schedule window to gate them.
+pub fn on_session_event(locked: bool) {
+    let trigger = if locked {
+        auto::TRIGGER_SESSION_LOCKED
+    } else {
+        auto::TRIGGER_SESSION_UNLOCKED
+    };
+    let rules = crate::runtime::lock(&RULES).clone();
+    for rule in rules.iter().filter(|r| r.enabled && r.trigger == trigger) {
+        fire_event(rule, None);
+    }
+}
+
 fn publish_overrides(state: auto::EffectiveState) {
     let mut current = crate::runtime::lock(&OVERRIDES);
     let changed = *current != state;

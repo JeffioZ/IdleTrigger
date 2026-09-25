@@ -12,6 +12,8 @@ keep_screen_on = false
 nosleep_on_battery = false
 # 电池电量低于此百分比时暂停保持唤醒，不改写手动开关 / Pause Stay Awake below this battery percentage without changing the manual toggle
 nosleep_battery_threshold = 20
+# 工作站锁定期间暂停保持唤醒，解锁后按原状态恢复 / Pause Stay Awake while the workstation is locked; the previous state resumes on unlock
+nosleep_pause_on_lock = false
 
 # -- 自动任务 / Automatic Tasks --
 # 自动任务仅在 IdleTrigger 运行时生效；状态操作只临时覆盖运行状态，且只能执行内置操作，不会启动命令或脚本 / Automatic tasks work only while IdleTrigger is running; state actions are temporary runtime overrides, and only built-in actions are available—commands and scripts are never launched

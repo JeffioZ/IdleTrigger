@@ -33,6 +33,8 @@ pub const TRIGGER_TIME_WINDOW: &str = "time_window";
 pub const TRIGGER_ONCE: &str = "once";
 pub const TRIGGER_DAILY: &str = "daily";
 pub const TRIGGER_WEEKLY: &str = "weekly";
+pub const TRIGGER_SESSION_LOCKED: &str = "session_locked";
+pub const TRIGGER_SESSION_UNLOCKED: &str = "session_unlocked";
 
 pub const MATCH_NAME: &str = "name";
 pub const MATCH_PATH: &str = "path";
@@ -218,6 +220,8 @@ pub fn valid_trigger(trigger: &str) -> bool {
             | TRIGGER_ONCE
             | TRIGGER_DAILY
             | TRIGGER_WEEKLY
+            | TRIGGER_SESSION_LOCKED
+            | TRIGGER_SESSION_UNLOCKED
     )
 }
 

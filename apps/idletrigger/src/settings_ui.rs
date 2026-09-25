@@ -74,6 +74,7 @@ const ID_LOCK_FULLSCREEN: i32 = 173;
 const ID_LOCK_PREVIEW: i32 = 174;
 const ID_NOTIFICATIONS_HINT: i32 = 175;
 const ID_NOTIFICATIONS_BEHAVIOR: i32 = 176;
+const ID_PAUSE_ON_LOCK: i32 = 177;
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
@@ -400,7 +401,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_BATTERY_ALLOWED,
             &t_pub("settings_battery_allowed"),
-            (CONTENT_X, 156, 468, CHECK_H),
+            (CONTENT_X, 156, 224, CHECK_H),
+        );
+        checkbox(
+            hwnd,
+            ID_PAUSE_ON_LOCK,
+            &t_pub("settings_pause_on_lock"),
+            (CONTENT_X + 240, 156, 228, CHECK_H),
         );
         label(
             hwnd,
@@ -976,6 +983,7 @@ fn populate(hwnd: HWND) {
     let (
         keep_screen,
         battery_allowed,
+        pause_on_lock,
         battery_threshold,
         idle_timeout,
         idle_action,
@@ -1001,6 +1009,7 @@ fn populate(hwnd: HWND) {
         (
             c.keep_screen_on,
             c.nosleep_on_battery,
+            c.nosleep_pause_on_lock,
             c.nosleep_battery_threshold,
             c.idle_timeout_minutes,
             c.idle_action.clone(),
@@ -1028,6 +1037,7 @@ fn populate(hwnd: HWND) {
     for (id, value) in [
         (ID_KEEP_SCREEN, keep_screen),
         (ID_BATTERY_ALLOWED, battery_allowed),
+        (ID_PAUSE_ON_LOCK, pause_on_lock),
         (ID_IDLE_ENHANCED, idle_enhanced),
         (ID_THEME_BATTERY, theme_battery),
         (ID_THEME_FULLSCREEN, theme_fullscreen),
@@ -1118,6 +1128,7 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_POWER_TITLE,
             ID_KEEP_SCREEN,
             ID_BATTERY_ALLOWED,
+            ID_PAUSE_ON_LOCK,
             ID_BATTERY_LBL,
             ID_BATTERY_THRESH,
             ID_POWER_HINT,
@@ -1246,6 +1257,7 @@ fn apply_dependent_states(hwnd: HWND) {
 struct Draft {
     keep_screen: bool,
     battery_allowed: bool,
+    pause_on_lock: bool,
     battery_threshold: Option<i32>,
     idle_timeout: Option<i32>,
     warning: Option<i32>,
@@ -1280,6 +1292,7 @@ fn collect_draft(hwnd: HWND) -> Draft {
     Draft {
         keep_screen: is_checked(hwnd, ID_KEEP_SCREEN),
         battery_allowed: is_checked(hwnd, ID_BATTERY_ALLOWED),
+        pause_on_lock: is_checked(hwnd, ID_PAUSE_ON_LOCK),
         battery_threshold,
         idle_timeout: control_text(hwnd, ID_IDLE_TIMEOUT).trim().parse().ok(),
         warning: control_text(hwnd, ID_WARNING_SECONDS).trim().parse().ok(),
@@ -1351,11 +1364,21 @@ fn draft_differs(draft: &Draft) -> bool {
         .clone()
         .unwrap_or_else(|| crate::cfg_map(Clone::clone));
 
-    let (cfg_keep, cfg_batt, cfg_thresh, cfg_timeout, cfg_action, cfg_warning, cfg_enhanced) = {
+    let (
+        cfg_keep,
+        cfg_batt,
+        cfg_pause_lock,
+        cfg_thresh,
+        cfg_timeout,
+        cfg_action,
+        cfg_warning,
+        cfg_enhanced,
+    ) = {
         let c = &base;
         (
             c.keep_screen_on,
             c.nosleep_on_battery,
+            c.nosleep_pause_on_lock,
             c.nosleep_battery_threshold,
             c.idle_timeout_minutes,
             c.idle_action.clone(),
@@ -1401,6 +1424,7 @@ fn draft_differs(draft: &Draft) -> bool {
 
     draft.keep_screen != cfg_keep
         || draft.battery_allowed != cfg_batt
+        || draft.pause_on_lock != cfg_pause_lock
         || draft.battery_threshold != Some(cfg_thresh)
         || draft.idle_timeout != Some(cfg_timeout)
         || draft.idle_action_idx != action_idx
@@ -1446,6 +1470,7 @@ fn save() {
             }
             c.keep_screen_on = draft.keep_screen;
             c.nosleep_on_battery = draft.battery_allowed;
+            c.nosleep_pause_on_lock = draft.pause_on_lock;
             c.nosleep_battery_threshold = draft.battery_threshold.unwrap_or(0);
             c.idle_timeout_minutes = draft.idle_timeout.unwrap_or(30);
             c.idle_action = IDLE_ACTIONS[draft.idle_action_idx].to_string();
@@ -1563,6 +1588,7 @@ unsafe fn create_tooltip(hwnd: HWND) {
     static TOOLS: &[(i32, &str)] = &[
         (ID_KEEP_SCREEN, "tip_keep_screen"),
         (ID_BATTERY_ALLOWED, "tip_nosleep_battery"),
+        (ID_PAUSE_ON_LOCK, "tip_pause_on_lock"),
         (ID_BATTERY_LBL, "tip_nosleep_battery_threshold"),
         (ID_BATTERY_THRESH, "tip_nosleep_battery_threshold"),
         (ID_IDLE_TIMEOUT_LBL, "tip_idle_timeout"),
@@ -1959,9 +1985,9 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 PAGE.store(page, Ordering::SeqCst);
                 apply_dependent_states(hwnd);
             }
-            ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_IDLE_ENHANCED | ID_THEME_BATTERY
-            | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING | ID_LOCK_KEYS
-            | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL | ID_LOCK_FULLSCREEN => {
+            ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_PAUSE_ON_LOCK | ID_IDLE_ENHANCED
+            | ID_THEME_BATTERY | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING
+            | ID_LOCK_KEYS | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL | ID_LOCK_FULLSCREEN => {
                 // Owner-drawn checkboxes keep state in CHECKS.
                 toggle_checked(hwnd, idc);
                 apply_dependent_states(hwnd);
@@ -2033,6 +2059,7 @@ pub fn refresh_language() {
         (ID_POWER_TITLE, "settings_power_title"),
         (ID_KEEP_SCREEN, "settings_keep_screen"),
         (ID_BATTERY_ALLOWED, "settings_battery_allowed"),
+        (ID_PAUSE_ON_LOCK, "settings_pause_on_lock"),
         (ID_BATTERY_LBL, "settings_battery_threshold"),
         (ID_POWER_HINT, "settings_power_hint"),
         (ID_IDLE_TITLE, "settings_idle_title"),

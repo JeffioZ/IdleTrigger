@@ -17,6 +17,7 @@ pub struct Config {
     pub keep_screen_on: bool,
     pub nosleep_on_battery: bool,
     pub nosleep_battery_threshold: i32,
+    pub nosleep_pause_on_lock: bool,
     pub idle_enabled: bool,
     pub idle_timeout_minutes: i32,
     pub idle_action: String,
@@ -47,6 +48,7 @@ impl Default for Config {
             keep_screen_on: false,
             nosleep_on_battery: false,
             nosleep_battery_threshold: 20,
+            nosleep_pause_on_lock: false,
             idle_enabled: false,
             idle_timeout_minutes: 30,
             idle_action: "sleep".to_string(),
@@ -226,6 +228,8 @@ fn read_config(
         nosleep_battery_threshold: as_int(document, "nosleep_battery_threshold", bad_fields)
             .map(|v| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
             .unwrap_or(defaults.nosleep_battery_threshold),
+        nosleep_pause_on_lock: as_bool(document, "nosleep_pause_on_lock", bad_fields)
+            .unwrap_or(defaults.nosleep_pause_on_lock),
         idle_enabled: as_bool(document, "idle_enabled", bad_fields)
             .unwrap_or(defaults.idle_enabled),
         idle_timeout_minutes: as_int(document, "idle_timeout_minutes", bad_fields)
@@ -319,6 +323,11 @@ fn save_candidate(
         document,
         "nosleep_battery_threshold",
         config.nosleep_battery_threshold,
+    );
+    set_bool(
+        document,
+        "nosleep_pause_on_lock",
+        config.nosleep_pause_on_lock,
     );
     set_bool(document, "idle_enabled", config.idle_enabled);
     set_int(
@@ -502,6 +511,7 @@ mod save_tests {
             keep_screen_on: true,
             nosleep_on_battery: true,
             nosleep_battery_threshold: 55,
+            nosleep_pause_on_lock: true,
             idle_enabled: true,
             idle_timeout_minutes: 120,
             idle_action: "hibernate".into(),

@@ -487,6 +487,8 @@ fn trigger_label(value: &str) -> String {
         "once" => "trigger_once",
         "daily" => "trigger_daily",
         "weekly" => "trigger_weekly",
+        "session_locked" => "trigger_session_locked",
+        "session_unlocked" => "trigger_session_unlocked",
         _ => return value.to_string(),
     };
     t_pub(key)
@@ -538,6 +540,8 @@ pub fn trigger_keys_for(action: &str) -> Vec<&'static str> {
             "weekly",
             "process_started",
             "process_exited",
+            "session_locked",
+            "session_unlocked",
         ]
     }
 }
@@ -1078,6 +1082,10 @@ fn rule_summary(rule: &auto::Rule) -> String {
             &t_pub("automation_summary_weekly"),
             &[&action, &day_summary(&rule.days), &rule.time],
         ),
+        "session_locked" => fill_template(&t_pub("automation_summary_session"), &[&action]),
+        "session_unlocked" => {
+            fill_template(&t_pub("automation_summary_session_unlocked"), &[&action])
+        }
         _ => action,
     }
 }
