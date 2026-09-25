@@ -188,6 +188,7 @@ const PANEL_TIMER: usize = 1;
 const WARN_TIMER: usize = 2;
 const POWER_STATUS_TIMER: usize = 3;
 const LOCK_POLL_TIMER: usize = 4;
+const NOSLEEP_TIMED_TIMER: usize = 5;
 const BATTERY_POLL_TICKS: u32 = 120; // 250ms * 120 = 30s
 
 // ---- Shared runtime state ------------------------------------------------
@@ -234,6 +235,16 @@ static BATTERY_PERCENT: AtomicI32 = AtomicI32::new(100);
 static BATTERY_BLOCKED: AtomicBool = AtomicBool::new(false);
 static NOSLEEP_EXECUTION_ON: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// Timed stay-awake override: a runtime-only overlay source above the saved
+/// switch. Expiry rides a one-shot timer on the hidden window; restarts drop
+/// it because nothing is persisted (task overrides behave the same way).
+struct TimedNosleep {
+    until: std::time::Instant,
+    keep_screen: bool,
+}
+static NOSLEEP_TIMED: Mutex<Option<TimedNosleep>> = Mutex::new(None);
+pub(crate) const NOSLEEP_TIMED_MAX_SECS: u64 = 24 * 60 * 60;
 
 /// Resolved display language is Chinese (Go ResolveLanguage short unit).
 pub(crate) fn i18n_is_chinese() -> bool {
@@ -660,6 +671,15 @@ unsafe extern "system" fn hidden_proc(
                 refresh_battery();
                 apply_stay_awake();
                 refresh_status();
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == NOSLEEP_TIMED_TIMER => {
+                // Timed stay-awake expiry: drop the overlay and re-merge.
+                let _ = KillTimer(Some(hwnd_), NOSLEEP_TIMED_TIMER);
+                if crate::runtime::lock(&NOSLEEP_TIMED).take().is_some() {
+                    apply_stay_awake();
+                    refresh_status();
+                }
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == LOCK_POLL_TIMER => {
@@ -2198,6 +2218,11 @@ fn build_tray_tooltip(
     };
     lines.push(line("tooltip_nosleep", stay_awake));
 
+    // Timed override: a distinct line while it is the active overlay source.
+    if let Some((remaining, _)) = timed_nosleep_state() {
+        lines.push(line("tooltip_nosleep_timed", format_remaining(remaining)));
+    }
+
     // Idle monitor: paused by stay-awake, or "Nm 动作" when running.
     if idle_running {
         let unit = if crate::i18n_is_chinese() { "分" } else { "m" };
@@ -2560,6 +2585,7 @@ fn on_toggle(code: usize) {
         warn_dialog("", &err);
         return;
     }
+    sync_timed_with_manual();
     apply_stay_awake();
     refresh_checkboxes();
     refresh_status();
@@ -2724,7 +2750,8 @@ impl EffectivePowerState {
 pub(crate) fn effective_power_state() -> EffectivePowerState {
     let overrides = automation::overrides();
     let config = cfg_map(Clone::clone);
-    let requested = config.nosleep_enabled || overrides.stay_awake;
+    let timed = timed_nosleep_state();
+    let requested = config.nosleep_enabled || overrides.stay_awake || timed.is_some();
     let battery_allowed = ON_AC.load(Ordering::SeqCst)
         || (config.nosleep_on_battery
             && BATTERY_PERCENT.load(Ordering::SeqCst) >= config.nosleep_battery_threshold);
@@ -2734,7 +2761,8 @@ pub(crate) fn effective_power_state() -> EffectivePowerState {
         battery_allowed,
         awake: requested && !overrides.pause_stay_awake && battery_allowed,
         keep_screen: (config.nosleep_enabled && config.keep_screen_on)
-            || (overrides.stay_awake && overrides.keep_screen_on),
+            || (overrides.stay_awake && overrides.keep_screen_on)
+            || timed.is_some_and(|(_, keep_screen)| keep_screen),
         idle_requested: config.idle_enabled || overrides.enable_idle,
         idle_paused: overrides.pause_idle,
         idle_minutes: if overrides.enable_idle {
@@ -2901,6 +2929,75 @@ fn theme_schedule_summary(short: bool) -> String {
 }
 
 // ---- Stay awake ----------------------------------------------------------
+
+/// Remaining duration and screen flag of the timed override; an expired
+/// entry is cleared on read so no code path can observe a stale value.
+pub(crate) fn timed_nosleep_state() -> Option<(std::time::Duration, bool)> {
+    let mut guard = crate::runtime::lock(&NOSLEEP_TIMED);
+    let timed = guard.as_ref()?;
+    let now = std::time::Instant::now();
+    if now < timed.until {
+        Some((timed.until - now, timed.keep_screen))
+    } else {
+        *guard = None;
+        None
+    }
+}
+
+/// Arms the timed override (seconds are clamped) and schedules the one-shot
+/// expiry. The saved switch and idle monitoring stay untouched: the runtime
+/// merge handles both, so expiry simply restores the previous state.
+pub(crate) fn set_timed_nosleep(seconds: u64, keep_screen: bool) {
+    let seconds = seconds.clamp(1, NOSLEEP_TIMED_MAX_SECS);
+    *runtime::lock(&NOSLEEP_TIMED) = Some(TimedNosleep {
+        until: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+        keep_screen,
+    });
+    unsafe {
+        let _ = KillTimer(Some(hwnd(&HIDDEN)), NOSLEEP_TIMED_TIMER);
+        let _ = SetTimer(
+            Some(hwnd(&HIDDEN)),
+            NOSLEEP_TIMED_TIMER,
+            u32::try_from(seconds * 1000).unwrap_or(u32::MAX),
+            None,
+        );
+    }
+    apply_stay_awake();
+    refresh_status();
+}
+
+/// Drops the timed override; no-op when nothing is armed.
+pub(crate) fn clear_timed_nosleep() {
+    if crate::runtime::lock(&NOSLEEP_TIMED).take().is_some() {
+        unsafe {
+            let _ = KillTimer(Some(hwnd(&HIDDEN)), NOSLEEP_TIMED_TIMER);
+        }
+        apply_stay_awake();
+        refresh_status();
+    }
+}
+
+/// Any request that leaves the saved switch off also drops the timed
+/// override, so "off" always means off regardless of the source.
+pub(crate) fn sync_timed_with_manual() {
+    if !cfg_map(|c| c.nosleep_enabled) {
+        clear_timed_nosleep();
+    }
+}
+
+/// Short countdown for tooltip/status: whole minutes, or seconds below one.
+fn format_remaining(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 60 {
+        format!(
+            "{} {}",
+            secs / 60,
+            if i18n_is_chinese() { "分钟" } else { "min" }
+        )
+    } else {
+        format!("{} {}", secs, if i18n_is_chinese() { "秒" } else { "s" })
+    }
+}
 
 fn apply_stay_awake() {
     let power = effective_power_state();
@@ -3666,6 +3763,36 @@ mod power_state_tests {
         // The override wins over the config's idle timeout minutes.
         assert_eq!(state.idle_minutes, 42);
 
+        ON_AC.store(previous_ac, Ordering::SeqCst);
+        BATTERY_PERCENT.store(previous_battery, Ordering::SeqCst);
+        automation::set_test_overrides(previous_overrides);
+        *crate::runtime::lock(&CONFIG) = previous_config;
+    }
+
+    #[test]
+    fn timed_override_actives_stay_awake_without_touching_the_switch() {
+        let _test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let previous_config = crate::runtime::lock(&CONFIG).replace(Default::default());
+        let previous_overrides = automation::overrides();
+        let previous_ac = ON_AC.swap(true, Ordering::SeqCst);
+        let previous_battery = BATTERY_PERCENT.swap(100, Ordering::SeqCst);
+        let previous_timed = crate::runtime::lock(&NOSLEEP_TIMED).take();
+
+        // The overlay alone keeps the machine awake; the saved switch stays
+        // off and the screen flag comes from the timed entry itself.
+        *crate::runtime::lock(&NOSLEEP_TIMED) = Some(TimedNosleep {
+            until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            keep_screen: true,
+        });
+        let state = effective_power_state();
+        assert!(state.requested && state.awake && state.keep_screen);
+        assert!(!cfg_map(|c| c.nosleep_enabled));
+
+        *crate::runtime::lock(&NOSLEEP_TIMED) = None;
+        let state = effective_power_state();
+        assert!(!state.requested && !state.awake);
+
+        *crate::runtime::lock(&NOSLEEP_TIMED) = previous_timed;
         ON_AC.store(previous_ac, Ordering::SeqCst);
         BATTERY_PERCENT.store(previous_battery, Ordering::SeqCst);
         automation::set_test_overrides(previous_overrides);

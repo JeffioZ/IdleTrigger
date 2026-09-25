@@ -139,8 +139,27 @@ fn handle_request(request: &str) -> String {
             }) {
                 return format!("err: {err}");
             }
+            // "Off" always means off: the manual switch winning also drops
+            // the timed overlay (a no-op when none is armed).
+            crate::sync_timed_with_manual();
             refresh_ui();
             format!("ok nosleep={target}")
+        }
+        request if request.starts_with("nosleep:on:timed:") => {
+            // Forms: nosleep:on:timed:<secs>[:screen]. Purely a runtime
+            // overlay; neither the saved switch nor idle monitoring moves.
+            let rest = &request["nosleep:on:timed:".len()..];
+            let (seconds, screen) = match rest.strip_suffix(":screen") {
+                Some(seconds) => (seconds, true),
+                None => (rest, false),
+            };
+            match seconds.parse::<u64>() {
+                Ok(seconds) if (1..=crate::NOSLEEP_TIMED_MAX_SECS).contains(&seconds) => {
+                    crate::set_timed_nosleep(seconds, screen);
+                    format!("ok nosleep=on timed={seconds}")
+                }
+                _ => "err: invalid duration".into(),
+            }
         }
         "monitor:on" | "monitor:off" | "monitor:toggle" => {
             let mut target = false;
@@ -157,6 +176,7 @@ fn handle_request(request: &str) -> String {
             }) {
                 return format!("err: {err}");
             }
+            crate::sync_timed_with_manual();
             refresh_ui();
             format!("ok monitor={target}")
         }
@@ -166,8 +186,10 @@ fn handle_request(request: &str) -> String {
             let seconds = crate::IDLE_MS.load(Ordering::SeqCst) / 1000;
             let awake_running = crate::NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst);
             let monitor_running = crate::idle_settings().enabled;
+            let timed_seconds =
+                crate::timed_nosleep_state().map_or(0, |(remaining, _)| remaining.as_secs());
             format!(
-                "tray=running nosleep={nosleep} monitor={idle} automation={automation} idle_seconds={seconds} nosleep_running={awake_running} monitor_running={monitor_running}"
+                "tray=running nosleep={nosleep} monitor={idle} automation={automation} idle_seconds={seconds} nosleep_running={awake_running} monitor_running={monitor_running} nosleep_timed_seconds={timed_seconds}"
             )
         }
         "reload" | "config:reload" => match crate::hot_reload_config() {
@@ -217,12 +239,8 @@ pub fn run_cli(args: &[String]) -> i32 {
     };
     let rest = &args[1..];
     let arguments_valid = match command.as_str() {
-        "nosleep" => {
-            rest.len() <= 1
-                || (rest.len() == 2
-                    && matches!(rest[0].as_str(), "on" | "toggle")
-                    && matches!(rest[1].as_str(), "--screen" | "-s"))
-        }
+        // nosleep validates its own flags below (allows --for plus --screen).
+        "nosleep" => true,
         "monitor" | "autostart" => rest.len() <= 1,
         _ => rest.is_empty(),
     };
@@ -238,20 +256,52 @@ pub fn run_cli(args: &[String]) -> i32 {
         "lock" => direct_action("lock"),
         "nosleep" => {
             let mode = rest.first().map(String::as_str).unwrap_or("status");
+            let mut screen = false;
+            let mut timed: Option<u64> = None;
+            let mut valid = matches!(mode, "on" | "off" | "toggle" | "status");
+            let mut flags = if rest.is_empty() {
+                rest.iter()
+            } else {
+                rest[1..].iter()
+            };
+            while valid && let Some(flag) = flags.next() {
+                match flag.as_str() {
+                    "--screen" | "-s" => screen = true,
+                    "--for" => match flags.next().and_then(|d| parse_duration_secs(d)) {
+                        Some(seconds) => timed = Some(seconds),
+                        None => valid = false,
+                    },
+                    _ => valid = false,
+                }
+            }
+            // --for arms a timed overlay, so it pairs with "on" only.
+            if timed.is_some() && mode != "on" {
+                valid = false;
+            }
+            if !valid {
+                console_println(&crate::t_pub("cli_usage_nosleep"));
+                return 1;
+            }
             match mode {
                 "on" | "off" | "toggle" => {
                     // Go --screen/-s: also keep the display on.
-                    let screen = rest.iter().any(|a| a == "--screen" || a == "-s");
+                    if let Some(seconds) = timed {
+                        return pipe_or_error(&format!(
+                            "nosleep:on:timed:{seconds}{}",
+                            if screen { ":screen" } else { "" }
+                        ));
+                    }
                     pipe_or_error(&format!(
                         "nosleep:{mode}{}",
-                        if screen { ":screen" } else { "" }
+                        if screen && mode != "off" {
+                            ":screen"
+                        } else {
+                            ""
+                        }
                     ))
                 }
                 "status" => pipe_or_error("status"),
-                _ => {
-                    console_println(&crate::t_pub("cli_usage_nosleep"));
-                    1
-                }
+                _ => unreachable!(),
             }
         }
         "monitor" => {
@@ -319,6 +369,21 @@ pub fn run_cli(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `--for 90` means minutes; `90m`/`2h`/`30s` carry a unit. Clamps to the
+/// timed-overlay range and returns seconds.
+fn parse_duration_secs(text: &str) -> Option<u64> {
+    let (value, multiplier) = match text.chars().last()? {
+        's' => (&text[..text.len() - 1], 1),
+        'm' => (&text[..text.len() - 1], 60),
+        'h' => (&text[..text.len() - 1], 3600),
+        _ => (text, 60),
+    };
+    let seconds = value.parse::<u64>().ok()?.checked_mul(multiplier)?;
+    (1..=crate::NOSLEEP_TIMED_MAX_SECS)
+        .contains(&seconds)
+        .then_some(seconds)
 }
 
 /// Direct actions print a progress line first (Go msg_* keys) and verify
@@ -457,5 +522,32 @@ fn write_console(handle: windows::Win32::Foundation::HANDLE, text: &str) {
                 None,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn for_durations_accept_bare_minutes_and_units() {
+        assert_eq!(parse_duration_secs("90"), Some(90 * 60));
+        assert_eq!(parse_duration_secs("90m"), Some(90 * 60));
+        assert_eq!(parse_duration_secs("2h"), Some(2 * 3600));
+        assert_eq!(parse_duration_secs("30s"), Some(30));
+        assert_eq!(
+            parse_duration_secs("24h"),
+            Some(crate::NOSLEEP_TIMED_MAX_SECS)
+        );
+    }
+
+    #[test]
+    fn for_durations_reject_out_of_range_and_garbage() {
+        assert_eq!(parse_duration_secs("0"), None);
+        assert_eq!(parse_duration_secs("25h"), None);
+        assert_eq!(parse_duration_secs("999999h"), None);
+        assert_eq!(parse_duration_secs("m"), None);
+        assert_eq!(parse_duration_secs("x"), None);
+        assert_eq!(parse_duration_secs(""), None);
     }
 }
