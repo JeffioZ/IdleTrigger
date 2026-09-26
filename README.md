@@ -36,7 +36,7 @@ Left-click the tray icon for quick controls, then open **Settings** for all pers
 | ⚡ | **Stay Awake** | Downloads, renders, backups, and remote sessions that must keep running; timed presets expire automatically. |
 | ⏱️ | **Idle Actions** | Lock, sleep, hibernate, shut down, restart, or turn the display off after real keyboard and mouse inactivity. |
 | 🔁 | **Automatic Tasks** | Start from templates, then control power features or run built-in actions by schedule and process state. |
-| 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, snooze a pending switch, and adapt to battery and fullscreen. |
+| 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, optionally link wallpaper and cursor schemes, snooze a pending switch, and adapt to battery and fullscreen. |
 
 **Small by design:** IdleTrigger is a portable native Win32 app for Windows 10 / Windows Server 2016 or later. It needs no installer, service, WebView, simulated input, or extra runtime. Settings stay in a readable TOML file beside the EXE.
 

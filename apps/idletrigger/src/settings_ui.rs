@@ -75,10 +75,21 @@ const ID_LOCK_PREVIEW: i32 = 174;
 const ID_NOTIFICATIONS_HINT: i32 = 175;
 const ID_NOTIFICATIONS_BEHAVIOR: i32 = 176;
 const ID_PAUSE_ON_LOCK: i32 = 177;
+const ID_APPEARANCE_TITLE: i32 = 178;
+const ID_LIGHT_WALL_LBL: i32 = 179;
+const ID_LIGHT_WALL: i32 = 180;
+const ID_LIGHT_WALL_BROWSE: i32 = 181;
+const ID_DARK_WALL_LBL: i32 = 182;
+const ID_DARK_WALL: i32 = 183;
+const ID_DARK_WALL_BROWSE: i32 = 184;
+const ID_LIGHT_CURSOR_LBL: i32 = 185;
+const ID_LIGHT_CURSOR: i32 = 186;
+const ID_DARK_CURSOR_LBL: i32 = 187;
+const ID_DARK_CURSOR: i32 = 188;
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
-const CLIENT_H: i32 = 580;
+const CLIENT_H: i32 = 620;
 const CONTENT_X: i32 = 208;
 const CONTENT_RIGHT: i32 = 676;
 const SECTION_TOP: i32 = 90;
@@ -583,6 +594,77 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ),
         );
 
+        // Appearance linkage: per-side wallpaper and cursor schemes applied
+        // together with the theme switch. Wallpaper rows pair an edit with a
+        // Browse button; cursor rows list installed schemes.
+        label(
+            hwnd,
+            ID_APPEARANCE_TITLE,
+            &t_pub("settings_theme_appearance_group"),
+            section_font,
+            (CONTENT_X, 362, 468, SECTION_TITLE_H),
+            false,
+        );
+        for (lbl, edit_id, browse_id, key) in [
+            (
+                ID_LIGHT_WALL_LBL,
+                ID_LIGHT_WALL,
+                ID_LIGHT_WALL_BROWSE,
+                "settings_light_wallpaper",
+            ),
+            (
+                ID_DARK_WALL_LBL,
+                ID_DARK_WALL,
+                ID_DARK_WALL_BROWSE,
+                "settings_dark_wallpaper",
+            ),
+        ] {
+            let row_y = if edit_id == ID_LIGHT_WALL { 398 } else { 444 };
+            label(
+                hwnd,
+                lbl,
+                &t_pub(key),
+                font,
+                (CONTENT_X, row_y, 140, 22),
+                false,
+            );
+            edit(hwnd, edit_id, (352, row_y - 8, 210, FIELD_H), false);
+            push_button(
+                hwnd,
+                browse_id,
+                &t_pub("settings_browse"),
+                (570, row_y - 8, 106, FIELD_H),
+            );
+        }
+        for (lbl, combo_id, key) in [
+            (
+                ID_LIGHT_CURSOR_LBL,
+                ID_LIGHT_CURSOR,
+                "settings_light_cursor",
+            ),
+            (ID_DARK_CURSOR_LBL, ID_DARK_CURSOR, "settings_dark_cursor"),
+        ] {
+            let row_y = if combo_id == ID_LIGHT_CURSOR {
+                490
+            } else {
+                536
+            };
+            label(
+                hwnd,
+                lbl,
+                &t_pub(key),
+                font,
+                (CONTENT_X, row_y, 140, 22),
+                false,
+            );
+            combo(
+                hwnd,
+                combo_id,
+                (352, row_y - 8, 324, FIELD_H),
+                &cursor_choice_labels(),
+            );
+        }
+
         // Application page.
         label(
             hwnd,
@@ -928,6 +1010,50 @@ fn combo(parent: HWND, id: i32, b: (i32, i32, i32, i32), items: &[String]) {
     }
 }
 
+/// Cursor dropdown rows: a leading "no linkage" entry plus installed schemes.
+fn cursor_choice_labels() -> Vec<String> {
+    let mut items = vec![t_pub("settings_appearance_none")];
+    items.extend(crate::theme_engine::cursor_schemes());
+    items
+}
+
+/// Wallpaper picker: image files only, result fills the paired edit.
+fn browse_wallpaper(owner: HWND, target: i32) {
+    use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
+    unsafe {
+        let mut filter: Vec<u16> = t_pub("settings_wallpaper_filter").encode_utf16().collect();
+        filter.push(0);
+        filter.extend("*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.tif;*.tiff".encode_utf16());
+        filter.push(0);
+        filter.push(0);
+        let mut file = vec![0u16; 32768];
+        let title = wide(&t_pub("settings_wallpaper_browse_title"));
+        let mut dialog = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: owner,
+            lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+            nFilterIndex: 1,
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: windows::core::PCWSTR(title.as_ptr()),
+            Flags: windows::Win32::UI::Controls::Dialogs::OPEN_FILENAME_FLAGS(
+                0x0000_0004 // OFN_HIDEREADONLY
+                    | 0x0000_0008 // OFN_NOCHANGEDIR
+                    | 0x0000_0800 // OFN_PATHMUSTEXIST
+                    | 0x0000_1000 // OFN_FILEMUSTEXIST
+                    | 0x0008_0000 // OFN_EXPLORER
+                    | 0x0200_0000, // OFN_DONTADDTORECENT
+            ),
+            ..Default::default()
+        };
+        if !GetOpenFileNameW(&mut dialog).as_bool() {
+            return;
+        }
+        let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
+        set_text(owner, target, &String::from_utf16_lossy(&file[..end]));
+    }
+}
+
 fn body_font() -> HFONT {
     crate::make_font_pub(14, 400)
 }
@@ -995,6 +1121,10 @@ fn populate(hwnd: HWND) {
         ip_enabled,
         theme_battery,
         theme_fullscreen,
+        light_wallpaper,
+        dark_wallpaper,
+        light_cursor,
+        dark_cursor,
         language,
         lock_keys,
         caps,
@@ -1021,6 +1151,10 @@ fn populate(hwnd: HWND) {
             c.theme_ip_location_enabled,
             c.theme_dark_on_battery,
             c.theme_skip_fullscreen,
+            c.theme_light_wallpaper.clone(),
+            c.theme_dark_wallpaper.clone(),
+            c.theme_light_cursor_scheme.clone(),
+            c.theme_dark_cursor_scheme.clone(),
             c.language.clone(),
             c.lock_keys_enabled,
             c.lock_keys_caps_enabled,
@@ -1058,6 +1192,19 @@ fn populate(hwnd: HWND) {
     set_text(hwnd, ID_WARNING_SECONDS, &warning.to_string());
     set_text(hwnd, ID_LIGHT_TIME, &light_time);
     set_text(hwnd, ID_DARK_TIME, &dark_time);
+    set_text(hwnd, ID_LIGHT_WALL, &light_wallpaper);
+    set_text(hwnd, ID_DARK_WALL, &dark_wallpaper);
+    // Cursor dropdowns: 0 = no linkage, otherwise the scheme's row; a
+    // scheme that no longer exists falls back to no linkage.
+    let schemes = crate::theme_engine::cursor_schemes();
+    let scheme_index = |name: &str| -> i32 {
+        schemes
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(name.trim()))
+            .map_or(0, |i| i as i32 + 1)
+    };
+    crate::choice::select_index(get(hwnd, ID_LIGHT_CURSOR), scheme_index(&light_cursor));
+    crate::choice::select_index(get(hwnd, ID_DARK_CURSOR), scheme_index(&dark_cursor));
 
     let mode_idx = if theme_mode == "sunrise" { 1 } else { 0 };
     crate::choice::select_index(get(hwnd, ID_THEME_MODE), mode_idx);
@@ -1144,6 +1291,7 @@ fn page_ids(page: i32) -> &'static [i32] {
         1 => &[
             ID_THEME_SCHEDULE_TITLE,
             ID_THEME_BEHAVIOR_TITLE,
+            ID_APPEARANCE_TITLE,
             ID_THEME_MODE_LBL,
             ID_THEME_MODE,
             ID_LIGHT_TIME_LBL,
@@ -1156,6 +1304,16 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_THEME_BATTERY,
             ID_THEME_FULLSCREEN,
             ID_THEME_HINT,
+            ID_LIGHT_WALL_LBL,
+            ID_LIGHT_WALL,
+            ID_LIGHT_WALL_BROWSE,
+            ID_DARK_WALL_LBL,
+            ID_DARK_WALL,
+            ID_DARK_WALL_BROWSE,
+            ID_LIGHT_CURSOR_LBL,
+            ID_LIGHT_CURSOR,
+            ID_DARK_CURSOR_LBL,
+            ID_DARK_CURSOR,
         ],
         2 => &[
             ID_APP_GENERAL_TITLE,
@@ -1269,6 +1427,10 @@ struct Draft {
     location_idx: usize,
     theme_battery: bool,
     theme_fullscreen: bool,
+    light_wallpaper: String,
+    dark_wallpaper: String,
+    light_cursor: String,
+    dark_cursor: String,
     language_idx: usize,
     lock_keys: bool,
     caps: bool,
@@ -1289,6 +1451,16 @@ fn collect_draft(hwnd: HWND) -> Draft {
         } else {
             battery_text.trim().parse().ok()
         };
+    // Scheme row -> name, 0 = no linkage.
+    let scheme_at = |row: usize| -> String {
+        if row == 0 {
+            return String::new();
+        }
+        crate::theme_engine::cursor_schemes()
+            .get(row - 1)
+            .cloned()
+            .unwrap_or_default()
+    };
     Draft {
         keep_screen: is_checked(hwnd, ID_KEEP_SCREEN),
         battery_allowed: is_checked(hwnd, ID_BATTERY_ALLOWED),
@@ -1304,6 +1476,11 @@ fn collect_draft(hwnd: HWND) -> Draft {
         location_idx: combo_sel(hwnd, ID_LOCATION_SOURCE),
         theme_battery: is_checked(hwnd, ID_THEME_BATTERY),
         theme_fullscreen: is_checked(hwnd, ID_THEME_FULLSCREEN),
+        light_wallpaper: control_text(hwnd, ID_LIGHT_WALL).trim().to_string(),
+        dark_wallpaper: control_text(hwnd, ID_DARK_WALL).trim().to_string(),
+        // Map the dropdown row back to a scheme name (0 = empty = off).
+        light_cursor: scheme_at(combo_sel(hwnd, ID_LIGHT_CURSOR)),
+        dark_cursor: scheme_at(combo_sel(hwnd, ID_DARK_CURSOR)),
         language_idx: combo_sel(hwnd, ID_LANGUAGE).min(2),
         lock_keys: is_checked(hwnd, ID_LOCK_KEYS),
         caps: is_checked(hwnd, ID_LOCK_CAPS),
@@ -1386,7 +1563,19 @@ fn draft_differs(draft: &Draft) -> bool {
             c.idle_enhanced_monitor,
         )
     };
-    let (cfg_mode, cfg_light, cfg_dark, cfg_ip, cfg_batt_dark, cfg_fullscreen, cfg_lang) = {
+    let (
+        cfg_mode,
+        cfg_light,
+        cfg_dark,
+        cfg_ip,
+        cfg_batt_dark,
+        cfg_fullscreen,
+        cfg_light_wall,
+        cfg_dark_wall,
+        cfg_light_cursor,
+        cfg_dark_cursor,
+        cfg_lang,
+    ) = {
         let c = &base;
         (
             c.theme_mode.clone(),
@@ -1395,6 +1584,10 @@ fn draft_differs(draft: &Draft) -> bool {
             c.theme_ip_location_enabled,
             c.theme_dark_on_battery,
             c.theme_skip_fullscreen,
+            c.theme_light_wallpaper.clone(),
+            c.theme_dark_wallpaper.clone(),
+            c.theme_light_cursor_scheme.clone(),
+            c.theme_dark_cursor_scheme.clone(),
             c.language.clone(),
         )
     };
@@ -1436,6 +1629,10 @@ fn draft_differs(draft: &Draft) -> bool {
         || draft.location_idx != cfg_ip as usize
         || draft.theme_battery != cfg_batt_dark
         || draft.theme_fullscreen != cfg_fullscreen
+        || draft.light_wallpaper != cfg_light_wall
+        || draft.dark_wallpaper != cfg_dark_wall
+        || draft.light_cursor != cfg_light_cursor
+        || draft.dark_cursor != cfg_dark_cursor
         || draft.language_idx != lang_idx
         || draft.lock_keys != cfg_lock
         || draft.caps != cfg_caps
@@ -1487,6 +1684,10 @@ fn save() {
             c.theme_ip_location_enabled = draft.location_idx == 1;
             c.theme_dark_on_battery = draft.theme_battery;
             c.theme_skip_fullscreen = draft.theme_fullscreen;
+            c.theme_light_wallpaper = draft.light_wallpaper.clone();
+            c.theme_dark_wallpaper = draft.dark_wallpaper.clone();
+            c.theme_light_cursor_scheme = draft.light_cursor.clone();
+            c.theme_dark_cursor_scheme = draft.dark_cursor.clone();
             c.language = LANG_VALUES[draft.language_idx].to_string();
             c.lock_keys_enabled = draft.lock_keys;
             c.lock_keys_caps_enabled = draft.caps;
@@ -1609,6 +1810,16 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_THEME_LOCATION_STATUS, "tip_theme_location_status"),
         (ID_THEME_BATTERY, "tip_battery_theme"),
         (ID_THEME_FULLSCREEN, "tip_fullscreen"),
+        (ID_LIGHT_WALL_LBL, "tip_theme_wallpaper"),
+        (ID_LIGHT_WALL, "tip_theme_wallpaper"),
+        (ID_LIGHT_WALL_BROWSE, "tip_theme_wallpaper"),
+        (ID_DARK_WALL_LBL, "tip_theme_wallpaper"),
+        (ID_DARK_WALL, "tip_theme_wallpaper"),
+        (ID_DARK_WALL_BROWSE, "tip_theme_wallpaper"),
+        (ID_LIGHT_CURSOR_LBL, "tip_theme_cursor"),
+        (ID_LIGHT_CURSOR, "tip_theme_cursor"),
+        (ID_DARK_CURSOR_LBL, "tip_theme_cursor"),
+        (ID_DARK_CURSOR, "tip_theme_cursor"),
         (ID_LANGUAGE_LBL, "tip_language"),
         (ID_LANGUAGE, "tip_language"),
         (ID_LOCK_KEYS, "tip_lock_keys"),
@@ -1993,9 +2204,12 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 apply_dependent_states(hwnd);
                 set_text(hwnd, ID_VALIDATION, "");
             }
-            ID_THEME_MODE | ID_LOCATION_SOURCE | ID_IDLE_ACTION | ID_LANGUAGE => {
+            ID_THEME_MODE | ID_LOCATION_SOURCE | ID_IDLE_ACTION | ID_LANGUAGE | ID_LIGHT_CURSOR
+            | ID_DARK_CURSOR => {
                 crate::choice::toggle(get(hwnd, idc), hwnd, idc);
             }
+            ID_LIGHT_WALL_BROWSE => browse_wallpaper(hwnd, ID_LIGHT_WALL),
+            ID_DARK_WALL_BROWSE => browse_wallpaper(hwnd, ID_DARK_WALL),
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_SAVE => save(),
@@ -2076,6 +2290,13 @@ pub fn refresh_language() {
         (ID_THEME_BEHAVIOR_TITLE, "settings_theme_behavior_group"),
         (ID_THEME_BATTERY, "menu_theme_battery_dark"),
         (ID_THEME_FULLSCREEN, "menu_theme_skip_fullscreen"),
+        (ID_APPEARANCE_TITLE, "settings_theme_appearance_group"),
+        (ID_LIGHT_WALL_LBL, "settings_light_wallpaper"),
+        (ID_DARK_WALL_LBL, "settings_dark_wallpaper"),
+        (ID_LIGHT_WALL_BROWSE, "settings_browse"),
+        (ID_DARK_WALL_BROWSE, "settings_browse"),
+        (ID_LIGHT_CURSOR_LBL, "settings_light_cursor"),
+        (ID_DARK_CURSOR_LBL, "settings_dark_cursor"),
         (ID_APP_GENERAL_TITLE, "settings_app_general_group"),
         (ID_LANGUAGE_LBL, "settings_language"),
         (ID_HOTKEYS, "menu_hotkeys"),
@@ -2101,6 +2322,8 @@ pub fn refresh_language() {
     );
     for (id, labels) in [
         (ID_IDLE_ACTION, idle_action_labels()),
+        (ID_LIGHT_CURSOR, cursor_choice_labels()),
+        (ID_DARK_CURSOR, cursor_choice_labels()),
         (
             ID_THEME_MODE,
             vec![

@@ -467,6 +467,7 @@ fn tick() {
         return;
     }
     if !matches_target {
+        apply_appearance(target);
         crate::theme_recovery::transition_applied();
     }
     drop(operation);
@@ -541,6 +542,7 @@ fn set_manual_override(dark: bool) -> Result<(), String> {
     let now = local_time();
     let expiry = next_transition(now.absolute_minutes, now.minutes, light_window());
     apply_windows_theme(dark)?;
+    apply_appearance(dark);
     *crate::runtime::lock(&MANUAL_OVERRIDE) = Some((dark, expiry));
     drop(operation);
     crate::request_theme_refresh();
@@ -607,6 +609,264 @@ pub fn snooze_until_morning() {
 pub fn snooze_cancel() {
     if crate::runtime::lock(&SNOOZE).take().is_some() {
         crate::log_line("theme schedule snooze cancelled");
+    }
+}
+
+// ---- Appearance linkage (wallpaper + cursor schemes) -----------------------
+
+const CURSORS_KEY: &str = "Control Panel\\Cursors";
+const SCHEMES_KEY: &str = "Control Panel\\Cursors\\Schemes";
+/// The 15 named cursor values a scheme defines, in the scheme-blob order.
+const CURSOR_NAMES: [&str; 15] = [
+    "Arrow",
+    "Help",
+    "AppStarting",
+    "Wait",
+    "NWPen",
+    "No",
+    "SizeNS",
+    "SizeWE",
+    "Crosshair",
+    "IBeam",
+    "SizeNWSE",
+    "SizeNESW",
+    "SizeAll",
+    "UpArrow",
+    "Hand",
+];
+
+/// Applies the wallpaper and cursor scheme configured for the given side.
+/// Each item is best-effort: a failure logs and never blocks the theme
+/// switch (the registry Personalize write already succeeded).
+fn apply_appearance(dark: bool) {
+    let (wallpaper, scheme) = crate::cfg_map(|c| {
+        (
+            if dark {
+                c.theme_dark_wallpaper.clone()
+            } else {
+                c.theme_light_wallpaper.clone()
+            },
+            if dark {
+                c.theme_dark_cursor_scheme.clone()
+            } else {
+                c.theme_light_cursor_scheme.clone()
+            },
+        )
+    });
+    if !wallpaper.trim().is_empty()
+        && let Err(error) = apply_wallpaper(&wallpaper)
+    {
+        crate::log_line(&format!("wallpaper switch failed: {error}"));
+    }
+    if !scheme.trim().is_empty()
+        && let Err(error) = apply_cursor_scheme(&scheme)
+    {
+        crate::log_line(&format!("cursor scheme switch failed: {error}"));
+    }
+}
+
+/// Wallpaper via SPI_SETDESKWALLPAPER; the file must exist (Windows copies
+/// or converts it into the transcoded wallpaper cache).
+fn apply_wallpaper(path: &str) -> Result<(), String> {
+    if !std::path::Path::new(path).is_file() {
+        return Err(format!("wallpaper file not found: {path}"));
+    }
+    let wide_path = wide(path);
+    let ok = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+            windows::Win32::UI::WindowsAndMessaging::SPI_SETDESKWALLPAPER,
+            0,
+            Some(wide_path.as_ptr() as *mut _),
+            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    if ok.is_ok() {
+        Ok(())
+    } else {
+        Err("SystemParametersInfoW(SPI_SETDESKWALLPAPER) rejected the request".into())
+    }
+}
+
+/// Lists installed cursor-scheme names (HKCU ... Cursors\Schemes values).
+pub fn cursor_schemes() -> Vec<String> {
+    unsafe {
+        let schemes = wide(SCHEMES_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(schemes.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        ) != ERROR_SUCCESS
+        {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        for index in 0.. {
+            let mut name = [0u16; 256];
+            let mut len = name.len() as u32;
+            let name_ptr = windows::core::PWSTR(name.as_mut_ptr());
+            let status = windows::Win32::System::Registry::RegEnumValueW(
+                hkey,
+                index,
+                Some(name_ptr),
+                &mut len,
+                None,
+                None,
+                None,
+                None,
+            );
+            if status == windows::Win32::Foundation::ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status == ERROR_SUCCESS {
+                names.push(String::from_utf16_lossy(&name[..len as usize]));
+            }
+            if index > 512 {
+                break;
+            }
+        }
+        let _ = RegCloseKey(hkey);
+        names.sort_by_key(|n| n.to_lowercase());
+        names
+    }
+}
+
+/// Applies a named scheme: read its value blob (15 REG_EXPAND_SZ paths
+/// joined by NULs), write each into HKCU ... Cursors, then SPI_SETCURSORS.
+fn apply_cursor_scheme(name: &str) -> Result<(), String> {
+    unsafe {
+        let schemes = wide(SCHEMES_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(schemes.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        ) != ERROR_SUCCESS
+        {
+            return Err("open Cursors\\Schemes failed".into());
+        }
+        let value_name = wide(name);
+        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE(0);
+        let mut size = 0u32;
+        let query = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut kind),
+            None,
+            Some(&mut size),
+        );
+        if query != ERROR_SUCCESS {
+            let _ = RegCloseKey(hkey);
+            return Err(format!("scheme {name:?} not found"));
+        }
+        let mut blob = vec![0u8; size as usize];
+        let read = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut kind),
+            Some(blob.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if read != ERROR_SUCCESS
+            || !matches!(
+                kind,
+                windows::Win32::System::Registry::REG_EXPAND_SZ
+                    | windows::Win32::System::Registry::REG_SZ
+            )
+        {
+            return Err(format!("scheme {name:?} unreadable"));
+        }
+        blob.truncate(size as usize);
+        // Split the NUL-separated UTF-16 blob into paths.
+        let units: Vec<u16> = blob
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .collect();
+        let paths: Vec<String> = units
+            .split(|&u| u == 0)
+            .take(CURSOR_NAMES.len())
+            .map(String::from_utf16_lossy)
+            .collect();
+        if paths.len() < CURSOR_NAMES.len() {
+            return Err(format!(
+                "scheme {name:?} defines {} of {} cursors",
+                paths.len(),
+                CURSOR_NAMES.len()
+            ));
+        }
+
+        let cursors = wide(CURSORS_KEY);
+        let mut target = HKEY::default();
+        let opened = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(cursors.as_ptr()),
+            None,
+            KEY_WRITE,
+            &mut target,
+        );
+        if opened != ERROR_SUCCESS {
+            return Err(format!("open Cursors: {}", opened.0));
+        }
+        // Write every cursor of the scheme; a scheme may also reset the
+        // (Base)SchemeDefault marker so the picker shows the scheme name.
+        let mut failed = Vec::new();
+        for (value, path) in CURSOR_NAMES.iter().zip(&paths) {
+            let wide_value = wide(value);
+            let wide_path = wide(path);
+            let bytes: Vec<u8> = wide_path
+                .iter()
+                .flat_map(|u| u.to_le_bytes())
+                .chain([0u8, 0])
+                .collect();
+            let status = RegSetValueExW(
+                target,
+                PCWSTR(wide_value.as_ptr()),
+                None,
+                windows::Win32::System::Registry::REG_EXPAND_SZ,
+                Some(&bytes),
+            );
+            if status != ERROR_SUCCESS {
+                failed.push(format!("{value}:{}", status.0));
+            }
+        }
+        let scheme_marker = wide("(Scheme Default)");
+        let name_wide = wide(name);
+        let name_bytes: Vec<u8> = name_wide
+            .iter()
+            .flat_map(|u| u.to_le_bytes())
+            .chain([0u8, 0])
+            .collect();
+        let _ = RegSetValueExW(
+            target,
+            PCWSTR(scheme_marker.as_ptr()),
+            None,
+            windows::Win32::System::Registry::REG_SZ,
+            Some(&name_bytes),
+        );
+        let _ = RegCloseKey(target);
+        if !failed.is_empty() {
+            return Err(failed.join(", "));
+        }
+        let ok = windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+            windows::Win32::UI::WindowsAndMessaging::SPI_SETCURSORS,
+            0,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        if ok.is_ok() {
+            Ok(())
+        } else {
+            Err("SystemParametersInfoW(SPI_SETCURSORS) rejected the request".into())
+        }
     }
 }
 

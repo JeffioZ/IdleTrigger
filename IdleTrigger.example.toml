@@ -50,6 +50,12 @@ theme_ip_location_enabled = false
 theme_dark_on_battery = true
 # 检测到全屏应用、演示模式或前台游戏活动时暂不自动切换主题 / Pause automatic theme switching during fullscreen apps, presentations, or foreground game activity
 theme_skip_fullscreen = true
+# 随昼夜切换应用的浅色/深色壁纸路径；留空表示不更改壁纸 / Wallpaper path applied with the light/dark switch; empty keeps it unchanged
+# theme_light_wallpaper = ""
+# theme_dark_wallpaper = ""
+# 随昼夜切换应用的已安装指针方案名（控制面板 → 鼠标 → 指针中的方案）；留空表示不更改 / Installed cursor-scheme name applied with the light/dark switch; empty keeps it unchanged
+# theme_light_cursor_scheme = ""
+# theme_dark_cursor_scheme = ""
 
 # -- 设置 / Settings --
 # 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒，Win+Shift+D 切换昼夜 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake, Win+Shift+D switch day/night

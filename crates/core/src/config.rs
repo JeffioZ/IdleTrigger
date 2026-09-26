@@ -37,6 +37,10 @@ pub struct Config {
     pub theme_ip_location_enabled: bool,
     pub theme_dark_on_battery: bool,
     pub theme_skip_fullscreen: bool,
+    pub theme_light_wallpaper: String,
+    pub theme_dark_wallpaper: String,
+    pub theme_light_cursor_scheme: String,
+    pub theme_dark_cursor_scheme: String,
 }
 
 impl Default for Config {
@@ -68,6 +72,10 @@ impl Default for Config {
             theme_ip_location_enabled: false,
             theme_dark_on_battery: true,
             theme_skip_fullscreen: true,
+            theme_light_wallpaper: String::new(),
+            theme_dark_wallpaper: String::new(),
+            theme_light_cursor_scheme: String::new(),
+            theme_dark_cursor_scheme: String::new(),
         }
     }
 }
@@ -274,6 +282,18 @@ fn read_config(
             .unwrap_or(defaults.theme_dark_on_battery),
         theme_skip_fullscreen: as_bool(document, "theme_skip_fullscreen", bad_fields)
             .unwrap_or(defaults.theme_skip_fullscreen),
+        theme_light_wallpaper: as_str(document, "theme_light_wallpaper", bad_fields)
+            .unwrap_or(&defaults.theme_light_wallpaper)
+            .to_string(),
+        theme_dark_wallpaper: as_str(document, "theme_dark_wallpaper", bad_fields)
+            .unwrap_or(&defaults.theme_dark_wallpaper)
+            .to_string(),
+        theme_light_cursor_scheme: as_str(document, "theme_light_cursor_scheme", bad_fields)
+            .unwrap_or(&defaults.theme_light_cursor_scheme)
+            .to_string(),
+        theme_dark_cursor_scheme: as_str(document, "theme_dark_cursor_scheme", bad_fields)
+            .unwrap_or(&defaults.theme_dark_cursor_scheme)
+            .to_string(),
     }
 }
 
@@ -391,6 +411,26 @@ fn save_candidate(
         document,
         "theme_skip_fullscreen",
         config.theme_skip_fullscreen,
+    );
+    set_str(
+        document,
+        "theme_light_wallpaper",
+        &config.theme_light_wallpaper,
+    );
+    set_str(
+        document,
+        "theme_dark_wallpaper",
+        &config.theme_dark_wallpaper,
+    );
+    set_str(
+        document,
+        "theme_light_cursor_scheme",
+        &config.theme_light_cursor_scheme,
+    );
+    set_str(
+        document,
+        "theme_dark_cursor_scheme",
+        &config.theme_dark_cursor_scheme,
     );
     set_str(document, "language", &config.language);
 
@@ -531,6 +571,10 @@ mod save_tests {
             theme_ip_location_enabled: true,
             theme_dark_on_battery: false,
             theme_skip_fullscreen: false,
+            theme_light_wallpaper: "C:\\walls\\day.jpg".into(),
+            theme_dark_wallpaper: "D:\\pics\\night.png".into(),
+            theme_light_cursor_scheme: "Windows Standard".into(),
+            theme_dark_cursor_scheme: "Windows Black".into(),
         };
         let path = std::env::temp_dir().join(format!(
             "idletrigger-full-field-{}-{}.toml",
