@@ -957,7 +957,15 @@ pub fn finish_repair() {
             Ok(()) => crate::log_line("theme repair completed"),
             Err(error) => {
                 crate::log_line(&format!("theme repair failed: {error}"));
-                crate::warn_dialog("", &crate::t_args("theme_repair_failed", &[&error]));
+                // A missing theme file is the one failure users can fix
+                // themselves; point them at the remedy instead of the raw
+                // technical message.
+                let body = if error.to_string().contains("no current theme file") {
+                    crate::t_pub("theme_repair_no_theme_file")
+                } else {
+                    crate::t_args("theme_repair_failed", &[&error])
+                };
+                crate::warn_dialog("", &body);
             }
         }
     }

@@ -39,6 +39,8 @@ pub struct Config {
     pub theme_skip_fullscreen: bool,
     pub theme_light_wallpaper: String,
     pub theme_dark_wallpaper: String,
+    /// Wallpaper paths offered in the appearance dropdowns.
+    pub theme_wallpapers: Vec<String>,
     pub theme_light_cursor_scheme: String,
     pub theme_dark_cursor_scheme: String,
 }
@@ -74,6 +76,7 @@ impl Default for Config {
             theme_skip_fullscreen: true,
             theme_light_wallpaper: String::new(),
             theme_dark_wallpaper: String::new(),
+            theme_wallpapers: Vec::new(),
             theme_light_cursor_scheme: String::new(),
             theme_dark_cursor_scheme: String::new(),
         }
@@ -288,6 +291,16 @@ fn read_config(
         theme_dark_wallpaper: as_str(document, "theme_dark_wallpaper", bad_fields)
             .unwrap_or(&defaults.theme_dark_wallpaper)
             .to_string(),
+        theme_wallpapers: document
+            .get("theme_wallpapers")
+            .and_then(toml_edit::Item::as_array)
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
         theme_light_cursor_scheme: as_str(document, "theme_light_cursor_scheme", bad_fields)
             .unwrap_or(&defaults.theme_light_cursor_scheme)
             .to_string(),
@@ -422,6 +435,18 @@ fn save_candidate(
         "theme_dark_wallpaper",
         &config.theme_dark_wallpaper,
     );
+    {
+        // The library is rewritten as one array; unchanged content keeps the
+        // user's formatting via toml_edit's value comparison.
+        let existing = document
+            .get("theme_wallpapers")
+            .map(|item| item.to_string())
+            .unwrap_or_default();
+        let array = toml_edit::Array::from_iter(config.theme_wallpapers.iter().cloned());
+        if existing != array.to_string() {
+            document["theme_wallpapers"] = toml_edit::Item::Value(toml_edit::Value::Array(array));
+        }
+    }
     set_str(
         document,
         "theme_light_cursor_scheme",
@@ -573,6 +598,7 @@ mod save_tests {
             theme_skip_fullscreen: false,
             theme_light_wallpaper: "C:\\walls\\day.jpg".into(),
             theme_dark_wallpaper: "D:\\pics\\night.png".into(),
+            theme_wallpapers: vec!["C:\\walls\\day.jpg".into(), "D:\\pics\\night.png".into()],
             theme_light_cursor_scheme: "Windows Standard".into(),
             theme_dark_cursor_scheme: "Windows Black".into(),
         };

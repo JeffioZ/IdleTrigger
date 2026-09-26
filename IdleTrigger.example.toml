@@ -53,6 +53,8 @@ theme_skip_fullscreen = true
 # 随昼夜切换应用的浅色/深色壁纸路径；留空表示不更改壁纸 / Wallpaper path applied with the light/dark switch; empty keeps it unchanged
 # theme_light_wallpaper = ""
 # theme_dark_wallpaper = ""
+# 壁纸方案库（设置界面“外观联动”页添加；浅色/深色从库中选择）/ Wallpaper library (added on the Settings Appearance page; the light/dark rows pick from it)
+# theme_wallpapers = []
 # 随昼夜切换应用的已安装指针方案名（控制面板 → 鼠标 → 指针中的方案）；留空表示不更改 / Installed cursor-scheme name applied with the light/dark switch; empty keeps it unchanged
 # theme_light_cursor_scheme = ""
 # theme_dark_cursor_scheme = ""

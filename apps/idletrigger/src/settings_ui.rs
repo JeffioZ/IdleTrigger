@@ -78,10 +78,8 @@ const ID_PAUSE_ON_LOCK: i32 = 177;
 const ID_APPEARANCE_TITLE: i32 = 178;
 const ID_LIGHT_WALL_LBL: i32 = 179;
 const ID_LIGHT_WALL: i32 = 180;
-const ID_LIGHT_WALL_BROWSE: i32 = 181;
 const ID_DARK_WALL_LBL: i32 = 182;
 const ID_DARK_WALL: i32 = 183;
-const ID_DARK_WALL_BROWSE: i32 = 184;
 const ID_LIGHT_CURSOR_LBL: i32 = 185;
 const ID_LIGHT_CURSOR: i32 = 186;
 const ID_DARK_CURSOR_LBL: i32 = 187;
@@ -90,6 +88,14 @@ const ID_LIGHT_CURSOR_INSTALL: i32 = 189;
 const ID_DARK_CURSOR_INSTALL: i32 = 190;
 const ID_TAB_APPEARANCE: i32 = 191;
 const ID_APPEARANCE_HINT: i32 = 192;
+const ID_WALL_LIB: i32 = 193;
+const ID_WALL_ADD: i32 = 194;
+const ID_WALL_REMOVE: i32 = 195;
+
+/// Session state for the wallpaper library: seeded from the config when the
+/// settings window opens, mutated by Add/Remove, committed on Save.
+static WALLPAPER_LIBRARY: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
@@ -604,10 +610,10 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ),
         );
 
-        // Appearance page (its own tab): per-side wallpaper and cursor
-        // schemes applied together with the theme switch. Wallpaper rows
-        // pair an edit with a Browse button; cursor rows list installed
-        // schemes plus an installer for .inf packages.
+        // Appearance page (its own tab): a shared wallpaper library plus
+        // per-side selections, and per-side cursor schemes with an .inf
+        // installer. Library rows manage the saved wallpaper list; the
+        // light/dark rows pick from it.
         label(
             hwnd,
             ID_APPEARANCE_TITLE,
@@ -617,21 +623,32 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             false,
         );
         let first_row = SECTION_TOP + SECTION_TITLE_H + 24;
-        for (row, lbl, edit_id, browse_id, key) in [
-            (
-                0,
-                ID_LIGHT_WALL_LBL,
-                ID_LIGHT_WALL,
-                ID_LIGHT_WALL_BROWSE,
-                "settings_light_wallpaper",
-            ),
+        // Wallpaper library row: the dropdown lists saved wallpapers; the
+        // manage buttons at the bottom of the page act on its selection.
+        let row_y = first_row;
+        label(
+            hwnd,
+            ID_WALL_LIB,
+            &t_pub("settings_wallpaper_library"),
+            font,
+            (CONTENT_X, row_y, 140, 22),
+            false,
+        );
+        combo(
+            hwnd,
+            ID_WALL_LIB,
+            (352, row_y - 8, 324, FIELD_H),
+            &wallpaper_library_labels(),
+        );
+        // Light/dark wallpaper rows pick from the library.
+        for (row, lbl, combo_id, key) in [
             (
                 1,
-                ID_DARK_WALL_LBL,
-                ID_DARK_WALL,
-                ID_DARK_WALL_BROWSE,
-                "settings_dark_wallpaper",
+                ID_LIGHT_WALL_LBL,
+                ID_LIGHT_WALL,
+                "settings_light_wallpaper",
             ),
+            (2, ID_DARK_WALL_LBL, ID_DARK_WALL, "settings_dark_wallpaper"),
         ] {
             let row_y = first_row + row * 46;
             label(
@@ -642,24 +659,23 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 (CONTENT_X, row_y, 140, 22),
                 false,
             );
-            edit(hwnd, edit_id, (352, row_y - 8, 210, FIELD_H), false);
-            push_button(
+            combo(
                 hwnd,
-                browse_id,
-                &t_pub("settings_browse"),
-                (570, row_y - 8, 106, FIELD_H),
+                combo_id,
+                (352, row_y - 8, 324, FIELD_H),
+                &wallpaper_pick_labels(),
             );
         }
         for (row, lbl, combo_id, install_id, key) in [
             (
-                2,
+                3,
                 ID_LIGHT_CURSOR_LBL,
                 ID_LIGHT_CURSOR,
                 ID_LIGHT_CURSOR_INSTALL,
                 "settings_light_cursor",
             ),
             (
-                3,
+                4,
                 ID_DARK_CURSOR_LBL,
                 ID_DARK_CURSOR,
                 ID_DARK_CURSOR_INSTALL,
@@ -691,12 +707,26 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 (600, row_y - 8, 76, FIELD_H),
             );
         }
+        // Library manage buttons act on the wallpaper dropdown selection.
+        let manage_y = first_row + 5 * 46;
+        push_button(
+            hwnd,
+            ID_WALL_ADD,
+            &t_pub("settings_wall_add"),
+            (CONTENT_X, manage_y, 224, FIELD_H),
+        );
+        push_button(
+            hwnd,
+            ID_WALL_REMOVE,
+            &t_pub("settings_wall_remove"),
+            (CONTENT_X + 232, manage_y, 224, FIELD_H),
+        );
         label(
             hwnd,
             ID_APPEARANCE_HINT,
             &t_pub("settings_appearance_hint"),
             font,
-            (CONTENT_X, first_row + 4 * 46 + 10, 468, 40),
+            (CONTENT_X, manage_y + FIELD_H + 14, 468, 40),
             false,
         );
 
@@ -1052,6 +1082,111 @@ fn cursor_choice_labels() -> Vec<String> {
     items
 }
 
+/// Library dropdown rows: file names (full path when names collide).
+fn wallpaper_library_labels() -> Vec<String> {
+    let library = crate::runtime::lock(&WALLPAPER_LIBRARY);
+    let names: Vec<String> = library
+        .iter()
+        .map(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.clone())
+        })
+        .collect();
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            if names.iter().filter(|n| *n == name).count() > 1 {
+                library[index].clone()
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
+}
+
+/// Light/dark picker rows: "no linkage" plus the library entries.
+fn wallpaper_pick_labels() -> Vec<String> {
+    let mut items = vec![t_pub("settings_appearance_none")];
+    items.extend(wallpaper_library_labels());
+    items
+}
+
+/// Replaces the rows of one choice, keeping the selection by label.
+fn refresh_choice_rows(hwnd: HWND, id: i32, labels: &[String]) {
+    let selected = control_text_of(get(hwnd, id));
+    let rows: Vec<crate::choice::ChoiceItem> = labels
+        .iter()
+        .map(|label| crate::choice::ChoiceItem::option(label, label))
+        .collect();
+    let index = labels.iter().position(|l| *l == selected).unwrap_or(0) as i32;
+    crate::choice::set_rows(get(hwnd, id), &rows);
+    crate::choice::select_index(get(hwnd, id), index);
+}
+
+/// Reloads every wallpaper dropdown from the session library, keeping
+/// selections whose entries still exist (clearing ones that were removed).
+fn refresh_wallpaper_choices(hwnd: HWND) {
+    let library = wallpaper_library_labels();
+    let picks = wallpaper_pick_labels();
+    refresh_choice_rows(hwnd, ID_WALL_LIB, &library);
+    refresh_choice_rows(hwnd, ID_LIGHT_WALL, &picks);
+    refresh_choice_rows(hwnd, ID_DARK_WALL, &picks);
+}
+
+/// Adds a wallpaper to the session library (deduplicated) and refreshes the
+/// dropdowns; the new entry becomes the library dropdown selection.
+fn add_wallpaper_to_library(hwnd: HWND, path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let index = {
+        let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY);
+        if let Some(existing) = library.iter().position(|p| p.eq_ignore_ascii_case(trimmed)) {
+            existing
+        } else {
+            library.push(trimmed.to_string());
+            library.len() - 1
+        }
+    };
+    refresh_wallpaper_choices(hwnd);
+    crate::choice::select_index(get(hwnd, ID_WALL_LIB), index as i32);
+}
+
+/// Removes the library dropdown's selected entry; selections that pointed at
+/// it (library or light/dark) fall back to no linkage.
+fn remove_selected_wallpaper(hwnd: HWND) {
+    let index = combo_sel(hwnd, ID_WALL_LIB);
+    if index == 0 {
+        return;
+    }
+    let removed = {
+        let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY);
+        if (1..=library.len()).contains(&index) {
+            Some(library.remove(index - 1))
+        } else {
+            None
+        }
+    };
+    let Some(removed) = removed else {
+        return;
+    };
+    let removed_label = std::path::Path::new(&removed)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or(removed.clone());
+    // Clear pickers that referenced the removed entry (by label match).
+    for id in [ID_LIGHT_WALL, ID_DARK_WALL] {
+        if control_text_of(get(hwnd, id)) == removed_label {
+            crate::choice::select_index(get(hwnd, id), 0);
+        }
+    }
+    refresh_wallpaper_choices(hwnd);
+}
+
 /// Installs a pointer-scheme .inf through the system installer (the
 /// context-menu "Install" verb). The scheme appears in the dropdown once
 /// the installer finishes; dropdowns refresh immediately after the call and
@@ -1132,13 +1267,19 @@ fn control_text_of(control: HWND) -> String {
     String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
 }
 
-/// Wallpaper picker: image files only, result fills the paired edit.
-fn browse_wallpaper(owner: HWND, target: i32) {
+/// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
+/// plus an all-files fallback. Returns the chosen path.
+fn browse_wallpaper_file(owner: HWND) -> Option<String> {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
     unsafe {
         let mut filter: Vec<u16> = t_pub("settings_wallpaper_filter").encode_utf16().collect();
         filter.push(0);
-        filter.extend("*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.tif;*.tiff".encode_utf16());
+        filter.extend("*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.heic".encode_utf16());
+        filter.push(0);
+        let all = t_pub("settings_all_files");
+        filter.extend(all.encode_utf16());
+        filter.push(0);
+        filter.extend("*.*".encode_utf16());
         filter.push(0);
         filter.push(0);
         let mut file = vec![0u16; 32768];
@@ -1162,10 +1303,10 @@ fn browse_wallpaper(owner: HWND, target: i32) {
             ..Default::default()
         };
         if !GetOpenFileNameW(&mut dialog).as_bool() {
-            return;
+            return None;
         }
         let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
-        set_text(owner, target, &String::from_utf16_lossy(&file[..end]));
+        Some(String::from_utf16_lossy(&file[..end]))
     }
 }
 
@@ -1307,8 +1448,26 @@ fn populate(hwnd: HWND) {
     set_text(hwnd, ID_WARNING_SECONDS, &warning.to_string());
     set_text(hwnd, ID_LIGHT_TIME, &light_time);
     set_text(hwnd, ID_DARK_TIME, &dark_time);
-    set_text(hwnd, ID_LIGHT_WALL, &light_wallpaper);
-    set_text(hwnd, ID_DARK_WALL, &dark_wallpaper);
+    *crate::runtime::lock(&WALLPAPER_LIBRARY) = crate::cfg_map(|c| c.theme_wallpapers.clone());
+    refresh_wallpaper_choices(hwnd);
+    // Select the configured light/dark entries by their file-name label.
+    let pick_label = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    let picks = wallpaper_pick_labels();
+    for (id, path) in [
+        (ID_LIGHT_WALL, &light_wallpaper),
+        (ID_DARK_WALL, &dark_wallpaper),
+    ] {
+        let index = picks
+            .iter()
+            .position(|l| !path.is_empty() && *l == pick_label(path))
+            .unwrap_or(0) as i32;
+        crate::choice::select_index(get(hwnd, id), index);
+    }
     // Cursor dropdowns: 0 = no linkage, otherwise the scheme's row; a
     // scheme that no longer exists falls back to no linkage.
     let schemes = crate::theme_engine::cursor_schemes();
@@ -1421,12 +1580,13 @@ fn page_ids(page: i32) -> &'static [i32] {
         ],
         4 => &[
             ID_APPEARANCE_TITLE,
+            ID_WALL_LIB,
+            ID_WALL_ADD,
+            ID_WALL_REMOVE,
             ID_LIGHT_WALL_LBL,
             ID_LIGHT_WALL,
-            ID_LIGHT_WALL_BROWSE,
             ID_DARK_WALL_LBL,
             ID_DARK_WALL,
-            ID_DARK_WALL_BROWSE,
             ID_LIGHT_CURSOR_LBL,
             ID_LIGHT_CURSOR,
             ID_LIGHT_CURSOR_INSTALL,
@@ -1555,6 +1715,7 @@ struct Draft {
     theme_fullscreen: bool,
     light_wallpaper: String,
     dark_wallpaper: String,
+    wallpapers: Vec<String>,
     light_cursor: String,
     dark_cursor: String,
     language_idx: usize,
@@ -1587,6 +1748,26 @@ fn collect_draft(hwnd: HWND) -> Draft {
             .cloned()
             .unwrap_or_default()
     };
+    // Dropdown row -> library path (0 = no linkage).
+    let library_paths = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
+    let wall_at = |row: usize| -> String {
+        if row == 0 {
+            return String::new();
+        }
+        wallpaper_pick_labels()
+            .get(row)
+            .and_then(|label| {
+                library_paths
+                    .iter()
+                    .find(|p| {
+                        std::path::Path::new(p.as_str())
+                            .file_name()
+                            .is_some_and(|n| n.to_string_lossy() == label.as_str())
+                    })
+                    .cloned()
+            })
+            .unwrap_or_default()
+    };
     Draft {
         keep_screen: is_checked(hwnd, ID_KEEP_SCREEN),
         battery_allowed: is_checked(hwnd, ID_BATTERY_ALLOWED),
@@ -1602,8 +1783,9 @@ fn collect_draft(hwnd: HWND) -> Draft {
         location_idx: combo_sel(hwnd, ID_LOCATION_SOURCE),
         theme_battery: is_checked(hwnd, ID_THEME_BATTERY),
         theme_fullscreen: is_checked(hwnd, ID_THEME_FULLSCREEN),
-        light_wallpaper: control_text(hwnd, ID_LIGHT_WALL).trim().to_string(),
-        dark_wallpaper: control_text(hwnd, ID_DARK_WALL).trim().to_string(),
+        light_wallpaper: wall_at(combo_sel(hwnd, ID_LIGHT_WALL)),
+        dark_wallpaper: wall_at(combo_sel(hwnd, ID_DARK_WALL)),
+        wallpapers: library_paths,
         // Map the dropdown row back to a scheme name (0 = empty = off).
         light_cursor: scheme_at(combo_sel(hwnd, ID_LIGHT_CURSOR)),
         dark_cursor: scheme_at(combo_sel(hwnd, ID_DARK_CURSOR)),
@@ -1757,6 +1939,7 @@ fn draft_differs(draft: &Draft) -> bool {
         || draft.theme_fullscreen != cfg_fullscreen
         || draft.light_wallpaper != cfg_light_wall
         || draft.dark_wallpaper != cfg_dark_wall
+        || draft.wallpapers != base.theme_wallpapers
         || draft.light_cursor != cfg_light_cursor
         || draft.dark_cursor != cfg_dark_cursor
         || draft.language_idx != lang_idx
@@ -1812,6 +1995,7 @@ fn save() {
             c.theme_skip_fullscreen = draft.theme_fullscreen;
             c.theme_light_wallpaper = draft.light_wallpaper.clone();
             c.theme_dark_wallpaper = draft.dark_wallpaper.clone();
+            c.theme_wallpapers = draft.wallpapers.clone();
             c.theme_light_cursor_scheme = draft.light_cursor.clone();
             c.theme_dark_cursor_scheme = draft.dark_cursor.clone();
             c.language = LANG_VALUES[draft.language_idx].to_string();
@@ -1936,12 +2120,13 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_THEME_LOCATION_STATUS, "tip_theme_location_status"),
         (ID_THEME_BATTERY, "tip_battery_theme"),
         (ID_THEME_FULLSCREEN, "tip_fullscreen"),
+        (ID_WALL_LIB, "tip_wallpaper_library"),
+        (ID_WALL_ADD, "tip_wallpaper_library"),
+        (ID_WALL_REMOVE, "tip_wallpaper_library"),
         (ID_LIGHT_WALL_LBL, "tip_theme_wallpaper"),
         (ID_LIGHT_WALL, "tip_theme_wallpaper"),
-        (ID_LIGHT_WALL_BROWSE, "tip_theme_wallpaper"),
         (ID_DARK_WALL_LBL, "tip_theme_wallpaper"),
         (ID_DARK_WALL, "tip_theme_wallpaper"),
-        (ID_DARK_WALL_BROWSE, "tip_theme_wallpaper"),
         (ID_LIGHT_CURSOR_LBL, "tip_theme_cursor"),
         (ID_LIGHT_CURSOR, "tip_theme_cursor"),
         (ID_DARK_CURSOR_LBL, "tip_theme_cursor"),
@@ -2182,13 +2367,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 fn field_surface_of(edit_id: i32) -> Option<i32> {
     if matches!(
         edit_id,
-        ID_BATTERY_THRESH
-            | ID_IDLE_TIMEOUT
-            | ID_WARNING_SECONDS
-            | ID_LIGHT_TIME
-            | ID_DARK_TIME
-            | ID_LIGHT_WALL
-            | ID_DARK_WALL
+        ID_BATTERY_THRESH | ID_IDLE_TIMEOUT | ID_WARNING_SECONDS | ID_LIGHT_TIME | ID_DARK_TIME
     ) {
         Some(FIELD_SURFACE_BASE + edit_id)
     } else {
@@ -2344,12 +2523,21 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 set_text(hwnd, ID_VALIDATION, "");
             }
             ID_THEME_MODE | ID_LOCATION_SOURCE | ID_IDLE_ACTION | ID_LANGUAGE | ID_LIGHT_CURSOR
-            | ID_DARK_CURSOR => {
+            | ID_DARK_CURSOR | ID_WALL_LIB | ID_LIGHT_WALL | ID_DARK_WALL => {
+                // Refresh scheme/wallpaper rows right before opening so an
+                // install that just finished or a library edit shows up.
+                if idc == ID_LIGHT_CURSOR || idc == ID_DARK_CURSOR {
+                    refresh_cursor_choices(hwnd);
+                }
                 crate::choice::toggle(get(hwnd, idc), hwnd, idc);
             }
-            ID_LIGHT_WALL_BROWSE => browse_wallpaper(hwnd, ID_LIGHT_WALL),
-            ID_DARK_WALL_BROWSE => browse_wallpaper(hwnd, ID_DARK_WALL),
             ID_LIGHT_CURSOR_INSTALL | ID_DARK_CURSOR_INSTALL => install_cursor_inf(hwnd),
+            ID_WALL_ADD => {
+                if let Some(path) = browse_wallpaper_file(hwnd) {
+                    add_wallpaper_to_library(hwnd, &path);
+                }
+            }
+            ID_WALL_REMOVE => remove_selected_wallpaper(hwnd),
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_SAVE => save(),
@@ -2435,8 +2623,7 @@ pub fn refresh_language() {
         (ID_APPEARANCE_TITLE, "settings_theme_appearance_group"),
         (ID_LIGHT_WALL_LBL, "settings_light_wallpaper"),
         (ID_DARK_WALL_LBL, "settings_dark_wallpaper"),
-        (ID_LIGHT_WALL_BROWSE, "settings_browse"),
-        (ID_DARK_WALL_BROWSE, "settings_browse"),
+        (ID_WALL_LIB, "settings_wallpaper_library"),
         (ID_LIGHT_CURSOR_INSTALL, "settings_install_inf"),
         (ID_DARK_CURSOR_INSTALL, "settings_install_inf"),
         (ID_LIGHT_CURSOR_LBL, "settings_light_cursor"),
@@ -2468,6 +2655,9 @@ pub fn refresh_language() {
         (ID_IDLE_ACTION, idle_action_labels()),
         (ID_LIGHT_CURSOR, cursor_choice_labels()),
         (ID_DARK_CURSOR, cursor_choice_labels()),
+        (ID_WALL_LIB, wallpaper_library_labels()),
+        (ID_LIGHT_WALL, wallpaper_pick_labels()),
+        (ID_DARK_WALL, wallpaper_pick_labels()),
         (
             ID_THEME_MODE,
             vec![

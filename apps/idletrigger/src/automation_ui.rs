@@ -2803,12 +2803,14 @@ pub fn layout_editor() {
                 crate::nativeform::set_visible_deferred(surface, visible.contains(&surface));
             }
         }
-        // Record the content extent: the pane covers the manager client
-        // area, the manager resizes to it, and the viewport only scrolls
-        // when the work area clamps the window.
+        // Grow the window first, then record the content extent against the
+        // final client size: recording against the old (short) pane would
+        // arm scrollbars for a size that no longer exists. The width keeps a
+        // scrollbar margin so a vertical bar cannot phantom-trigger the
+        // horizontal one.
         EDITOR_CONTENT_H.store(content_bottom as isize, Ordering::SeqCst);
-        crate::viewport::fit_content(ed, ED_W, content_bottom);
         sync_manager_height();
+        crate::viewport::fit_content(ed, ED_W - ED_EDGE, content_bottom);
         if IsWindowVisible(ed).as_bool() {
             crate::present_layout(ed);
         }
@@ -5456,7 +5458,7 @@ mod surface_tests {
                 WINDOW_EX_STYLE(0),
                 windows::core::w!("STATIC"),
                 windows::core::w!(""),
-                WINDOW_STYLE(0),
+                WINDOW_STYLE(WS_VISIBLE.0),
                 0,
                 0,
                 400,
@@ -5490,11 +5492,10 @@ mod surface_tests {
         choice_select(ed, ED_TRIGGER, auto::TRIGGER_TIME_WINDOW);
         choice_select(ed, ED_BLOCKED, "wait");
         set_text(get_dlg_item(ed, ED_MAX_WAIT), "10");
-        // The real flow shows the host and pane before laying it out;
-        // height sync only runs for a visible pane (IsWindowVisible checks
-        // the whole ancestor chain).
+        // The real flow shows the pane before laying it out; height sync
+        // only runs for a visible pane (IsWindowVisible checks the whole
+        // ancestor chain, hence the visible host above).
         unsafe {
-            let _ = ShowWindow(host, SW_SHOW);
             let _ = ShowWindow(ed, SW_SHOW);
         }
         layout_editor();

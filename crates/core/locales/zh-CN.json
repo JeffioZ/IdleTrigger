@@ -138,7 +138,6 @@
   "settings_theme_appearance_group": "外观联动",
   "settings_light_wallpaper": "浅色壁纸",
   "settings_dark_wallpaper": "深色壁纸",
-  "settings_browse": "浏览",
   "settings_install_inf": "安装…",
   "settings_inf_filter": "指针方案（.inf）",
   "settings_inf_browse_title": "安装指针方案",
@@ -314,6 +313,7 @@
   "settings_save_conflict": "配置已在其他位置更改，请关闭并重新打开“设置”后再保存。",
   "settings_system_apply_failed": "设置已保存，但 Windows 未能应用以下选项：%s。请重试。",
   "theme_repair_failed": "主题修复未完成：%s",
+  "theme_repair_no_theme_file": "找不到当前 Windows 主题文件，无法修复。请先在系统“个性化”设置中切换一次主题（让 Windows 生成主题文件），然后再试",
   "tip_nosleep_battery": "允许保持唤醒在使用电池时继续工作；关闭后仅在接通电源时生效",
   "tip_nosleep_battery_threshold": "电量低于此百分比时停止保持唤醒。输入 0 表示不设置最低电量",
   "tip_idle_warning_seconds": "空闲动作执行前显示可取消倒计时，最少 10 秒",
@@ -394,5 +394,10 @@
   "trigger_daily": "每日",
   "trigger_weekly": "每周",
   "error_single_instance": "无法确认应用是否已经运行，已停止启动：%s",
-  "automation_checkpoint_failed": "任务“%s”的触发记录保存失败，已跳过本次计划动作。请检查目录写入权限和磁盘空间。\n%s"
+  "automation_checkpoint_failed": "任务“%s”的触发记录保存失败，已跳过本次计划动作。请检查目录写入权限和磁盘空间。\n%s",
+  "settings_wallpaper_library": "壁纸方案库",
+  "settings_wall_add": "添加壁纸…",
+  "settings_wall_remove": "移除所选",
+  "settings_all_files": "所有文件",
+  "tip_wallpaper_library": "已添加的壁纸列表；选中一项后可移除。浅色/深色行从此库中选择"
 }

@@ -138,7 +138,6 @@
   "settings_theme_appearance_group": "Appearance",
   "settings_light_wallpaper": "Light wallpaper",
   "settings_dark_wallpaper": "Dark wallpaper",
-  "settings_browse": "Browse",
   "settings_install_inf": "Install…",
   "settings_inf_filter": "Pointer scheme (.inf)",
   "settings_inf_browse_title": "Install a pointer scheme",
@@ -314,6 +313,7 @@
   "settings_save_conflict": "The configuration changed elsewhere. Close and reopen Settings before saving.",
   "settings_system_apply_failed": "Settings were saved, but Windows could not apply these options: %s. Please retry.",
   "theme_repair_failed": "Theme repair did not complete: %s",
+  "theme_repair_no_theme_file": "The current Windows theme file is missing, so repair cannot run. Switch themes once in Windows Personalization settings (so a theme file exists) and try again",
   "tip_nosleep_battery": "Allow Stay Awake to continue on battery power. When off, it runs only while connected to AC power",
   "tip_nosleep_battery_threshold": "Stop Stay Awake below this battery percentage. Enter 0 for no minimum battery level",
   "tip_idle_warning_seconds": "Show a cancellable countdown before the idle action, 10 seconds minimum",
@@ -394,5 +394,10 @@
   "trigger_daily": "Daily",
   "trigger_weekly": "Weekly",
   "error_single_instance": "Could not check whether the app is already running. Startup was stopped: %s",
-  "automation_checkpoint_failed": "The occurrence record for task \"%s\" could not be saved. This scheduled action was skipped. Check the folder's write access and available disk space.\n%s"
+  "automation_checkpoint_failed": "The occurrence record for task \"%s\" could not be saved. This scheduled action was skipped. Check the folder's write access and available disk space.\n%s",
+  "settings_wallpaper_library": "Wallpaper library",
+  "settings_wall_add": "Add wallpaper…",
+  "settings_wall_remove": "Remove selected",
+  "settings_all_files": "All files",
+  "tip_wallpaper_library": "Wallpapers you added; pick a file to remove it. Light/dark rows choose from this library"
 }

@@ -1,3 +1,8 @@
 [target.'cfg(all(windows, target_env = "msvc"))']
 # Ship one EXE without requiring the Visual C++ Redistributable.
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# UI tests drive deep synchronous repaints (RDW_UPDATENOW over full forms);
+# the default 2 MiB test-thread stack overflows on i686.
+RUST_MIN_STACK = "8388608"

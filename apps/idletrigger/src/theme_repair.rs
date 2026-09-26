@@ -120,7 +120,8 @@ fn current_theme_snapshot() -> io::Result<String> {
         }
     }
     Err(io::Error::other(
-        "no current Windows theme file path is available",
+        "no current theme file path is available (switch themes once in Windows \
+         Personalization so a theme file exists, then repair again)",
     ))
 }
 
