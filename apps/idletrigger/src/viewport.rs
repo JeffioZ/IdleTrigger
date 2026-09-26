@@ -167,47 +167,7 @@ pub fn fit(hwnd: HWND) {
         if GetClientRect(hwnd, &mut client).is_err() {
             return;
         }
-        if state(hwnd).is_none() {
-            let data = Box::into_raw(Box::new(State {
-                width: Cell::new(client.right),
-                x: Cell::new(0),
-                restore_x: Cell::new(0),
-                bar: Cell::new(HWND::default()),
-                drag: Cell::new(-1),
-                hover: Cell::new(false),
-                wheel: Cell::new(0),
-                height: Cell::new(client.bottom),
-                position: Cell::new(0),
-                restore: Cell::new(0),
-            }));
-            if !SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS, data as usize).as_bool() {
-                drop(Box::from_raw(data));
-                return;
-            }
-            crate::list_style::install(hwnd);
-            if let Ok(bar) = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("STATIC"),
-                windows::core::w!(""),
-                WS_CHILD | WINDOW_STYLE(0x100),
-                0,
-                0,
-                1,
-                1,
-                Some(hwnd),
-                None,
-                None,
-                None,
-            ) {
-                if SetWindowSubclass(bar, Some(horizontal_proc), SUBCLASS, hwnd.0 as usize)
-                    .as_bool()
-                {
-                    (*data).bar.set(bar);
-                } else {
-                    let _ = DestroyWindow(bar);
-                }
-            }
-        }
+        ensure_state(hwnd, client.right, client.bottom);
         let state = state(hwnd).unwrap();
         state.height.set(client.bottom);
         state.width.set(client.right);
@@ -216,6 +176,73 @@ pub fn fit(hwnd: HWND) {
         scroll_to(hwnd, state.restore.get());
         crate::list_style::refresh(hwnd);
         sync_horizontal(hwnd);
+    }
+}
+
+/// Records a form's content size for a fixed viewport (an embedded pane
+/// sized by its host): the window is never resized; content scrolls inside
+/// when it exceeds the viewport.
+pub fn fit_content(hwnd: HWND, width: i32, height: i32) {
+    unsafe {
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        ensure_state(hwnd, client.right, client.bottom);
+        let state = state(hwnd).unwrap();
+        state.height.set(height.max(client.bottom));
+        state.width.set(width.max(client.right));
+        scroll_x(hwnd, state.restore_x.get());
+        scroll_to(hwnd, state.restore.get());
+        crate::list_style::refresh(hwnd);
+        sync_horizontal(hwnd);
+    }
+}
+
+/// Creates the scroll state on first use; `fit` bootstraps from the window
+/// size, then the form records its content extents.
+unsafe fn ensure_state(hwnd: HWND, width: i32, height: i32) {
+    unsafe {
+        if state(hwnd).is_some() {
+            return;
+        }
+        let data = Box::into_raw(Box::new(State {
+            width: Cell::new(width),
+            x: Cell::new(0),
+            restore_x: Cell::new(0),
+            bar: Cell::new(HWND::default()),
+            drag: Cell::new(-1),
+            hover: Cell::new(false),
+            wheel: Cell::new(0),
+            height: Cell::new(height),
+            position: Cell::new(0),
+            restore: Cell::new(0),
+        }));
+        if !SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS, data as usize).as_bool() {
+            drop(Box::from_raw(data));
+            return;
+        }
+        crate::list_style::install(hwnd);
+        if let Ok(bar) = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::w!("STATIC"),
+            windows::core::w!(""),
+            WS_CHILD | WINDOW_STYLE(0x100),
+            0,
+            0,
+            1,
+            1,
+            Some(hwnd),
+            None,
+            None,
+            None,
+        ) {
+            if SetWindowSubclass(bar, Some(horizontal_proc), SUBCLASS, hwnd.0 as usize).as_bool() {
+                (*data).bar.set(bar);
+            } else {
+                let _ = DestroyWindow(bar);
+            }
+        }
     }
 }
 

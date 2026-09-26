@@ -81,9 +81,11 @@ const ED_CHOOSE: usize = 362;
 const ED_PROC_INFO: usize = 363;
 const ED_BATTERY: usize = 364;
 const ED_BATTERY_LBL: usize = 365;
+const ED_MODE_TITLE: usize = 366;
 
 /// Every editor control laid out by layout_editor (Go editorControlIDs).
-const ED_LAYOUT_IDS: [usize; 46] = [
+const ED_LAYOUT_IDS: [usize; 47] = [
+    ED_MODE_TITLE,
     ED_BASICS_TITLE,
     ED_NAME_LBL,
     ED_NAME,
@@ -1878,6 +1880,7 @@ fn create_editor() {
             &t_pub(caption_key(EDITOR_TEXTS, ED_BASICS_TITLE)),
             section_font,
         );
+        mk_label(ED_MODE_TITLE, &t_pub("automation_new_title"), section_font);
         mk_label(
             ED_TRIGGER_TITLE,
             &t_pub(caption_key(EDITOR_TEXTS, ED_TRIGGER_TITLE)),
@@ -2115,8 +2118,8 @@ fn default_rule() -> auto::Rule {
 }
 
 fn populate_editor() {
-    unsafe {
-        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    {
         let idx = edit_index();
         let rules = if idx >= 0 {
             crate::runtime::lock(&MGR_DISPLAYED_RULES).clone()
@@ -2137,13 +2140,13 @@ fn populate_editor() {
         });
         complete_edit(idx, rules, rule.clone());
 
-        // Title follows new/edit mode (Go setCaption).
+        // The pane has no caption bar: the mode title row labels new/edit.
         let title = if idx >= 0 {
             t_pub("automation_edit_title")
         } else {
             t_pub("automation_new_title")
         };
-        let _ = SetWindowTextW(ed, PCWSTR(wide(&title).as_ptr()));
+        set_text(get_dlg_item(ed, ED_MODE_TITLE), &title);
 
         set_text(get_dlg_item(ed, ED_NAME), &rule.name);
         set_text(get_dlg_item(ed, ED_DATE), &rule.date);
@@ -2491,8 +2494,10 @@ pub fn layout_editor() {
             place(right, ED_PAD + column_w + ED_GAP, y, column_w, ED_LABEL_H);
         };
 
-        // 基本设置.
+        // Mode title spans the pane top, above the basics section.
         let mut y = ED_EDGE;
+        place(ED_MODE_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
+        y += ED_LABEL_H + ED_SECTION_GAP;
         place(ED_BASICS_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_CONTENT_GAP;
         place(ED_NAME_LBL, ED_PAD, y, content_w, ED_LABEL_H);
@@ -2690,47 +2695,28 @@ pub fn layout_editor() {
             }
         }
 
-        // Status row + footer (stable bounds in both states).
+        // Status row + footer. The pane is a fixed viewport: save/cancel
+        // pin to the bottom on short layouts and follow the flow on tall
+        // ones (the content then scrolls via fit_content).
         y += ED_RELATED_GAP;
         place(ED_VALIDATION, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_SECTION_GAP;
+        let footer_y = y.max(ED_PANE_H - ED_EDGE - BUTTON_H);
         place(
             ED_SAVE,
             ED_PAD + content_w - ED_DIALOG_W,
-            y,
+            footer_y,
             ED_DIALOG_W,
             BUTTON_H,
         );
         place(
             ED_CANCEL,
             ED_PAD + content_w - 2 * ED_DIALOG_W - ED_GAP,
-            y,
+            footer_y,
             ED_DIALOG_W,
             BUTTON_H,
         );
-        y += BUTTON_H + ED_EDGE;
-
-        // Resize the window to the computed client height, keeping the
-        // top-left corner (Go resize).
-        let style = secondary_style();
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(ED_W),
-            bottom: s(y),
-        };
-        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let mut wr = RECT::default();
-        let _ = GetWindowRect(ed, &mut wr);
-        let _ = SetWindowPos(
-            ed,
-            None,
-            wr.left,
-            wr.top,
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-        );
+        let content_bottom = footer_y + BUTTON_H + ED_EDGE;
 
         // Apply only final visibility; existing fields never hide and reappear.
         for id in ED_LAYOUT_IDS {
@@ -2741,7 +2727,9 @@ pub fn layout_editor() {
                 crate::nativeform::set_visible_deferred(surface, visible.contains(&surface));
             }
         }
-        crate::viewport::fit(ed);
+        // Fixed viewport: record the content extent; the pane itself never
+        // resizes (the top-level resize flow is gone with the old window).
+        crate::viewport::fit_content(ed, ED_W, content_bottom);
         if IsWindowVisible(ed).as_bool() {
             crate::present_layout(ed);
         }
