@@ -27,17 +27,11 @@ static SNOOZE: Mutex<Option<i64>> = Mutex::new(None);
 /// few seconds (light feedback for on-demand actions like theme repair).
 static NOTICE: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
 
-/// Shows a short notice in the panel for a few seconds.
+/// Shows a short notice in the panel for a few seconds. Callers run inside
+/// the WM_REFRESH_UI chain (or refresh afterwards) — no extra refresh is
+/// posted here, one redundant full-panel repaint is one visible flicker.
 pub fn show_notice(text: String) {
     *crate::runtime::lock(&NOTICE) = Some((text, std::time::Instant::now()));
-    unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(crate::hwnd(&crate::HIDDEN)),
-            crate::WM_REFRESH_UI,
-            WPARAM(0),
-            LPARAM(0),
-        );
-    }
 }
 
 /// The active notice, if it has not expired yet.
