@@ -3141,6 +3141,9 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 /// the postponed state is unmistakable; otherwise the schedule shows with
 /// its location source.
 fn theme_schedule_text() -> String {
+    if let Some(notice) = theme_engine::active_notice() {
+        return notice;
+    }
     match theme_engine::snooze_deadline_text() {
         Some(until) => t_args("theme_schedule_snoozed_line", &[&until]),
         None => theme_schedule_summary(false),

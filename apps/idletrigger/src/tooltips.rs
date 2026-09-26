@@ -191,24 +191,11 @@ pub fn refresh_all(panel: HWND) {
                 crate::IDC_THEME_ENABLE,
                 TipText::Text(toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")),
             ),
-            (
-                crate::IDC_THEME_SWITCH,
-                TipText::Text(toggle_state_tip(
-                    crate::IDC_THEME_SWITCH,
-                    "tip_theme_switch",
-                )),
-            ),
-            (
-                crate::IDC_THEME_REPAIR,
-                TipText::Text(toggle_state_tip(
-                    crate::IDC_THEME_REPAIR,
-                    "tip_theme_repair",
-                )),
-            ),
-            (
-                crate::IDC_MANAGE_BUTTON,
-                TipText::Text(toggle_state_tip(crate::IDC_MANAGE_BUTTON, "tip_automation")),
-            ),
+            // Action buttons describe what they do; only real toggles carry
+            // the enabled/disabled state line.
+            (crate::IDC_THEME_SWITCH, TipText::Key("tip_theme_switch")),
+            (crate::IDC_THEME_REPAIR, TipText::Key("tip_theme_repair")),
+            (crate::IDC_MANAGE_BUTTON, TipText::Key("tip_automation")),
             (crate::IDC_EXIT_BUTTON, TipText::Key("tip_exit")),
         ];
         static LAST: std::sync::Mutex<[Option<String>; 10]> =

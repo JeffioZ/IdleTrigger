@@ -22,6 +22,35 @@ static THEME_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
 /// schedule resumes. Runtime-only, so a restart clears it. Manual switches
 /// bypass this suppression entirely (they never consult the schedule).
 static SNOOZE: Mutex<Option<i64>> = Mutex::new(None);
+
+/// Transient status notice shown in place of the schedule subtitle for a
+/// few seconds (light feedback for on-demand actions like theme repair).
+static NOTICE: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// Shows a short notice in the panel for a few seconds.
+pub fn show_notice(text: String) {
+    *crate::runtime::lock(&NOTICE) = Some((text, std::time::Instant::now()));
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(crate::hwnd(&crate::HIDDEN)),
+            crate::WM_REFRESH_UI,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
+/// The active notice, if it has not expired yet.
+pub fn active_notice() -> Option<String> {
+    let mut notice = crate::runtime::lock(&NOTICE);
+    let (text, since) = notice.as_ref()?;
+    if since.elapsed() < std::time::Duration::from_secs(4) {
+        Some(text.clone())
+    } else {
+        *notice = None;
+        None
+    }
+}
 #[derive(Default)]
 struct ManualRequests {
     pending: Option<bool>,
@@ -954,7 +983,10 @@ pub fn finish_repair() {
     if let Some(result) = result {
         crate::request_theme_repair_refresh();
         match result {
-            Ok(()) => crate::log_line("theme repair completed"),
+            Ok(()) => {
+                crate::log_line("theme repair completed");
+                show_notice(crate::t_pub("theme_repair_done"));
+            }
             Err(error) => {
                 crate::log_line(&format!("theme repair failed: {error}"));
                 crate::warn_dialog("", &crate::t_args("theme_repair_failed", &[&error]));
