@@ -1147,17 +1147,27 @@ fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
         return;
     };
     remember_wallpaper(&path);
-    // Reset to no-change first so the refreshed rows are built from a clean
-    // selection, then pick the file on this side.
-    crate::choice::select_index(get(hwnd, id), 0);
-    refresh_wallpaper_choices(hwnd);
+    // Reinstall this side's rows built around the new value: they carry the
+    // Remove action for the freshly picked image, which a generic refresh
+    // (built from a no-change selection) does not include.
     let rows = wallpaper_pick_items(&path);
     let index = rows
         .iter()
         .position(|r| r.value.eq_ignore_ascii_case(&path))
         .map(|i| i as i32)
         .unwrap_or(0);
+    crate::choice::select_index(get(hwnd, id), 0);
+    crate::choice::set_rows(get(hwnd, id), &rows);
     crate::choice::select_index(get(hwnd, id), index);
+    // The other side's rows change too (the recent list grew).
+    let other = if id == ID_LIGHT_WALL {
+        ID_DARK_WALL
+    } else {
+        ID_LIGHT_WALL
+    };
+    let other_current = crate::choice::value(get(hwnd, other));
+    let other_rows = wallpaper_pick_items(&other_current);
+    refresh_choice_rows(hwnd, other, &other_rows);
 }
 
 /// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
