@@ -396,5 +396,6 @@
   "settings_inf_browse_title": "Install a pointer scheme",
   "settings_wallpaper_filter": "Images",
   "settings_wallpaper_browse_title": "Add a wallpaper",
-  "settings_wall_browse": "Browse…"
+  "settings_wall_browse": "Browse…",
+  "settings_wall_remove_row": "Remove this wallpaper…"
 }

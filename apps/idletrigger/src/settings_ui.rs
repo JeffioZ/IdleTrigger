@@ -656,7 +656,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             false,
         );
         for (id, x) in [(ID_LIGHT_WALL, 280), (ID_DARK_WALL, 478)] {
-            combo_items(hwnd, id, (x, 198, 190, FIELD_H), &wallpaper_pick_items());
+            combo_items(hwnd, id, (x, 198, 190, FIELD_H), &wallpaper_pick_items(""));
         }
         // Cursor row: installed schemes per side.
         label(
@@ -1039,7 +1039,7 @@ fn cursor_choice_labels() -> Vec<String> {
 
 /// Picker rows for one wallpaper side: "No change", the recently used
 /// images (file names), and a trailing Browse action that opens the picker.
-pub fn wallpaper_pick_items() -> Vec<crate::choice::ChoiceItem> {
+pub fn wallpaper_pick_items(current: &str) -> Vec<crate::choice::ChoiceItem> {
     let none = t_pub("settings_appearance_none");
     let mut rows = vec![crate::choice::ChoiceItem::option("", &none)];
     let library = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
@@ -1070,6 +1070,12 @@ pub fn wallpaper_pick_items() -> Vec<crate::choice::ChoiceItem> {
         "__browse__",
         &t_pub("settings_wall_browse"),
     ));
+    if !current.is_empty() && current != "__browse__" && !current.starts_with("__remove__") {
+        rows.push(crate::choice::ChoiceItem::option(
+            &format!("__remove__{current}"),
+            &t_pub("settings_wall_remove_row"),
+        ));
+    }
     rows
 }
 
@@ -1101,6 +1107,18 @@ fn refresh_choice_rows(hwnd: HWND, id: i32, rows: &[crate::choice::ChoiceItem]) 
     crate::choice::select_index(get(hwnd, id), index);
 }
 
+/// Removes one wallpaper from the recent list; any side still pointing at
+/// it falls back to No change.
+fn remove_wallpaper(hwnd: HWND, path: &str) {
+    crate::runtime::lock(&WALLPAPER_LIBRARY).retain(|p| !p.eq_ignore_ascii_case(path));
+    for id in [ID_LIGHT_WALL, ID_DARK_WALL] {
+        if crate::choice::value(get(hwnd, id)).eq_ignore_ascii_case(path) {
+            crate::choice::select_index(get(hwnd, id), 0);
+        }
+    }
+    refresh_wallpaper_choices(hwnd);
+}
+
 /// Reloads both cursor dropdowns, keeping current selections by label.
 fn refresh_cursor_choices(hwnd: HWND) {
     let rows: Vec<crate::choice::ChoiceItem> = cursor_choice_labels()
@@ -1113,9 +1131,11 @@ fn refresh_cursor_choices(hwnd: HWND) {
 
 /// Reloads both wallpaper dropdowns from the recent list.
 fn refresh_wallpaper_choices(hwnd: HWND) {
-    let picks = wallpaper_pick_items();
-    refresh_choice_rows(hwnd, ID_LIGHT_WALL, &picks);
-    refresh_choice_rows(hwnd, ID_DARK_WALL, &picks);
+    for id in [ID_LIGHT_WALL, ID_DARK_WALL] {
+        let current = crate::choice::value(get(hwnd, id));
+        let picks = wallpaper_pick_items(&current);
+        refresh_choice_rows(hwnd, id, &picks);
+    }
 }
 
 /// The Browse footer row was picked on one side: open the picker, remember
@@ -1127,8 +1147,11 @@ fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
         return;
     };
     remember_wallpaper(&path);
+    // Reset to no-change first so the refreshed rows are built from a clean
+    // selection, then pick the file on this side.
+    crate::choice::select_index(get(hwnd, id), 0);
     refresh_wallpaper_choices(hwnd);
-    let rows = wallpaper_pick_items();
+    let rows = wallpaper_pick_items(&path);
     let index = rows
         .iter()
         .position(|r| r.value.eq_ignore_ascii_case(&path))
@@ -1384,7 +1407,7 @@ fn populate(hwnd: HWND) {
     ] {
         // Rows carry the path as the value; missing files fall back to
         // no-change (the file may be on an unplugged drive).
-        let index = wallpaper_pick_items()
+        let index = wallpaper_pick_items(path)
             .iter()
             .position(|r| r.value == *path && std::path::Path::new(path).is_file())
             .map(|i| i as i32)
@@ -1671,7 +1694,7 @@ fn collect_draft(hwnd: HWND) -> Draft {
     // The row value already is the wallpaper path ("" = no change).
     let wall_at = |id: i32| -> String {
         let value = crate::choice::value(get(hwnd, id));
-        if value == "__browse__" {
+        if value == "__browse__" || value.starts_with("__remove__") {
             String::new()
         } else {
             value
@@ -2098,8 +2121,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     CBN_SELCHANGE if idc == ID_LIGHT_WALL || idc == ID_DARK_WALL => {
                         // The Browse footer opens the picker and selects the
                         // chosen file on this side.
-                        if crate::choice::value(get(hwnd, idc)) == "__browse__" {
+                        let value = crate::choice::value(get(hwnd, idc));
+                        if value == "__browse__" {
                             browse_wallpaper_for_side(hwnd, idc);
+                            set_text(hwnd, ID_VALIDATION, "");
+                        } else if let Some(path) = value.strip_prefix("__remove__") {
+                            remove_wallpaper(hwnd, path);
                             set_text(hwnd, ID_VALIDATION, "");
                         }
                         LRESULT(0)

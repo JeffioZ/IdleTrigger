@@ -396,5 +396,6 @@
   "settings_inf_browse_title": "安装指针方案",
   "settings_wallpaper_filter": "图片",
   "settings_wallpaper_browse_title": "添加壁纸",
-  "settings_wall_browse": "浏览…"
+  "settings_wall_browse": "浏览…",
+  "settings_wall_remove_row": "移除此壁纸…"
 }
