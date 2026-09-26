@@ -184,10 +184,12 @@ pub fn trace_idle_sample(tick: Option<u32>) {
 pub const CAPTURE_TIMER: usize = 99;
 static CAPTURE_STEP: AtomicI32 = AtomicI32::new(0);
 
-/// Starts the capture walk on a panel timer: panel first, then the four
-/// settings pages (Go CapturePage parity), then process exit. Ticks leave
-/// a full interval for paint before each shot. The interval defaults to
-/// 500ms and can be raised via IDLETRIGGER_DEVTOOLS_CAPTURE_STEP_MS.
+/// Starts the capture walk on a panel timer: panel first, then the five
+/// settings pages (the Go app had four before the Appearance tab), then
+/// the automation manager with its editor pane, a choice popup, and the
+/// process picker, then process exit. Ticks leave a full interval for
+/// paint before each shot. The interval defaults to 500ms and can be
+/// raised via IDLETRIGGER_DEVTOOLS_CAPTURE_STEP_MS.
 pub fn start_capture_sequence() {
     if !CAPTURE_PANEL.load(Ordering::SeqCst) {
         return;

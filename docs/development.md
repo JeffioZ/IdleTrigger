@@ -8,10 +8,11 @@ IdleTrigger 使用 Rust、原生 Win32 控件和 GDI+ 绘制。MSVC 运行库静
 
 | Path | Responsibility / 职责 |
 | --- | --- |
-| `apps/idletrigger/src/main.rs` | Event loop, config publication, tray and power state / 事件循环、配置发布、托盘与电源状态 |
+| `apps/idletrigger/src/main.rs` | Event loop, panel, tray, idle warning, and power state / 事件循环、面板、托盘、空闲预警与电源状态 |
+| `runtime.rs` | Runtime state: config document, serialized writes, log file / 运行态：配置文档、串行写入与日志 |
 | `automation.rs`, `idle_monitor.rs` | Rule evaluation and idle clock / 规则计算与空闲时钟 |
 | `automation_ui.rs`, `settings_ui.rs`, `popups.rs` | Forms and warnings / 表单与提醒 |
-| `paint.rs`, `nativeform.rs`, `choice.rs`, `list_style.rs`, `dpi.rs`, `viewport.rs`, `accessibility.rs` | Shared native controls and accessibility / 共享原生控件及辅助功能 |
+| `paint.rs`, `nativeform.rs`, `choice.rs`, `list_style.rs`, `dpi.rs`, `viewport.rs`, `accessibility.rs`, `tooltips.rs` | Shared native controls and accessibility / 共享原生控件及辅助功能 |
 | `theme*.rs`, `iplocate.rs`, `gpu_activity.rs`, `display.rs` | Themes and platform detection / 主题及平台检测 |
 | `system.rs`, `single_instance.rs`, `ipc.rs`, `pipe.rs` | System actions, instance ownership, CLI/IPC / 系统操作、单实例及通信 |
 | `crates/core/` | Config, rules, TOML document edits, locales / 配置、规则、TOML 编辑与文案 |

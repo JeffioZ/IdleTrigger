@@ -1,7 +1,8 @@
 #![allow(clippy::manual_dangling_ptr)]
-//! Automatic-task manager, rule editor, and process picker form a
-//! three-level modal chain. Owner-drawn controls share the painting,
-//! theme, DPI, and viewport helpers used by the other native forms.
+//! Automatic-task manager window hosting the rule list and an embedded
+//! rule-editor pane that swaps in for editing; the process picker remains
+//! a separate popup, modal to the manager. Owner-drawn controls share the
+//! painting, theme, DPI, and viewport helpers used by the other native forms.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

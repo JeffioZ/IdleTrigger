@@ -1,4 +1,4 @@
-//! Settings window with four left navigation tabs, per-page content on the
+//! Settings window with five left navigation tabs, per-page content on the
 //! right, and a footer with inline validation, Save, and Cancel.
 //! Layout uses logical coordinates and adapts to DPI and text scaling.
 
