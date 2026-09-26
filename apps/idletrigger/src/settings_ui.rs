@@ -86,10 +86,12 @@ const ID_LIGHT_CURSOR_LBL: i32 = 185;
 const ID_LIGHT_CURSOR: i32 = 186;
 const ID_DARK_CURSOR_LBL: i32 = 187;
 const ID_DARK_CURSOR: i32 = 188;
+const ID_LIGHT_CURSOR_INSTALL: i32 = 189;
+const ID_DARK_CURSOR_INSTALL: i32 = 190;
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
-const CLIENT_H: i32 = 620;
+const CLIENT_H: i32 = 716;
 const CONTENT_X: i32 = 208;
 const CONTENT_RIGHT: i32 = 676;
 const SECTION_TOP: i32 = 90;
@@ -595,31 +597,42 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         );
 
         // Appearance linkage: per-side wallpaper and cursor schemes applied
-        // together with the theme switch. Wallpaper rows pair an edit with a
-        // Browse button; cursor rows list installed schemes.
+        // together with the theme switch. The group starts below the
+        // behavior section in either language; wallpaper rows pair an edit
+        // with a Browse button, cursor rows list installed schemes.
+        let appearance_top = behavior_top
+            + SECTION_TITLE_H
+            + SECTION_ITEM_GAP
+            + CHECK_H
+            + FUNCTION_GAP
+            + CHECK_H
+            + SECTION_GAP;
         label(
             hwnd,
             ID_APPEARANCE_TITLE,
             &t_pub("settings_theme_appearance_group"),
             section_font,
-            (CONTENT_X, 362, 468, SECTION_TITLE_H),
+            (CONTENT_X, appearance_top, 468, SECTION_TITLE_H),
             false,
         );
-        for (lbl, edit_id, browse_id, key) in [
+        let first_row = appearance_top + SECTION_TITLE_H + SECTION_ITEM_GAP;
+        for (row, lbl, edit_id, browse_id, key) in [
             (
+                0,
                 ID_LIGHT_WALL_LBL,
                 ID_LIGHT_WALL,
                 ID_LIGHT_WALL_BROWSE,
                 "settings_light_wallpaper",
             ),
             (
+                1,
                 ID_DARK_WALL_LBL,
                 ID_DARK_WALL,
                 ID_DARK_WALL_BROWSE,
                 "settings_dark_wallpaper",
             ),
         ] {
-            let row_y = if edit_id == ID_LIGHT_WALL { 398 } else { 444 };
+            let row_y = first_row + row * 44;
             label(
                 hwnd,
                 lbl,
@@ -636,19 +649,23 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 (570, row_y - 8, 106, FIELD_H),
             );
         }
-        for (lbl, combo_id, key) in [
+        for (row, lbl, combo_id, install_id, key) in [
             (
+                2,
                 ID_LIGHT_CURSOR_LBL,
                 ID_LIGHT_CURSOR,
+                ID_LIGHT_CURSOR_INSTALL,
                 "settings_light_cursor",
             ),
-            (ID_DARK_CURSOR_LBL, ID_DARK_CURSOR, "settings_dark_cursor"),
+            (
+                3,
+                ID_DARK_CURSOR_LBL,
+                ID_DARK_CURSOR,
+                ID_DARK_CURSOR_INSTALL,
+                "settings_dark_cursor",
+            ),
         ] {
-            let row_y = if combo_id == ID_LIGHT_CURSOR {
-                490
-            } else {
-                536
-            };
+            let row_y = first_row + row * 44;
             label(
                 hwnd,
                 lbl,
@@ -660,8 +677,17 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             combo(
                 hwnd,
                 combo_id,
-                (352, row_y - 8, 324, FIELD_H),
+                (352, row_y - 8, 240, FIELD_H),
                 &cursor_choice_labels(),
+            );
+            // Installing from an .inf runs the system installer (the same
+            // "Install" verb as the context menu); the scheme then appears
+            // in the dropdown beside it.
+            push_button(
+                hwnd,
+                install_id,
+                &t_pub("settings_install_inf"),
+                (600, row_y - 8, 76, FIELD_H),
             );
         }
 
@@ -1017,6 +1043,86 @@ fn cursor_choice_labels() -> Vec<String> {
     items
 }
 
+/// Installs a pointer-scheme .inf through the system installer (the
+/// context-menu "Install" verb). The scheme appears in the dropdown once
+/// the installer finishes; dropdowns refresh immediately after the call and
+/// again whenever the settings window repopulates.
+fn install_cursor_inf(owner: HWND) {
+    use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
+    unsafe {
+        let mut filter: Vec<u16> = t_pub("settings_inf_filter").encode_utf16().collect();
+        filter.push(0);
+        filter.extend("*.inf".encode_utf16());
+        filter.push(0);
+        filter.push(0);
+        let mut file = vec![0u16; 32768];
+        let title = wide(&t_pub("settings_inf_browse_title"));
+        let mut dialog = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: owner,
+            lpstrFilter: windows::core::PCWSTR(filter.as_ptr()),
+            nFilterIndex: 1,
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: windows::core::PCWSTR(title.as_ptr()),
+            Flags: windows::Win32::UI::Controls::Dialogs::OPEN_FILENAME_FLAGS(
+                0x0000_0004 // OFN_HIDEREADONLY
+                    | 0x0000_0008 // OFN_NOCHANGEDIR
+                    | 0x0000_0800 // OFN_PATHMUSTEXIST
+                    | 0x0000_1000 // OFN_FILEMUSTEXIST
+                    | 0x0008_0000 // OFN_EXPLORER
+                    | 0x0200_0000, // OFN_DONTADDTORECENT
+            ),
+            ..Default::default()
+        };
+        if !GetOpenFileNameW(&mut dialog).as_bool() {
+            return;
+        }
+        let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
+        let path = String::from_utf16_lossy(&file[..end]);
+        // The system handles elevation prompts and file copy itself; we
+        // never parse or execute inf content ourselves.
+        let wide_path = wide(&path);
+        let _ = windows::Win32::UI::Shell::ShellExecuteW(
+            Some(owner),
+            windows::core::w!("install"),
+            PCWSTR(wide_path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        refresh_cursor_choices(owner);
+    }
+}
+
+/// Reloads the scheme dropdowns, keeping the current selections when the
+/// schemes still exist.
+fn refresh_cursor_choices(hwnd: HWND) {
+    let light = control_text_of(get(hwnd, ID_LIGHT_CURSOR));
+    let dark = control_text_of(get(hwnd, ID_DARK_CURSOR));
+    for (id, selected) in [(ID_LIGHT_CURSOR, light), (ID_DARK_CURSOR, dark)] {
+        let labels = cursor_choice_labels();
+        let index = labels.iter().position(|l| *l == selected).unwrap_or(0) as i32;
+        let rows: Vec<crate::choice::ChoiceItem> = labels
+            .iter()
+            .map(|label| crate::choice::ChoiceItem::option(label, label))
+            .collect();
+        crate::choice::set_rows(get(hwnd, id), &rows);
+        crate::choice::select_index(get(hwnd, id), index);
+    }
+}
+
+/// Window text of an arbitrary control (combo rows carry their labels there).
+fn control_text_of(control: HWND) -> String {
+    let len = unsafe { GetWindowTextLengthW(control) };
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; len as usize + 1];
+    let copied = unsafe { GetWindowTextW(control, &mut buffer) };
+    String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
+}
+
 /// Wallpaper picker: image files only, result fills the paired edit.
 fn browse_wallpaper(owner: HWND, target: i32) {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
@@ -1312,8 +1418,10 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_DARK_WALL_BROWSE,
             ID_LIGHT_CURSOR_LBL,
             ID_LIGHT_CURSOR,
+            ID_LIGHT_CURSOR_INSTALL,
             ID_DARK_CURSOR_LBL,
             ID_DARK_CURSOR,
+            ID_DARK_CURSOR_INSTALL,
         ],
         2 => &[
             ID_APP_GENERAL_TITLE,
@@ -2210,6 +2318,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
             }
             ID_LIGHT_WALL_BROWSE => browse_wallpaper(hwnd, ID_LIGHT_WALL),
             ID_DARK_WALL_BROWSE => browse_wallpaper(hwnd, ID_DARK_WALL),
+            ID_LIGHT_CURSOR_INSTALL | ID_DARK_CURSOR_INSTALL => install_cursor_inf(hwnd),
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_SAVE => save(),
@@ -2295,6 +2404,8 @@ pub fn refresh_language() {
         (ID_DARK_WALL_LBL, "settings_dark_wallpaper"),
         (ID_LIGHT_WALL_BROWSE, "settings_browse"),
         (ID_DARK_WALL_BROWSE, "settings_browse"),
+        (ID_LIGHT_CURSOR_INSTALL, "settings_install_inf"),
+        (ID_DARK_CURSOR_INSTALL, "settings_install_inf"),
         (ID_LIGHT_CURSOR_LBL, "settings_light_cursor"),
         (ID_DARK_CURSOR_LBL, "settings_dark_cursor"),
         (ID_APP_GENERAL_TITLE, "settings_app_general_group"),

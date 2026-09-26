@@ -282,7 +282,10 @@ const MGR_COL_W: i32 = 600;
 // Editor pane geometry; the manager's height matches the pane flow so both
 // columns share one bottom edge.
 const ED_PANE_W: i32 = 600;
-const ED_PANE_H: i32 = ED_EDGE * 2 + 600;
+// Tall enough for the worst layout (time window + weekdays + process rows
+// + event-action options + footer) without scrolling; taller composites
+// still scroll via viewport::fit_content.
+const ED_PANE_H: i32 = ED_EDGE * 2 + 730;
 const MGR_PANE_X: i32 = MGR_PAD + MGR_COL_W + MGR_PAD;
 const MGR_H: i32 = 2 * MGR_PAD + ED_PANE_H;
 // The list fills the left column between its title and the button row.
@@ -5364,6 +5367,74 @@ pub fn refresh_language() {
 #[cfg(test)]
 mod surface_tests {
     use super::*;
+    #[test]
+    fn worst_case_editor_layout_fits_the_pane_without_scrolling() {
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous = crate::runtime::lock(&crate::CONFIG).replace(Default::default());
+        let host = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                400,
+                400,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let previous_mgr = MGR_HWND.swap(host.0 as isize, Ordering::SeqCst);
+        let previous_edit = EDIT_HWND.load(Ordering::SeqCst);
+        let previous_session =
+            crate::runtime::lock(&EDIT_SESSION).replace(EditorSession::default());
+        create_editor();
+        populate_editor();
+        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+        // Worst composite: a time window with weekdays, a process condition,
+        // an event action with a cancellable countdown, and wait policy.
+        *crate::runtime::lock(&EDIT_SESSION).as_mut().unwrap() = EditorSession {
+            procs: vec![auto::ProcessTarget {
+                kind: "name".into(),
+                executable: "app.exe".into(),
+                path: String::new(),
+            }],
+            ..EditorSession::default()
+        };
+        choice_select(ed, ED_ACTION, auto::ACTION_LOCK);
+        fill_trigger_choice(ed, auto::ACTION_LOCK, auto::TRIGGER_TIME_WINDOW);
+        choice_select(ed, ED_TRIGGER, auto::TRIGGER_TIME_WINDOW);
+        choice_select(ed, ED_BLOCKED, "wait");
+        set_text(get_dlg_item(ed, ED_MAX_WAIT), "10");
+        layout_editor();
+        unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(get_dlg_item(ed, ED_SAVE), &mut rect).unwrap();
+            let mut origin = POINT {
+                x: rect.left,
+                y: rect.bottom,
+            };
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(ed, &mut origin);
+            // Normalize physical pixels back to the 96-DPI logical grid the
+            // pane constants live in (the test process may run at any DPI).
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(ed).max(96);
+            let logical_bottom = origin.y * 96 / (dpi as i32);
+            assert!(
+                logical_bottom <= ED_PANE_H,
+                "footer bottom {logical_bottom} exceeds pane height {ED_PANE_H}",
+            );
+            DestroyWindow(ed).unwrap();
+            DestroyWindow(host).unwrap();
+        }
+        *crate::runtime::lock(&EDIT_SESSION) = previous_session;
+        EDIT_HWND.store(previous_edit, Ordering::SeqCst);
+        MGR_HWND.store(previous_mgr, Ordering::SeqCst);
+        *crate::runtime::lock(&crate::CONFIG) = previous;
+    }
     #[test]
     fn editor_layout_keeps_common_fields_visible_and_preserves_drafts() {
         use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
