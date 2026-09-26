@@ -18,6 +18,10 @@ IdleTrigger-panic.txt
 .IdleTrigger*.tmp
 .IdleTrigger-screenshot-*.png.tmp
 
+# Local diagnostic/scratch folders (screenshots land wherever the EXE runs)
+/design-review/
+/scratch-test/
+
 # Editor backup files
 *.swp
 *.swo
