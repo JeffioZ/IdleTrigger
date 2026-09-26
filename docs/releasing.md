@@ -14,4 +14,8 @@
 
 Files: `IdleTrigger-x64.exe`, `IdleTrigger-x86.exe`, `SHA256SUMS.txt`. Describe user-visible changes and known limitations. Successful builds cannot replace unperformed hardware/UI checks.
 
+Release notes use `## 更新重点` / `## Highlights` headings, group longer lists under bold subheadings (for example 行为变更 / 修复 / 改进), and end with the standard downloads line plus a Full Changelog compare link to the previous released tag. A release with no earlier tag omits the compare link.
+
 发布文件如上。说明描述用户可见变化和已知限制，构建通过不能代替未执行的硬件或 UI 验证。
+
+发布说明使用「更新重点 / Highlights」标题；条目较多时用加粗小节（如行为变更 / 修复 / 改进）分组；结尾附统一下载说明行和指向上一个已发布 tag 的完整变更比较链接。没有更早 tag 的首发版本省略比较链接。
