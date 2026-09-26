@@ -176,7 +176,10 @@ fn handle_request(request: &str) -> String {
             }) {
                 return format!("err: {err}");
             }
-            crate::sync_timed_with_manual();
+            // The monitor never touches the timed overlay directly:
+            // monitor:on only turns the saved Stay Awake switch off (mutual
+            // exclusion), and that switch transition drops the overlay
+            // inside commit_config; monitor:off/toggle-off leave it alone.
             refresh_ui();
             format!("ok monitor={target}")
         }

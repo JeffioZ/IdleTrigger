@@ -164,7 +164,9 @@ pub(crate) fn commit_config(
     let mut doc = lock(&CONFIG_DOC)
         .clone()
         .ok_or("configuration document unavailable")?;
+    let nosleep_was_on = candidate.nosleep_enabled;
     edit(&mut candidate, &mut doc)?;
+    let stay_awake_turned_off = nosleep_was_on && !candidate.nosleep_enabled;
     config::save(&path, &mut doc, &candidate)
         .map_err(|e| crate::t_pub("msg_config_save_failed").replacen("%s", &e.to_string(), 1))?;
     *lock(&CONFIG_SOURCE) = Some(doc.to_string());
@@ -174,6 +176,13 @@ pub(crate) fn commit_config(
     // reload from being overwritten by an older save's publication.
     crate::automation::reload_rules();
     drop(writer);
+    // "Off" always means off: a save that turned the Stay Awake switch off —
+    // a direct toggle or the monitor's mutual exclusion — also drops the
+    // timed overlay. Unrelated saves (monitor off, automation, rules) leave
+    // the runtime overlay alone; it expires on its own.
+    if stay_awake_turned_off {
+        crate::sync_timed_with_manual();
+    }
     crate::theme_engine::wake();
     sync_logging();
     log_line("configuration saved");

@@ -1418,10 +1418,16 @@ fn create_windows() {
             // Session notifications feed the lock pause and the lock/unlock
             // triggers. The session starts unlocked (auto-start runs at
             // logon); events keep the flag current from here on.
-            let _ = windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification(
+            if windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification(
                 hidden,
                 windows::Win32::System::RemoteDesktop::NOTIFY_FOR_THIS_SESSION,
-            );
+            )
+            .is_err()
+            {
+                // Without the subscription the lock pause and the lock/unlock
+                // triggers silently never fire; leave a trace for support.
+                log_line("WTSRegisterSessionNotification failed; lock triggers disabled");
+            }
         }
 
         // Floating-panel shell copied from Go: a topmost popup with a slim
@@ -2810,7 +2816,8 @@ fn on_toggle(code: usize) {
         warn_dialog("", &err);
         return;
     }
-    sync_timed_with_manual();
+    // A toggle that turned the Stay Awake switch off (directly or via the
+    // idle mutual exclusion) drops the timed overlay inside commit_config.
     apply_stay_awake();
     refresh_checkboxes();
     refresh_status();
@@ -3259,8 +3266,11 @@ pub(crate) fn clear_timed_nosleep() {
     }
 }
 
-/// Any request that leaves the saved switch off also drops the timed
-/// override, so "off" always means off regardless of the source.
+/// "Off" always means off: called when a save turned the Stay Awake switch
+/// off (commit_config catches every such transition, including the monitor's
+/// mutual exclusion) and after explicit nosleep-off requests. Monitor and
+/// automation edits never call this — the timed overlay is independent of
+/// them and expires on its own.
 pub(crate) fn sync_timed_with_manual() {
     if !cfg_map(|c| c.nosleep_enabled) {
         clear_timed_nosleep();

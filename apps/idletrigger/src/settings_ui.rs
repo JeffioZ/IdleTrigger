@@ -1170,8 +1170,6 @@ fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
     refresh_choice_rows(hwnd, other, &other_rows);
 }
 
-/// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
-/// plus an all-files fallback. Returns the chosen path.
 /// Installs a pointer-scheme .inf through the system installer (the
 /// context-menu "Install" verb). The scheme appears in the dropdowns when
 /// they next open; we never parse or execute inf content ourselves.
@@ -1222,6 +1220,8 @@ fn install_cursor_inf(owner: HWND) {
     }
 }
 
+/// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
+/// plus an all-files fallback. Returns the chosen path.
 fn browse_wallpaper_file(owner: HWND) -> Option<String> {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
     unsafe {
@@ -1403,14 +1403,6 @@ fn populate(hwnd: HWND) {
     set_text(hwnd, ID_DARK_TIME, &dark_time);
     *crate::runtime::lock(&WALLPAPER_LIBRARY) = crate::cfg_map(|c| c.theme_wallpapers.clone());
     refresh_wallpaper_choices(hwnd);
-    // Select the configured light/dark entries by their file-name label.
-    let pick_label = |path: &str| {
-        std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
-    };
-    let _ = &pick_label; // label helper retained for cursor rows if needed
     for (id, path) in [
         (ID_LIGHT_WALL, &light_wallpaper),
         (ID_DARK_WALL, &dark_wallpaper),
@@ -2634,6 +2626,11 @@ pub fn refresh_language() {
         crate::choice::set_items(control, &items);
         crate::choice::select_index(control, selected);
     }
+    // The wallpaper rows carry localized action entries ("No change",
+    // "Browse…", "Remove…"), so they need the same language rebuild; the
+    // file-name library entries keep their labels via the value-preserving
+    // refresh.
+    refresh_wallpaper_choices(hwnd);
     set_text(
         hwnd,
         ID_THEME_LOCATION_STATUS,

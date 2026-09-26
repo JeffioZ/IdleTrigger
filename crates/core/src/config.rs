@@ -89,6 +89,9 @@ impl Config {
         if !matches!(self.language.as_str(), "auto" | "en" | "zh-CN") {
             self.language = "auto".into();
         }
+        // Logoff stays off the idle whitelist on purpose: an unattended
+        // timeout ending the whole session could discard unsaved work; it
+        // remains available as an automation action and CLI command.
         if !matches!(
             self.idle_action.as_str(),
             "sleep" | "hibernate" | "shutdown" | "lock" | "restart" | "screen_off"

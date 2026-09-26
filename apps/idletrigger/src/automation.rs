@@ -225,6 +225,14 @@ pub fn reload_rules() {
         crate::runtime::lock(&WAITING_EVENTS).clear();
         *crate::runtime::lock(&PROCESS_TRACKER) = ProcessTracker::default();
     }
+    // Battery markers belong to live rules only: a deleted or disabled rule
+    // must not leave a stale fired entry behind (it would suppress the
+    // first crossing of a later rule reusing the id).
+    crate::runtime::lock(&BATTERY_FIRED).retain(|id| {
+        runtime
+            .iter()
+            .any(|r| &r.id == id && r.enabled && r.trigger == auto::TRIGGER_BATTERY_BELOW)
+    });
     *crate::runtime::lock(&RULES) = runtime;
     crate::log_line(&format!(
         "automation rules loaded: {} ({} issues)",
