@@ -47,6 +47,7 @@ $systemDlls = @(
     'comctl32.dll', 'oleaut32.dll', 'ntdll.dll', 'ole32.dll', 'pdh.dll',
     'version.dll', 'advapi32.dll', 'winhttp.dll', 'gdiplus.dll', 'powrprof.dll',
     'comdlg32.dll', 'combase.dll', 'dwmapi.dll', 'bcryptprimitives.dll',
+    'wtsapi32.dll',
     'api-ms-win-core-synch-l1-2-0.dll', 'api-ms-win-core-winrt-l1-1-0.dll'
 )
 foreach ($dll in $imports) {
