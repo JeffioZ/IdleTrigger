@@ -87,10 +87,6 @@ const ID_LIGHT_CURSOR: i32 = 186;
 const ID_DARK_CURSOR: i32 = 188;
 const ID_TAB_APPEARANCE: i32 = 191;
 const ID_APPEARANCE_HINT: i32 = 192;
-const ID_WALL_LIB_LBL: i32 = 193;
-const ID_WALL_LIB: i32 = 194;
-const ID_WALL_ADD: i32 = 195;
-const ID_WALL_REMOVE: i32 = 196;
 const ID_CURSOR_INSTALL: i32 = 197;
 const ID_COL_LIGHT: i32 = 198;
 const ID_COL_DARK: i32 = 199;
@@ -674,40 +670,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         for (id, x) in [(ID_LIGHT_CURSOR, 280), (ID_DARK_CURSOR, 478)] {
             combo(hwnd, id, (x, 244, 190, FIELD_H), &cursor_choice_labels());
         }
-        // Wallpaper library: one wide dropdown plus manage buttons below.
-        label(
-            hwnd,
-            ID_WALL_LIB_LBL,
-            &t_pub("settings_wallpaper_library"),
-            font,
-            (CONTENT_X, 298, 64, 22),
-            false,
-        );
-        combo_items(
-            hwnd,
-            ID_WALL_LIB,
-            (280, 290, 388, FIELD_H),
-            &wallpaper_library_items(),
-        );
-        push_button(
-            hwnd,
-            ID_WALL_ADD,
-            &t_pub("settings_wall_add"),
-            (CONTENT_X, 342, 224, FIELD_H),
-        );
-        push_button(
-            hwnd,
-            ID_WALL_REMOVE,
-            &t_pub("settings_wall_remove"),
-            (CONTENT_X + 244, 342, 224, FIELD_H),
-        );
         // One installer for both cursor columns; the dropdowns refresh on
         // open, so the freshly installed scheme shows up right away.
         push_button(
             hwnd,
             ID_CURSOR_INSTALL,
             &t_pub("settings_install_inf"),
-            (CONTENT_X, 394, 224, FIELD_H),
+            (CONTENT_X, 298, 224, FIELD_H),
         );
 
         // Application page.
@@ -1068,140 +1037,111 @@ fn cursor_choice_labels() -> Vec<String> {
     items
 }
 
-/// Library dropdown rows: file names (full path when names collide). An
-/// empty library shows one unselectable header row instead of nothing.
-pub fn wallpaper_library_items() -> Vec<crate::choice::ChoiceItem> {
-    let labels = wallpaper_library_labels();
-    if labels.is_empty() {
-        return vec![crate::choice::ChoiceItem::header(&t_pub(
-            "settings_wallpaper_library_empty",
-        ))];
-    }
-    labels
-        .iter()
-        .map(|label| crate::choice::ChoiceItem::option(label, label))
-        .collect()
-}
-
-/// Library entries as plain labels (shared with the pick lists).
-fn wallpaper_library_labels() -> Vec<String> {
-    let library = crate::runtime::lock(&WALLPAPER_LIBRARY);
-    let names: Vec<String> = library
-        .iter()
-        .map(|p| {
-            std::path::Path::new(p)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| p.clone())
-        })
-        .collect();
-    names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            if names.iter().filter(|n| *n == name).count() > 1 {
-                library[index].clone()
-            } else {
-                name.clone()
-            }
-        })
-        .collect()
-}
-
-/// Light/dark picker rows: "no linkage" plus the library entries.
-fn wallpaper_pick_labels() -> Vec<String> {
-    let mut items = vec![t_pub("settings_appearance_none")];
-    items.extend(wallpaper_library_labels());
-    items
-}
-
-/// Picker rows as full items (options only, never the header placeholder).
-fn wallpaper_pick_items() -> Vec<crate::choice::ChoiceItem> {
+/// Picker rows for one wallpaper side: "No change", the recently used
+/// images (file names), and a trailing Browse action that opens the picker.
+pub fn wallpaper_pick_items() -> Vec<crate::choice::ChoiceItem> {
     let none = t_pub("settings_appearance_none");
     let mut rows = vec![crate::choice::ChoiceItem::option("", &none)];
-    for label in wallpaper_library_labels() {
-        rows.push(crate::choice::ChoiceItem::option(&label, &label));
+    let library = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
+    for path in &library {
+        let label = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        // Duplicate file names fall back to the full path so rows stay
+        // distinguishable.
+        let label = if library
+            .iter()
+            .filter(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy() == label)
+            })
+            .count()
+            > 1
+        {
+            path.clone()
+        } else {
+            label
+        };
+        rows.push(crate::choice::ChoiceItem::option(path, &label));
     }
+    rows.push(crate::choice::ChoiceItem::option(
+        "__browse__",
+        &t_pub("settings_wall_browse"),
+    ));
     rows
 }
 
-/// Replaces the rows of one choice, keeping the selection by label.
-fn refresh_choice_rows(hwnd: HWND, id: i32, rows: &[crate::choice::ChoiceItem]) {
-    let selected = control_text_of(get(hwnd, id));
-    let index = rows
-        .iter()
-        .position(|r| !r.header && r.label == selected)
-        .map(|i| i as i32)
-        .unwrap_or(-1);
-    crate::choice::set_rows(get(hwnd, id), rows);
-    crate::choice::select_index(get(hwnd, id), index);
-}
-
-/// Reloads every wallpaper dropdown from the session library, keeping
-/// selections whose entries still exist (clearing ones that were removed).
-fn refresh_wallpaper_choices(hwnd: HWND) {
-    let library = wallpaper_library_items();
-    let picks = wallpaper_pick_items();
-    refresh_choice_rows(hwnd, ID_WALL_LIB, &library);
-    refresh_choice_rows(hwnd, ID_LIGHT_WALL, &picks);
-    refresh_choice_rows(hwnd, ID_DARK_WALL, &picks);
-}
-
-/// Adds a wallpaper to the session library (deduplicated) and refreshes the
-/// dropdowns; the new entry becomes the library dropdown selection.
-fn add_wallpaper_to_library(hwnd: HWND, path: &str) {
+/// Records a wallpaper as recently used: deduplicated, most recent last,
+/// capped so the dropdown stays scannable.
+fn remember_wallpaper(path: &str) {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return;
     }
-    let index = {
-        let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY);
-        if let Some(existing) = library.iter().position(|p| p.eq_ignore_ascii_case(trimmed)) {
-            existing
-        } else {
-            library.push(trimmed.to_string());
-            library.len() - 1
-        }
-    };
-    refresh_wallpaper_choices(hwnd);
-    crate::choice::select_index(get(hwnd, ID_WALL_LIB), index as i32);
+    let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY);
+    library.retain(|p| !p.eq_ignore_ascii_case(trimmed));
+    library.push(trimmed.to_string());
+    let len = library.len();
+    if len > 8 {
+        library.drain(..len - 8);
+    }
 }
 
-/// Removes the library dropdown's selected entry; selections that pointed at
-/// it (library or light/dark) fall back to no linkage.
-fn remove_selected_wallpaper(hwnd: HWND) {
-    let index = combo_sel(hwnd, ID_WALL_LIB);
-    if index == 0 {
-        return;
-    }
-    let removed = {
-        let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY);
-        if (1..=library.len()).contains(&index) {
-            Some(library.remove(index - 1))
-        } else {
-            None
-        }
-    };
-    let Some(removed) = removed else {
-        return;
-    };
-    let removed_label = std::path::Path::new(&removed)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or(removed.clone());
-    // Clear pickers that referenced the removed entry (by label match).
-    for id in [ID_LIGHT_WALL, ID_DARK_WALL] {
-        if control_text_of(get(hwnd, id)) == removed_label {
-            crate::choice::select_index(get(hwnd, id), 0);
-        }
-    }
-    refresh_wallpaper_choices(hwnd);
+/// Replaces the rows of one choice, keeping the selection by value.
+fn refresh_choice_rows(hwnd: HWND, id: i32, rows: &[crate::choice::ChoiceItem]) {
+    let selected = crate::choice::value(get(hwnd, id));
+    let index = rows
+        .iter()
+        .position(|r| !r.header && r.value == selected)
+        .map(|i| i as i32)
+        .unwrap_or(0);
+    crate::choice::set_rows(get(hwnd, id), rows);
+    crate::choice::select_index(get(hwnd, id), index);
 }
 
+/// Reloads both cursor dropdowns, keeping current selections by label.
+fn refresh_cursor_choices(hwnd: HWND) {
+    let rows: Vec<crate::choice::ChoiceItem> = cursor_choice_labels()
+        .iter()
+        .map(|label| crate::choice::ChoiceItem::option(label, label))
+        .collect();
+    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &rows);
+    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &rows);
+}
+
+/// Reloads both wallpaper dropdowns from the recent list.
+fn refresh_wallpaper_choices(hwnd: HWND) {
+    let picks = wallpaper_pick_items();
+    refresh_choice_rows(hwnd, ID_LIGHT_WALL, &picks);
+    refresh_choice_rows(hwnd, ID_DARK_WALL, &picks);
+}
+
+/// The Browse footer row was picked on one side: open the picker, remember
+/// the file, and select it on that side.
+fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
+    let Some(path) = browse_wallpaper_file(hwnd) else {
+        // Keep the previous selection when the dialog is cancelled.
+        refresh_wallpaper_choices(hwnd);
+        return;
+    };
+    remember_wallpaper(&path);
+    refresh_wallpaper_choices(hwnd);
+    let rows = wallpaper_pick_items();
+    let index = rows
+        .iter()
+        .position(|r| r.value.eq_ignore_ascii_case(&path))
+        .map(|i| i as i32)
+        .unwrap_or(0);
+    crate::choice::select_index(get(hwnd, id), index);
+}
+
+/// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
+/// plus an all-files fallback. Returns the chosen path.
 /// Installs a pointer-scheme .inf through the system installer (the
-/// context-menu "Install" verb). The scheme appears in the dropdown once
-/// the installer finishes; dropdowns refresh immediately after the call and
-/// again whenever the settings window repopulates.
+/// context-menu "Install" verb). The scheme appears in the dropdowns when
+/// they next open; we never parse or execute inf content ourselves.
 fn install_cursor_inf(owner: HWND) {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
     unsafe {
@@ -1235,8 +1175,7 @@ fn install_cursor_inf(owner: HWND) {
         }
         let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
         let path = String::from_utf16_lossy(&file[..end]);
-        // The system handles elevation prompts and file copy itself; we
-        // never parse or execute inf content ourselves.
+        // The system handles elevation prompts and file copy itself.
         let wide_path = wide(&path);
         let _ = windows::Win32::UI::Shell::ShellExecuteW(
             Some(owner),
@@ -1250,36 +1189,6 @@ fn install_cursor_inf(owner: HWND) {
     }
 }
 
-/// Reloads the scheme dropdowns, keeping the current selections when the
-/// schemes still exist.
-fn refresh_cursor_choices(hwnd: HWND) {
-    let light = control_text_of(get(hwnd, ID_LIGHT_CURSOR));
-    let dark = control_text_of(get(hwnd, ID_DARK_CURSOR));
-    for (id, selected) in [(ID_LIGHT_CURSOR, light), (ID_DARK_CURSOR, dark)] {
-        let labels = cursor_choice_labels();
-        let index = labels.iter().position(|l| *l == selected).unwrap_or(0) as i32;
-        let rows: Vec<crate::choice::ChoiceItem> = labels
-            .iter()
-            .map(|label| crate::choice::ChoiceItem::option(label, label))
-            .collect();
-        crate::choice::set_rows(get(hwnd, id), &rows);
-        crate::choice::select_index(get(hwnd, id), index);
-    }
-}
-
-/// Window text of an arbitrary control (combo rows carry their labels there).
-fn control_text_of(control: HWND) -> String {
-    let len = unsafe { GetWindowTextLengthW(control) };
-    if len <= 0 {
-        return String::new();
-    }
-    let mut buffer = vec![0u16; len as usize + 1];
-    let copied = unsafe { GetWindowTextW(control, &mut buffer) };
-    String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
-}
-
-/// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
-/// plus an all-files fallback. Returns the chosen path.
 fn browse_wallpaper_file(owner: HWND) -> Option<String> {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
     unsafe {
@@ -1468,15 +1377,18 @@ fn populate(hwnd: HWND) {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default()
     };
-    let picks = wallpaper_pick_labels();
+    let _ = &pick_label; // label helper retained for cursor rows if needed
     for (id, path) in [
         (ID_LIGHT_WALL, &light_wallpaper),
         (ID_DARK_WALL, &dark_wallpaper),
     ] {
-        let index = picks
+        // Rows carry the path as the value; missing files fall back to
+        // no-change (the file may be on an unplugged drive).
+        let index = wallpaper_pick_items()
             .iter()
-            .position(|l| !path.is_empty() && *l == pick_label(path))
-            .unwrap_or(0) as i32;
+            .position(|r| r.value == *path && std::path::Path::new(path).is_file())
+            .map(|i| i as i32)
+            .unwrap_or(0);
         crate::choice::select_index(get(hwnd, id), index);
     }
     // Cursor dropdowns: 0 = no linkage, otherwise the scheme's row; a
@@ -1601,10 +1513,6 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_ROW_CURSOR_LBL,
             ID_LIGHT_CURSOR,
             ID_DARK_CURSOR,
-            ID_WALL_LIB_LBL,
-            ID_WALL_LIB,
-            ID_WALL_ADD,
-            ID_WALL_REMOVE,
             ID_CURSOR_INSTALL,
         ],
         4 => &[
@@ -1760,25 +1668,14 @@ fn collect_draft(hwnd: HWND) -> Draft {
             .cloned()
             .unwrap_or_default()
     };
-    // Dropdown row -> library path (0 = no linkage).
-    let library_paths = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
-    let wall_at = |row: usize| -> String {
-        if row == 0 {
-            return String::new();
+    // The row value already is the wallpaper path ("" = no change).
+    let wall_at = |id: i32| -> String {
+        let value = crate::choice::value(get(hwnd, id));
+        if value == "__browse__" {
+            String::new()
+        } else {
+            value
         }
-        wallpaper_pick_labels()
-            .get(row)
-            .and_then(|label| {
-                library_paths
-                    .iter()
-                    .find(|p| {
-                        std::path::Path::new(p.as_str())
-                            .file_name()
-                            .is_some_and(|n| n.to_string_lossy() == label.as_str())
-                    })
-                    .cloned()
-            })
-            .unwrap_or_default()
     };
     Draft {
         keep_screen: is_checked(hwnd, ID_KEEP_SCREEN),
@@ -1795,9 +1692,9 @@ fn collect_draft(hwnd: HWND) -> Draft {
         location_idx: combo_sel(hwnd, ID_LOCATION_SOURCE),
         theme_battery: is_checked(hwnd, ID_THEME_BATTERY),
         theme_fullscreen: is_checked(hwnd, ID_THEME_FULLSCREEN),
-        light_wallpaper: wall_at(combo_sel(hwnd, ID_LIGHT_WALL)),
-        dark_wallpaper: wall_at(combo_sel(hwnd, ID_DARK_WALL)),
-        wallpapers: library_paths,
+        light_wallpaper: wall_at(ID_LIGHT_WALL),
+        dark_wallpaper: wall_at(ID_DARK_WALL),
+        wallpapers: crate::runtime::lock(&WALLPAPER_LIBRARY).clone(),
         // Map the dropdown row back to a scheme name (0 = empty = off).
         light_cursor: scheme_at(combo_sel(hwnd, ID_LIGHT_CURSOR)),
         dark_cursor: scheme_at(combo_sel(hwnd, ID_DARK_CURSOR)),
@@ -2026,6 +1923,9 @@ fn save() {
         *crate::runtime::lock(&DRAFT_BASE) = Some(crate::cfg_map(Clone::clone));
         let mut failures = Vec::new();
         crate::log_line("settings changed");
+        // Appearance settings take effect for the current side right away:
+        // configuring them shows the result, no switch needed.
+        crate::theme_engine::apply_current_side();
         crate::apply_stay_awake();
         crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
         crate::refresh_checkboxes();
@@ -2138,10 +2038,6 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_ROW_CURSOR_LBL, "tip_theme_cursor"),
         (ID_LIGHT_CURSOR, "tip_theme_cursor"),
         (ID_DARK_CURSOR, "tip_theme_cursor"),
-        (ID_WALL_LIB_LBL, "tip_wallpaper_library"),
-        (ID_WALL_LIB, "tip_wallpaper_library"),
-        (ID_WALL_ADD, "tip_wallpaper_library"),
-        (ID_WALL_REMOVE, "tip_wallpaper_library"),
         (ID_CURSOR_INSTALL, "tip_theme_cursor"),
         (ID_LANGUAGE_LBL, "tip_language"),
         (ID_LANGUAGE, "tip_language"),
@@ -2197,6 +2093,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     CBN_SELCHANGE if idc == ID_THEME_MODE || idc == ID_LOCATION_SOURCE => {
                         request_location_preview(hwnd);
                         apply_dependent_states(hwnd);
+                        LRESULT(0)
+                    }
+                    CBN_SELCHANGE if idc == ID_LIGHT_WALL || idc == ID_DARK_WALL => {
+                        // The Browse footer opens the picker and selects the
+                        // chosen file on this side.
+                        if crate::choice::value(get(hwnd, idc)) == "__browse__" {
+                            browse_wallpaper_for_side(hwnd, idc);
+                            set_text(hwnd, ID_VALIDATION, "");
+                        }
                         LRESULT(0)
                     }
                     BN_CLICKED => {
@@ -2535,7 +2440,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 set_text(hwnd, ID_VALIDATION, "");
             }
             ID_THEME_MODE | ID_LOCATION_SOURCE | ID_IDLE_ACTION | ID_LANGUAGE | ID_LIGHT_CURSOR
-            | ID_DARK_CURSOR | ID_WALL_LIB | ID_LIGHT_WALL | ID_DARK_WALL => {
+            | ID_DARK_CURSOR | ID_LIGHT_WALL | ID_DARK_WALL => {
                 // Refresh scheme/wallpaper rows right before opening so an
                 // install that just finished or a library edit shows up.
                 if idc == ID_LIGHT_CURSOR || idc == ID_DARK_CURSOR {
@@ -2544,12 +2449,6 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 crate::choice::toggle(get(hwnd, idc), hwnd, idc);
             }
             ID_CURSOR_INSTALL => install_cursor_inf(hwnd),
-            ID_WALL_ADD => {
-                if let Some(path) = browse_wallpaper_file(hwnd) {
-                    add_wallpaper_to_library(hwnd, &path);
-                }
-            }
-            ID_WALL_REMOVE => remove_selected_wallpaper(hwnd),
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_SAVE => save(),
@@ -2638,9 +2537,6 @@ pub fn refresh_language() {
         (ID_COL_DARK, "settings_dark_side"),
         (ID_ROW_WALL_LBL, "settings_row_wallpaper"),
         (ID_ROW_CURSOR_LBL, "settings_row_cursor"),
-        (ID_WALL_LIB_LBL, "settings_wallpaper_library"),
-        (ID_WALL_ADD, "settings_wall_add"),
-        (ID_WALL_REMOVE, "settings_wall_remove"),
         (ID_CURSOR_INSTALL, "settings_install_inf"),
         (ID_APP_GENERAL_TITLE, "settings_app_general_group"),
         (ID_LANGUAGE_LBL, "settings_language"),

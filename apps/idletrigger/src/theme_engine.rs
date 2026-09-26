@@ -27,6 +27,14 @@ static SNOOZE: Mutex<Option<i64>> = Mutex::new(None);
 /// few seconds (light feedback for on-demand actions like theme repair).
 static NOTICE: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
 
+/// Applies the appearance configured for the currently active side. Used
+/// right after settings save so configuration shows its effect immediately.
+pub fn apply_current_side() {
+    let dark = crate::theme::read_light_preference(APP_BREED) == Some(false)
+        || crate::theme::read_light_preference(BREED) == Some(false);
+    apply_appearance(dark);
+}
+
 /// Shows a short notice in the panel for a few seconds. Callers run inside
 /// the WM_REFRESH_UI chain (or refresh afterwards) — no extra refresh is
 /// posted here, one redundant full-panel repaint is one visible flicker.
