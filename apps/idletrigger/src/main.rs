@@ -2864,12 +2864,19 @@ fn hot_reload_config() -> Result<(), String> {
         ));
         return Err(err.clone());
     }
+    let nosleep_was_on = lock(&CONFIG).as_ref().is_some_and(|c| c.nosleep_enabled);
     *lock(&CONFIG) = Some(loaded.config.clone());
     *lock(&CONFIG_DOC) = Some(loaded.document);
     *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
     automation::reload_rules();
     drop(writer);
+    // Same rule as commit_config: an external edit that turned the Stay
+    // Awake switch off also drops the timed overlay; an edit that leaves
+    // the switch untouched does not.
+    if nosleep_was_on && !loaded.config.nosleep_enabled {
+        sync_timed_with_manual();
+    }
     apply_language(&loaded.config.language);
     theme_engine::wake();
     sync_logging();
@@ -3266,11 +3273,12 @@ pub(crate) fn clear_timed_nosleep() {
     }
 }
 
-/// "Off" always means off: called when a save turned the Stay Awake switch
-/// off (commit_config catches every such transition, including the monitor's
-/// mutual exclusion) and after explicit nosleep-off requests. Monitor and
-/// automation edits never call this — the timed overlay is independent of
-/// them and expires on its own.
+/// "Off" always means off: called when a save or an external reload turned
+/// the Stay Awake switch off (commit_config and hot_reload_config catch
+/// every such transition, including the monitor's mutual exclusion) and
+/// after explicit nosleep-off requests. Monitor and automation edits never
+/// call this — the timed overlay is independent of them and expires on its
+/// own.
 pub(crate) fn sync_timed_with_manual() {
     if !cfg_map(|c| c.nosleep_enabled) {
         clear_timed_nosleep();
@@ -4187,6 +4195,86 @@ mod config_transaction_tests {
         std::fs::remove_file(&path).unwrap();
         assert!(hot_reload_config().is_err());
         assert!(cfg_map(|c| c.nosleep_enabled));
+        *crate::runtime::lock(&CONFIG) = old_config;
+        *crate::runtime::lock(&CONFIG_DOC) = old_doc;
+        *crate::runtime::lock(&CONFIG_PATH) = old_path;
+        *crate::runtime::lock(&CONFIG_SOURCE) = old_source;
+        CONFIG_LOAD_FAILED.store(old_failed, Ordering::SeqCst);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stay_awake_off_transitions_drop_the_timed_overlay_by_any_path() {
+        // The overlay is cancelled by expiry, an explicit cancel, or the
+        // saved switch turning off — through a panel/IPC save or an external
+        // reload. A save or reload that does not touch the switch leaves it
+        // armed even while the switch is already off.
+        let _test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let dir = std::env::temp_dir().join(format!(
+            "idletrigger-timed-overlay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let old_config = crate::runtime::lock(&CONFIG).replace(config::Config::default());
+        let old_doc = crate::runtime::lock(&CONFIG_DOC).replace("custom = 42\n".parse().unwrap());
+        let old_path = crate::runtime::lock(&CONFIG_PATH).replace(path.clone());
+        let old_source = crate::runtime::lock(&CONFIG_SOURCE).take();
+        let old_failed = CONFIG_LOAD_FAILED.swap(false, Ordering::SeqCst);
+        let previous_timed = crate::runtime::lock(&NOSLEEP_TIMED).take();
+        let arm = || {
+            *crate::runtime::lock(&NOSLEEP_TIMED) = Some(TimedNosleep {
+                until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                keep_screen: false,
+            });
+        };
+
+        // Unrelated save while the switch is already off: the overlay survives.
+        arm();
+        edit_config(|c| c.automation_enabled = !c.automation_enabled).unwrap();
+        assert!(timed_nosleep_state().is_some());
+
+        // Turning the switch on never drops; turning it directly off does.
+        edit_config(|c| c.nosleep_enabled = true).unwrap();
+        assert!(timed_nosleep_state().is_some());
+        edit_config(|c| c.nosleep_enabled = false).unwrap();
+        assert!(timed_nosleep_state().is_none());
+
+        // The monitor's mutual exclusion (idle on forces the switch off) drops.
+        edit_config(|c| c.nosleep_enabled = true).unwrap();
+        arm();
+        edit_config(|c| {
+            c.idle_enabled = true;
+            c.nosleep_enabled = false;
+        })
+        .unwrap();
+        assert!(timed_nosleep_state().is_none());
+
+        // An external edit turning the switch off drops; an external edit
+        // that leaves the already-off switch alone does not.
+        edit_config(|c| {
+            c.nosleep_enabled = true;
+            c.idle_enabled = false;
+        })
+        .unwrap();
+        arm();
+        let external = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("nosleep_enabled = true", "nosleep_enabled = false");
+        std::fs::write(&path, external).unwrap();
+        hot_reload_config().unwrap();
+        assert!(timed_nosleep_state().is_none());
+        arm();
+        let touched = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{touched}# touch\n")).unwrap();
+        hot_reload_config().unwrap();
+        assert!(timed_nosleep_state().is_some());
+
+        *crate::runtime::lock(&NOSLEEP_TIMED) = previous_timed;
         *crate::runtime::lock(&CONFIG) = old_config;
         *crate::runtime::lock(&CONFIG_DOC) = old_doc;
         *crate::runtime::lock(&CONFIG_PATH) = old_path;
