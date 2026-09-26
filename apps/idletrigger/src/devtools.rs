@@ -280,11 +280,13 @@ pub fn handle_capture_timer() -> bool {
         }
         11 => crate::automation_ui::devtools_show_editor(),
         12 => {
-            let editor = crate::automation_ui::theme_hwnds()[1];
+            // The editor is an embedded pane now: capture the whole manager
+            // window so both the list column and the open pane are visible.
+            let mgr = crate::automation_ui::theme_hwnds()[0];
             shoot(
-                editor,
-                out_dir.join("IdleTrigger-editor-capture.bmp"),
-                "rule editor",
+                mgr,
+                out_dir.join("IdleTrigger-manager-editor-capture.bmp"),
+                "automation manager with editor pane",
             );
         }
         13 => crate::automation_ui::devtools_open_trigger_choice(),

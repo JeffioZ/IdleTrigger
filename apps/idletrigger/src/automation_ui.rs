@@ -15,7 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
-use windows::Win32::Graphics::Gdi::HDC;
+use windows::Win32::Graphics::Gdi::{HDC, UpdateWindow};
 
 use crate::choice::ChoiceItem;
 use crate::{t_pub, theme};
@@ -268,19 +268,29 @@ fn edit_toggle(ed: HWND, id: usize) {
 
 // ===== Geometry (Go tokens) =================================================
 
-// Manager: manager.go / automationpanel.go.
+// Manager: manager.go / automationpanel.go. The single window hosts the rule
+// list on the left and the embedded editor pane on the right; the pane is a
+// child window so both live in one OS window (picker stays a modal popup).
 const MGR_PAD: i32 = 18;
 const MGR_TITLE_Y: i32 = 16; // formEdgePadding
 const MGR_TEXT_H: i32 = 18; // formTextHeight
 const MGR_LIST_Y: i32 = MGR_TITLE_Y + MGR_TEXT_H + 12;
-const MGR_LIST_H: i32 = 240;
+// The list column keeps the button row's minimum width (3×116 + 192 + gaps).
+const MGR_COL_W: i32 = 600;
+// Editor pane geometry; the manager's height matches the pane flow so both
+// columns share one bottom edge.
+const ED_PANE_W: i32 = 600;
+const ED_PANE_H: i32 = ED_EDGE * 2 + 600;
+const MGR_PANE_X: i32 = MGR_PAD + MGR_COL_W + MGR_PAD;
+const MGR_H: i32 = 2 * MGR_PAD + ED_PANE_H;
+// The list fills the left column between its title and the button row.
+const MGR_LIST_H: i32 = MGR_H - MGR_LIST_Y - 8 - MGR_TEXT_H - 16 - BUTTON_H - MGR_PAD;
 const MGR_STATUS_Y: i32 = MGR_LIST_Y + MGR_LIST_H + 8;
 const MGR_BUTTONS_Y: i32 = MGR_STATUS_Y + MGR_TEXT_H + 16;
-const MGR_W: i32 = 600;
-const MGR_H: i32 = MGR_BUTTONS_Y + BUTTON_H + 18;
+const MGR_W: i32 = MGR_PANE_X + ED_PANE_W + MGR_PAD;
 
 // Editor: editor.go / nativeform metrics.go.
-const ED_W: i32 = 680;
+const ED_W: i32 = ED_PANE_W;
 const ED_PAD: i32 = 18; // FormPadding
 const ED_GAP: i32 = 8; // ControlGap
 const ED_EDGE: i32 = 16; // formEdgePadding
@@ -892,25 +902,65 @@ fn hide() {
 }
 
 pub fn default_button(window: HWND) -> Option<HWND> {
-    let id = if window.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
-        MGR_EDIT
-    } else if window.0 as isize == EDIT_HWND.load(Ordering::SeqCst) {
-        ED_SAVE
-    } else if window.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
+    // The editor pane is a child of the manager: keyboard focus inside it
+    // reports the manager as GA_ROOT, so an open pane takes precedence.
+    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    unsafe {
+        if !ed.is_invalid()
+            && window.0 as isize == MGR_HWND.load(Ordering::SeqCst)
+            && IsWindowVisible(ed).as_bool()
+        {
+            return Some(get_dlg_item(ed, ED_SAVE));
+        }
+    }
+    let id = if window.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
         PK_CONFIRM
+    } else if window.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
+        MGR_EDIT
+    } else if window == ed {
+        ED_SAVE
     } else {
         return None;
     };
     Some(get_dlg_item(window, id))
 }
 
-pub fn weekday_key(window: HWND, key: usize) -> bool {
-    if window.0 as isize != EDIT_HWND.load(Ordering::SeqCst)
-        || !matches!(key, 0x25 | 0x27 | 0x24 | 0x23)
-    {
+/// Whether `control` is the pane or one of its descendants.
+fn inside_editor_pane(control: HWND) -> bool {
+    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    if ed.is_invalid() {
         return false;
     }
     unsafe {
+        if !IsWindowVisible(ed).as_bool() {
+            return false;
+        }
+        let mut current = control;
+        while !current.is_invalid() {
+            if current == ed {
+                return true;
+            }
+            current = match GetParent(current) {
+                Ok(parent) => parent,
+                Err(_) => break,
+            };
+        }
+        false
+    }
+}
+
+pub fn weekday_key(window: HWND, key: usize) -> bool {
+    if !matches!(key, 0x25 | 0x27 | 0x24 | 0x23) {
+        return false;
+    }
+    unsafe {
+        // The pane is embedded in the manager, so accept either the pane
+        // itself or the manager root while a weekday checkbox has focus.
+        if !inside_editor_pane(GetFocus()) && window.0 as isize != EDIT_HWND.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let id = GetDlgCtrlID(GetFocus()) as usize;
         if !(ED_DAYS_MON..=ED_DAYS_SUN).contains(&id) {
             return false;
@@ -923,9 +973,9 @@ pub fn weekday_key(window: HWND, key: usize) -> bool {
             _ => 6,
         };
         crate::nativeform::keyboard_navigation();
-        let target = get_dlg_item(window, ED_DAYS_MON + next);
+        let target = get_dlg_item(ed, ED_DAYS_MON + next);
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(target));
-        crate::viewport::reveal_control(window, target);
+        crate::viewport::reveal_control(ed, target);
         true
     }
 }
@@ -1229,7 +1279,14 @@ unsafe extern "system" fn mgr_proc(
                     LRESULT(0)
                 }
                 WM_CLOSE => {
-                    hide();
+                    // Esc targets the root window; with a draft open it must
+                    // cancel the pane, not close the whole manager.
+                    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+                    if !ed.is_invalid() && IsWindowVisible(ed).as_bool() {
+                        let _ = SendMessageW(ed, WM_CLOSE, None, None);
+                    } else {
+                        hide();
+                    }
                     LRESULT(0)
                 }
                 WM_DRAWITEM => {
@@ -1290,6 +1347,9 @@ unsafe extern "system" fn mgr_proc(
                 WM_DESTROY => {
                     MGR_HWND.store(0, Ordering::SeqCst);
                     MGR_LIST_HWND.store(0, Ordering::SeqCst);
+                    // The pane is a child window and dies with the manager;
+                    // clear its slot so lazy creation can run again.
+                    EDIT_HWND.store(0, Ordering::SeqCst);
                     crate::runtime::lock(&MGR_DISPLAYED_RULES).clear();
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
                         crate::hwnd(&crate::PANEL),
@@ -1614,10 +1674,23 @@ fn show_new_menu(owner: HWND) {
     }
 }
 
+/// The editor pane shares the manager window; "modal" means the left-column
+/// controls are disabled while a draft is open (the pane stays live).
+fn set_left_controls_enabled(enabled: bool) {
+    unsafe {
+        let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
+        for id in [MGR_LIST, MGR_NEW, MGR_EDIT, MGR_DELETE, MGR_TOGGLE] {
+            let control = get_dlg_item(mgr, id);
+            if !control.is_invalid() {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(control, enabled);
+            }
+        }
+    }
+}
+
 fn show_editor() {
     let _dpi = crate::dpi::Scope::window(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _));
     unsafe {
-        let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         if HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _).0 as usize == 0 {
             create_editor();
         }
@@ -1625,10 +1698,11 @@ fn show_editor() {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         populate_editor();
         theme::retheme_children(ed);
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(mgr, false);
-        // Go BeginFirstFrame/Reveal: cloak, commit one full frame, uncloak.
-        crate::FirstFrameGate::begin(ed).reveal();
-        let _ = SetForegroundWindow(ed);
+        set_left_controls_enabled(false);
+        // The pane lives inside an already-visible window: show and commit
+        // its first frame synchronously instead of the top-level cloak flow.
+        let _ = ShowWindow(ed, SW_SHOW);
+        let _ = UpdateWindow(ed);
         // Go focuses the name field when the editor opens.
         let name = get_dlg_item(ed, ED_NAME);
         if !name.is_invalid() {
@@ -1642,7 +1716,7 @@ fn hide_editor() {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         let _ = ShowWindow(ed, SW_HIDE);
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(mgr, true);
+        set_left_controls_enabled(true);
         refresh_list();
         // Go focuses the manager list after save/cancel (keyboard stays
         // live). An empty rule list hides the listbox; focus New instead of
@@ -1666,39 +1740,26 @@ fn create_editor() {
 
         register_editor_class(instance);
 
-        let style = secondary_style();
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(ED_W),
-            bottom: s(ED_EDGE * 2 + 600),
-        };
-        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(
-            HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-        );
-
+        // Embedded pane: a child of the manager window, not a second OS
+        // window. It keeps its own class and proc, so all editor message
+        // handling stays unchanged; show/hide toggles it in place.
         let ed = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             windows::core::w!("IdleTriggerAutoEdit"),
             PCWSTR(wide(&t_pub("automation_new_title")).as_ptr()),
-            style,
-            x,
-            y,
-            frame.right - frame.left,
-            frame.bottom - frame.top,
+            WINDOW_STYLE(WS_CHILD.0 | WS_CLIPSIBLINGS.0),
+            s(MGR_PANE_X),
+            s(MGR_PAD),
+            s(ED_PANE_W),
+            s(ED_PANE_H),
             Some(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _)),
             None,
             Some(instance.into()),
             None,
         )
-        .expect("editor window");
+        .expect("editor pane");
         EDIT_HWND.store(ed.0 as isize, Ordering::SeqCst);
-        crate::dpi::install(ed);
         theme::apply_to_window(ed);
-        crate::set_window_icons_pub(ed);
 
         let mk_label = |id: usize, text: &str, font: windows::Win32::Graphics::Gdi::HFONT| {
             let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
@@ -3340,7 +3401,8 @@ fn hide_picker() {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let _ = ShowWindow(pk, SW_HIDE);
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(ed, true);
-        let _ = SetForegroundWindow(ed);
+        // The editor is an embedded pane: foreground belongs to its root.
+        let _ = SetForegroundWindow(GetAncestor(ed, GA_ROOT));
         // Go returns focus to the editor's Choose button.
         let choose = get_dlg_item(ed, ED_CHOOSE);
         if !choose.is_invalid() {
@@ -3364,11 +3426,12 @@ fn create_picker(owner: HWND) {
             bottom: s(PK_H),
         };
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(
-            HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-        );
+        // Center on the manager root: the picker's modal target is the
+        // embedded editor pane, but a popup parented to a child window has
+        // unreliable activation, so the OS-level parent is the root window.
+        let root = GetAncestor(owner, GA_ROOT);
+        let host = if root.is_invalid() { owner } else { root };
+        let (x, y) = center_on_parent(host, frame.right - frame.left, frame.bottom - frame.top);
 
         let pk = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -3379,7 +3442,7 @@ fn create_picker(owner: HWND) {
             y,
             frame.right - frame.left,
             frame.bottom - frame.top,
-            Some(owner),
+            Some(host),
             None,
             Some(instance.into()),
             None,
@@ -5002,6 +5065,27 @@ fn refresh_tooltips() {
 
 pub fn dpi_changed(hwnd: HWND) {
     let _dpi = crate::dpi::Scope::window(hwnd);
+    // The editor pane is a child window and never sees WM_DPICHANGED; the
+    // manager's hook repositions it and re-lays-out its controls.
+    if hwnd.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
+        unsafe {
+            let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+            if !ed.is_invalid() {
+                let _ = SetWindowPos(
+                    ed,
+                    None,
+                    s(MGR_PANE_X),
+                    s(MGR_PAD),
+                    s(ED_PANE_W),
+                    s(ED_PANE_H),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                if IsWindowVisible(ed).as_bool() {
+                    layout_editor();
+                }
+            }
+        }
+    }
     if hwnd.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
         unsafe {
             let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
@@ -5316,6 +5400,26 @@ mod surface_tests {
         }
         let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
         let previous = crate::runtime::lock(&crate::CONFIG).replace(Default::default());
+        // The editor pane needs the manager as its parent; stand one up.
+        let host = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                400,
+                400,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let previous_mgr = MGR_HWND.swap(host.0 as isize, Ordering::SeqCst);
+        let previous_edit = EDIT_HWND.load(Ordering::SeqCst);
         create_editor();
         populate_editor();
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
@@ -5351,7 +5455,10 @@ mod surface_tests {
         unsafe {
             let _ = RemoveWindowSubclass(name, Some(track), 992);
             DestroyWindow(ed).unwrap();
+            DestroyWindow(host).unwrap();
         }
+        EDIT_HWND.store(previous_edit, Ordering::SeqCst);
+        MGR_HWND.store(previous_mgr, Ordering::SeqCst);
         *crate::runtime::lock(&crate::CONFIG) = previous;
     }
     #[test]
