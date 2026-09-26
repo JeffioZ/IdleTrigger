@@ -395,20 +395,20 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         );
         tab_button(
             hwnd,
+            ID_TAB_APPEARANCE,
+            &t_pub("settings_tab_appearance"),
+            (24, 178, 156, BTN_H),
+        );
+        tab_button(
+            hwnd,
             ID_TAB_NOTIFICATIONS,
             &t_pub("settings_tab_notifications"),
-            (24, 178, 156, BTN_H),
+            (24, 222, 156, BTN_H),
         );
         tab_button(
             hwnd,
             ID_TAB_APP,
             &t_pub("settings_tab_app"),
-            (24, 222, 156, BTN_H),
-        );
-        tab_button(
-            hwnd,
-            ID_TAB_APPEARANCE,
-            &t_pub("settings_tab_appearance"),
             (24, 266, 156, BTN_H),
         );
 
@@ -1589,7 +1589,8 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_THEME_FULLSCREEN,
             ID_THEME_HINT,
         ],
-        4 => &[
+
+        2 => &[
             ID_APPEARANCE_TITLE,
             ID_APPEARANCE_HINT,
             ID_COL_LIGHT,
@@ -1606,7 +1607,7 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_WALL_REMOVE,
             ID_CURSOR_INSTALL,
         ],
-        2 => &[
+        4 => &[
             ID_APP_GENERAL_TITLE,
             ID_APP_ABOUT_TITLE,
             ID_LANGUAGE_LBL,
@@ -2453,9 +2454,9 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 == [
                     ID_TAB_POWER,
                     ID_TAB_THEME,
-                    ID_TAB_APP,
-                    ID_TAB_NOTIFICATIONS,
                     ID_TAB_APPEARANCE,
+                    ID_TAB_NOTIFICATIONS,
+                    ID_TAB_APP,
                 ][page as usize];
             crate::paint::draw_button(
                 dc,
@@ -2518,7 +2519,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 let page = match idc {
                     ID_TAB_POWER => 0,
                     ID_TAB_THEME => 1,
-                    ID_TAB_APP => 2,
+                    ID_TAB_APPEARANCE => 2,
                     ID_TAB_NOTIFICATIONS => 3,
                     _ => 4,
                 };

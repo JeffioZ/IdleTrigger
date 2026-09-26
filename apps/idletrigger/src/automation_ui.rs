@@ -55,7 +55,6 @@ const ED_DAYS_THU: usize = 335;
 const ED_DAYS_FRI: usize = 336;
 const ED_DAYS_SAT: usize = 337;
 const ED_DAYS_SUN: usize = 338;
-const ED_BASICS_TITLE: usize = 340;
 const ED_TRIGGER_TITLE: usize = 341;
 const ED_OPTIONS_TITLE: usize = 342;
 const ED_NAME_LBL: usize = 343;
@@ -84,9 +83,8 @@ const ED_BATTERY_LBL: usize = 365;
 const ED_MODE_TITLE: usize = 366;
 
 /// Every editor control laid out by layout_editor (Go editorControlIDs).
-const ED_LAYOUT_IDS: [usize; 47] = [
+const ED_LAYOUT_IDS: [usize; 46] = [
     ED_MODE_TITLE,
-    ED_BASICS_TITLE,
     ED_NAME_LBL,
     ED_NAME,
     ED_NAME_HINT,
@@ -1952,11 +1950,6 @@ fn create_editor() {
         };
 
         // Section titles + labels (Go editor.go build order).
-        mk_label(
-            ED_BASICS_TITLE,
-            &t_pub(caption_key(EDITOR_TEXTS, ED_BASICS_TITLE)),
-            section_font,
-        );
         mk_label(ED_MODE_TITLE, &t_pub("automation_new_title"), section_font);
         mk_label(
             ED_TRIGGER_TITLE,
@@ -2571,11 +2564,10 @@ pub fn layout_editor() {
             place(right, ED_PAD + column_w + ED_GAP, y, column_w, ED_LABEL_H);
         };
 
-        // Mode title spans the pane top, above the basics section.
+        // Mode title spans the pane top; the form starts directly with the
+        // name row (a second section header right below read as duplication).
         let mut y = ED_EDGE;
         place(ED_MODE_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
-        y += ED_LABEL_H + ED_SECTION_GAP;
-        place(ED_BASICS_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_CONTENT_GAP;
         place(ED_NAME_LBL, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_LABEL_GAP;
@@ -5323,7 +5315,6 @@ const MANAGER_TEXTS: &[(usize, &str)] = &[
 ];
 
 const EDITOR_TEXTS: &[(usize, &str)] = &[
-    (ED_BASICS_TITLE, "automation_basics"),
     (ED_TRIGGER_TITLE, "automation_trigger_conditions"),
     (ED_OPTIONS_TITLE, "automation_action_options"),
     (ED_NAME_LBL, "automation_name"),
