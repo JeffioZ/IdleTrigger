@@ -272,6 +272,8 @@
   "settings_tab_power": "Power",
   "settings_tab_theme": "Day/Night",
   "settings_tab_app": "Application",
+  "settings_tab_appearance": "Appearance",
+  "settings_appearance_hint": "Wallpaper and cursor schemes apply together with every day/night switch; leave a field empty to leave it unchanged",
   "settings_power_title": "Stay Awake",
   "settings_idle_title": "Idle Monitoring",
   "settings_keep_screen": "Keep the display on while staying awake",

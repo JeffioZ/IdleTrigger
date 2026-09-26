@@ -88,10 +88,12 @@ const ID_DARK_CURSOR_LBL: i32 = 187;
 const ID_DARK_CURSOR: i32 = 188;
 const ID_LIGHT_CURSOR_INSTALL: i32 = 189;
 const ID_DARK_CURSOR_INSTALL: i32 = 190;
+const ID_TAB_APPEARANCE: i32 = 191;
+const ID_APPEARANCE_HINT: i32 = 192;
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
-const CLIENT_H: i32 = 716;
+const CLIENT_H: i32 = 580;
 const CONTENT_X: i32 = 208;
 const CONTENT_RIGHT: i32 = 676;
 const SECTION_TOP: i32 = 90;
@@ -394,6 +396,12 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             &t_pub("settings_tab_app"),
             (24, 222, 156, BTN_H),
         );
+        tab_button(
+            hwnd,
+            ID_TAB_APPEARANCE,
+            &t_pub("settings_tab_appearance"),
+            (24, 266, 156, BTN_H),
+        );
 
         // Power and idle page.
         label(
@@ -596,26 +604,19 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ),
         );
 
-        // Appearance linkage: per-side wallpaper and cursor schemes applied
-        // together with the theme switch. The group starts below the
-        // behavior section in either language; wallpaper rows pair an edit
-        // with a Browse button, cursor rows list installed schemes.
-        let appearance_top = behavior_top
-            + SECTION_TITLE_H
-            + SECTION_ITEM_GAP
-            + CHECK_H
-            + FUNCTION_GAP
-            + CHECK_H
-            + SECTION_GAP;
+        // Appearance page (its own tab): per-side wallpaper and cursor
+        // schemes applied together with the theme switch. Wallpaper rows
+        // pair an edit with a Browse button; cursor rows list installed
+        // schemes plus an installer for .inf packages.
         label(
             hwnd,
             ID_APPEARANCE_TITLE,
             &t_pub("settings_theme_appearance_group"),
             section_font,
-            (CONTENT_X, appearance_top, 468, SECTION_TITLE_H),
+            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
             false,
         );
-        let first_row = appearance_top + SECTION_TITLE_H + SECTION_ITEM_GAP;
+        let first_row = SECTION_TOP + SECTION_TITLE_H + 24;
         for (row, lbl, edit_id, browse_id, key) in [
             (
                 0,
@@ -632,7 +633,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 "settings_dark_wallpaper",
             ),
         ] {
-            let row_y = first_row + row * 44;
+            let row_y = first_row + row * 46;
             label(
                 hwnd,
                 lbl,
@@ -665,7 +666,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 "settings_dark_cursor",
             ),
         ] {
-            let row_y = first_row + row * 44;
+            let row_y = first_row + row * 46;
             label(
                 hwnd,
                 lbl,
@@ -690,6 +691,14 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 (600, row_y - 8, 76, FIELD_H),
             );
         }
+        label(
+            hwnd,
+            ID_APPEARANCE_HINT,
+            &t_pub("settings_appearance_hint"),
+            font,
+            (CONTENT_X, first_row + 4 * 46 + 10, 468, 40),
+            false,
+        );
 
         // Application page.
         label(
@@ -1397,7 +1406,6 @@ fn page_ids(page: i32) -> &'static [i32] {
         1 => &[
             ID_THEME_SCHEDULE_TITLE,
             ID_THEME_BEHAVIOR_TITLE,
-            ID_APPEARANCE_TITLE,
             ID_THEME_MODE_LBL,
             ID_THEME_MODE,
             ID_LIGHT_TIME_LBL,
@@ -1410,6 +1418,9 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_THEME_BATTERY,
             ID_THEME_FULLSCREEN,
             ID_THEME_HINT,
+        ],
+        4 => &[
+            ID_APPEARANCE_TITLE,
             ID_LIGHT_WALL_LBL,
             ID_LIGHT_WALL,
             ID_LIGHT_WALL_BROWSE,
@@ -1422,6 +1433,7 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_DARK_CURSOR_LBL,
             ID_DARK_CURSOR,
             ID_DARK_CURSOR_INSTALL,
+            ID_APPEARANCE_HINT,
         ],
         2 => &[
             ID_APP_GENERAL_TITLE,
@@ -1456,7 +1468,7 @@ fn apply_dependent_states(hwnd: HWND) {
             visibility.insert(id, visible);
         };
         let page = PAGE.load(Ordering::SeqCst);
-        for p in 0..4 {
+        for p in 0..5 {
             for id in page_ids(p) {
                 show(*id, p == page);
                 // Edit surfaces hide/show together with their inner edit.
@@ -1506,7 +1518,13 @@ fn apply_dependent_states(hwnd: HWND) {
             let _ = EnableWindow(get(hwnd, id), lock_keys);
         }
         // Repaint the tab buttons so the selected one shows the Active fill.
-        for id in [ID_TAB_POWER, ID_TAB_THEME, ID_TAB_APP, ID_TAB_NOTIFICATIONS] {
+        for id in [
+            ID_TAB_POWER,
+            ID_TAB_THEME,
+            ID_TAB_APP,
+            ID_TAB_NOTIFICATIONS,
+            ID_TAB_APPEARANCE,
+        ] {
             let control = get(hwnd, id);
             if !control.is_invalid() {
                 let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, false);
@@ -2164,7 +2182,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 fn field_surface_of(edit_id: i32) -> Option<i32> {
     if matches!(
         edit_id,
-        ID_BATTERY_THRESH | ID_IDLE_TIMEOUT | ID_WARNING_SECONDS | ID_LIGHT_TIME | ID_DARK_TIME
+        ID_BATTERY_THRESH
+            | ID_IDLE_TIMEOUT
+            | ID_WARNING_SECONDS
+            | ID_LIGHT_TIME
+            | ID_DARK_TIME
+            | ID_LIGHT_WALL
+            | ID_DARK_WALL
     ) {
         Some(FIELD_SURFACE_BASE + edit_id)
     } else {
@@ -2231,12 +2255,18 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
             crate::choice::draw_button(item.control, dc, bounds, state);
         } else if matches!(
             id,
-            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS
+            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
         ) {
             let mut state = crate::nativeform::control_state(item.control, item.state);
             let page = PAGE.load(Ordering::SeqCst);
-            state.active =
-                id == [ID_TAB_POWER, ID_TAB_THEME, ID_TAB_APP, ID_TAB_NOTIFICATIONS][page as usize];
+            state.active = id
+                == [
+                    ID_TAB_POWER,
+                    ID_TAB_THEME,
+                    ID_TAB_APP,
+                    ID_TAB_NOTIFICATIONS,
+                    ID_TAB_APPEARANCE,
+                ][page as usize];
             crate::paint::draw_button(
                 dc,
                 bounds,
@@ -2294,12 +2324,13 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
 fn handle_click(hwnd: HWND, idc: i32) {
     unsafe {
         match idc {
-            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS => {
+            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE => {
                 let page = match idc {
                     ID_TAB_POWER => 0,
                     ID_TAB_THEME => 1,
                     ID_TAB_APP => 2,
-                    _ => 3,
+                    ID_TAB_NOTIFICATIONS => 3,
+                    _ => 4,
                 };
                 PAGE.store(page, Ordering::SeqCst);
                 apply_dependent_states(hwnd);
@@ -2379,6 +2410,8 @@ pub fn refresh_language() {
         (ID_TAB_THEME, "settings_tab_theme"),
         (ID_TAB_NOTIFICATIONS, "settings_tab_notifications"),
         (ID_TAB_APP, "settings_tab_app"),
+        (ID_TAB_APPEARANCE, "settings_tab_appearance"),
+        (ID_APPEARANCE_HINT, "settings_appearance_hint"),
         (ID_POWER_TITLE, "settings_power_title"),
         (ID_KEEP_SCREEN, "settings_keep_screen"),
         (ID_BATTERY_ALLOWED, "settings_battery_allowed"),

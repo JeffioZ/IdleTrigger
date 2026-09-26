@@ -250,8 +250,8 @@ pub fn handle_capture_timer() -> bool {
             );
             crate::settings_ui::show();
         }
-        1 | 3 | 5 | 7 => crate::settings_ui::devtools_select_page(step / 2),
-        2 | 4 | 6 | 8 => {
+        1 | 3 | 5 | 7 | 9 => crate::settings_ui::devtools_select_page(step / 2),
+        2 | 4 | 6 | 8 | 10 => {
             let page = step / 2 - 1;
             shoot(
                 crate::settings_ui::devtools_capture_hwnd(),
@@ -259,13 +259,13 @@ pub fn handle_capture_timer() -> bool {
                 &format!("settings page {page}"),
             );
         }
-        9 => {
+        11 => {
             if std::env::var("IDLETRIGGER_DEVTOOLS_CLICK_LIST").as_deref() == Ok("1") {
                 crate::automation_ui::devtools_seed_demo_rule();
             }
             crate::automation_ui::show();
         }
-        10 => {
+        12 => {
             let mgr = crate::automation_ui::theme_hwnds()[0];
             if std::env::var("IDLETRIGGER_DEVTOOLS_CLICK_LIST").as_deref() == Ok("1") {
                 // Simulate a user click on the first rule row, then let the
@@ -278,10 +278,10 @@ pub fn handle_capture_timer() -> bool {
                 "automation manager",
             );
         }
-        11 => crate::automation_ui::devtools_show_editor(),
-        12 => {
-            // The editor is an embedded pane now: capture the whole manager
-            // window so both the list column and the open pane are visible.
+        13 => crate::automation_ui::devtools_show_editor(),
+        14 => {
+            // The editor pane covers the manager's client area: capture the
+            // whole window to see the open form.
             let mgr = crate::automation_ui::theme_hwnds()[0];
             shoot(
                 mgr,
@@ -289,8 +289,8 @@ pub fn handle_capture_timer() -> bool {
                 "automation manager with editor pane",
             );
         }
-        13 => crate::automation_ui::devtools_open_trigger_choice(),
-        14 => {
+        15 => crate::automation_ui::devtools_open_trigger_choice(),
+        16 => {
             let popup = crate::choice::open_popup();
             shoot(
                 popup,
@@ -298,13 +298,13 @@ pub fn handle_capture_timer() -> bool {
                 "choice popup",
             );
         }
-        15 => {
+        17 => {
             // Close any open choice popup first (it captures mouse input
             // and would prevent the timer from firing).
             crate::choice::close(false);
             crate::automation_ui::devtools_show_picker();
         }
-        16 => {
+        18 => {
             let picker = crate::automation_ui::theme_hwnds()[2];
             shoot(
                 picker,

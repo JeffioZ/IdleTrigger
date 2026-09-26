@@ -270,29 +270,23 @@ fn edit_toggle(ed: HWND, id: usize) {
 
 // ===== Geometry (Go tokens) =================================================
 
-// Manager: manager.go / automationpanel.go. The single window hosts the rule
-// list on the left and the embedded editor pane on the right; the pane is a
-// child window so both live in one OS window (picker stays a modal popup).
+// Manager: one window, two views. The rule list view is compact (the Go
+// manager size); opening the editor swaps the whole client area to the
+// editor pane and grows the window to the form's content height. The
+// process picker remains a modal popup.
 const MGR_PAD: i32 = 18;
 const MGR_TITLE_Y: i32 = 16; // formEdgePadding
 const MGR_TEXT_H: i32 = 18; // formTextHeight
 const MGR_LIST_Y: i32 = MGR_TITLE_Y + MGR_TEXT_H + 12;
 // The list column keeps the button row's minimum width (3×116 + 192 + gaps).
 const MGR_COL_W: i32 = 600;
-// Editor pane geometry; the manager's height matches the pane flow so both
-// columns share one bottom edge.
-const ED_PANE_W: i32 = 600;
-// Tall enough for the worst layout (time window + weekdays + process rows
-// + event-action options + footer) without scrolling; taller composites
-// still scroll via viewport::fit_content.
-const ED_PANE_H: i32 = ED_EDGE * 2 + 730;
-const MGR_PANE_X: i32 = MGR_PAD + MGR_COL_W + MGR_PAD;
-const MGR_H: i32 = 2 * MGR_PAD + ED_PANE_H;
-// The list fills the left column between its title and the button row.
-const MGR_LIST_H: i32 = MGR_H - MGR_LIST_Y - 8 - MGR_TEXT_H - 16 - BUTTON_H - MGR_PAD;
+const MGR_LIST_H: i32 = 240;
 const MGR_STATUS_Y: i32 = MGR_LIST_Y + MGR_LIST_H + 8;
 const MGR_BUTTONS_Y: i32 = MGR_STATUS_Y + MGR_TEXT_H + 16;
-const MGR_W: i32 = MGR_PANE_X + ED_PANE_W + MGR_PAD;
+// The editor pane spans the full client width (the old editor's width).
+const ED_PANE_W: i32 = 680;
+const MGR_W: i32 = ED_PANE_W;
+const MGR_H: i32 = MGR_BUTTONS_Y + BUTTON_H + 18;
 
 // Editor: editor.go / nativeform metrics.go.
 const ED_W: i32 = ED_PANE_W;
@@ -675,7 +669,7 @@ pub fn ensure_created() {
         theme::apply_to_window(mgr);
         crate::set_window_icons_pub(mgr);
 
-        let content_w = MGR_W - 2 * MGR_PAD;
+        let content_w = MGR_COL_W;
         let mk_static = |id: usize,
                          text: &str,
                          font: windows::Win32::Graphics::Gdi::HFONT,
@@ -1679,17 +1673,95 @@ fn show_new_menu(owner: HWND) {
     }
 }
 
-/// The editor pane shares the manager window; "modal" means the left-column
-/// controls are disabled while a draft is open (the pane stays live).
-fn set_left_controls_enabled(enabled: bool) {
+/// One window, two views: the rule list hides while a draft is open and the
+/// editor pane covers the client area (and vice versa).
+fn set_list_view_visible(visible: bool) {
     unsafe {
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
-        for id in [MGR_LIST, MGR_NEW, MGR_EDIT, MGR_DELETE, MGR_TOGGLE] {
+        for id in [
+            MGR_TITLE,
+            MGR_LIST_SURFACE,
+            MGR_LIST,
+            MGR_EMPTY_TITLE,
+            MGR_EMPTY_BODY,
+            MGR_NEXT,
+            MGR_NEW,
+            MGR_EDIT,
+            MGR_DELETE,
+            MGR_TOGGLE,
+        ] {
             let control = get_dlg_item(mgr, id);
             if !control.is_invalid() {
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(control, enabled);
+                let _ = ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
             }
         }
+    }
+}
+
+/// Resizes the manager to a client height in logical pixels, keeping the
+/// window centered on its panel owner and clamped to the work area.
+unsafe fn resize_manager(client_h: i32) {
+    unsafe {
+        let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
+        if mgr.is_invalid() {
+            return;
+        }
+        let style = secondary_style();
+        let mut frame = RECT {
+            left: 0,
+            top: 0,
+            right: s(MGR_W),
+            bottom: s(client_h),
+        };
+        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
+        let width = frame.right - frame.left;
+        let height = frame.bottom - frame.top;
+        let (x, y) = center_on_parent(crate::hwnd(&crate::PANEL), width, height);
+        let _ = SetWindowPos(
+            mgr,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+        if !ed.is_invalid() {
+            // The pane tracks the client area at the new scale.
+            let mut client = RECT::default();
+            if GetClientRect(mgr, &mut client).is_ok() {
+                let _ = SetWindowPos(
+                    ed,
+                    None,
+                    0,
+                    0,
+                    client.right,
+                    client.bottom,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+}
+
+/// Latest editor content height (logical), set by layout_editor.
+static EDITOR_CONTENT_H: AtomicIsize = AtomicIsize::new(0);
+
+/// After a layout pass, grow the manager window so the open pane shows its
+/// full footer; the viewport still scrolls anything taller than the work
+/// area allows.
+fn sync_manager_height() {
+    let content = EDITOR_CONTENT_H.load(Ordering::SeqCst) as i32;
+    if content <= 0 {
+        return;
+    }
+    unsafe {
+        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+        if ed.is_invalid() || !IsWindowVisible(ed).as_bool() {
+            return;
+        }
+        resize_manager(content.max(MGR_H));
     }
 }
 
@@ -1703,10 +1775,10 @@ fn show_editor() {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         populate_editor();
         theme::retheme_children(ed);
-        set_left_controls_enabled(false);
-        // The pane lives inside an already-visible window: show and commit
-        // its first frame synchronously instead of the top-level cloak flow.
+        set_list_view_visible(false);
+        // Swap views and size the window to the form in one pass.
         let _ = ShowWindow(ed, SW_SHOW);
+        sync_manager_height();
         let _ = UpdateWindow(ed);
         // Go focuses the name field when the editor opens.
         let name = get_dlg_item(ed, ED_NAME);
@@ -1719,10 +1791,12 @@ fn show_editor() {
 fn hide_editor() {
     unsafe {
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
-        let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         let _ = ShowWindow(ed, SW_HIDE);
-        set_left_controls_enabled(true);
+        set_list_view_visible(true);
         refresh_list();
+        // Back to the compact list view.
+        resize_manager(MGR_H);
+        let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         // Go focuses the manager list after save/cancel (keyboard stays
         // live). An empty rule list hides the listbox; focus New instead of
         // silently dropping the focus onto a hidden window.
@@ -1745,18 +1819,18 @@ fn create_editor() {
 
         register_editor_class(instance);
 
-        // Embedded pane: a child of the manager window, not a second OS
-        // window. It keeps its own class and proc, so all editor message
-        // handling stays unchanged; show/hide toggles it in place.
+        // Overlay pane: a full-client child of the manager shown while a
+        // draft is open (the list view hides underneath). It keeps its own
+        // class and proc, so all editor message handling stays unchanged.
         let ed = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             windows::core::w!("IdleTriggerAutoEdit"),
             PCWSTR(wide(&t_pub("automation_new_title")).as_ptr()),
             WINDOW_STYLE(WS_CHILD.0 | WS_CLIPSIBLINGS.0),
-            s(MGR_PANE_X),
-            s(MGR_PAD),
+            0,
+            0,
             s(ED_PANE_W),
-            s(ED_PANE_H),
+            s(MGR_H),
             Some(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _)),
             None,
             Some(instance.into()),
@@ -2698,28 +2772,27 @@ pub fn layout_editor() {
             }
         }
 
-        // Status row + footer. The pane is a fixed viewport: save/cancel
-        // pin to the bottom on short layouts and follow the flow on tall
-        // ones (the content then scrolls via fit_content).
+        // Status row + footer follow the flow: the manager window grows to
+        // the content height, and anything the work area cannot fit scrolls
+        // via fit_content.
         y += ED_RELATED_GAP;
         place(ED_VALIDATION, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_SECTION_GAP;
-        let footer_y = y.max(ED_PANE_H - ED_EDGE - BUTTON_H);
         place(
             ED_SAVE,
             ED_PAD + content_w - ED_DIALOG_W,
-            footer_y,
+            y,
             ED_DIALOG_W,
             BUTTON_H,
         );
         place(
             ED_CANCEL,
             ED_PAD + content_w - 2 * ED_DIALOG_W - ED_GAP,
-            footer_y,
+            y,
             ED_DIALOG_W,
             BUTTON_H,
         );
-        let content_bottom = footer_y + BUTTON_H + ED_EDGE;
+        let content_bottom = y + BUTTON_H + ED_EDGE;
 
         // Apply only final visibility; existing fields never hide and reappear.
         for id in ED_LAYOUT_IDS {
@@ -2730,9 +2803,12 @@ pub fn layout_editor() {
                 crate::nativeform::set_visible_deferred(surface, visible.contains(&surface));
             }
         }
-        // Fixed viewport: record the content extent; the pane itself never
-        // resizes (the top-level resize flow is gone with the old window).
+        // Record the content extent: the pane covers the manager client
+        // area, the manager resizes to it, and the viewport only scrolls
+        // when the work area clamps the window.
+        EDITOR_CONTENT_H.store(content_bottom as isize, Ordering::SeqCst);
         crate::viewport::fit_content(ed, ED_W, content_bottom);
+        sync_manager_height();
         if IsWindowVisible(ed).as_bool() {
             crate::present_layout(ed);
         }
@@ -5057,20 +5133,24 @@ fn refresh_tooltips() {
 pub fn dpi_changed(hwnd: HWND) {
     let _dpi = crate::dpi::Scope::window(hwnd);
     // The editor pane is a child window and never sees WM_DPICHANGED; the
-    // manager's hook repositions it and re-lays-out its controls.
+    // manager's hook stretches it over the client area and re-lays-out its
+    // controls (which also resizes the window to the new content height).
     if hwnd.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
         unsafe {
             let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
             if !ed.is_invalid() {
-                let _ = SetWindowPos(
-                    ed,
-                    None,
-                    s(MGR_PANE_X),
-                    s(MGR_PAD),
-                    s(ED_PANE_W),
-                    s(ED_PANE_H),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+                let mut client = RECT::default();
+                if GetClientRect(hwnd, &mut client).is_ok() {
+                    let _ = SetWindowPos(
+                        ed,
+                        None,
+                        0,
+                        0,
+                        client.right,
+                        client.bottom,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 if IsWindowVisible(ed).as_bool() {
                     layout_editor();
                 }
@@ -5410,6 +5490,13 @@ mod surface_tests {
         choice_select(ed, ED_TRIGGER, auto::TRIGGER_TIME_WINDOW);
         choice_select(ed, ED_BLOCKED, "wait");
         set_text(get_dlg_item(ed, ED_MAX_WAIT), "10");
+        // The real flow shows the host and pane before laying it out;
+        // height sync only runs for a visible pane (IsWindowVisible checks
+        // the whole ancestor chain).
+        unsafe {
+            let _ = ShowWindow(host, SW_SHOW);
+            let _ = ShowWindow(ed, SW_SHOW);
+        }
         layout_editor();
         unsafe {
             let mut rect = RECT::default();
@@ -5423,9 +5510,13 @@ mod surface_tests {
             // pane constants live in (the test process may run at any DPI).
             let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(ed).max(96);
             let logical_bottom = origin.y * 96 / (dpi as i32);
+            let mut client = RECT::default();
+            GetClientRect(ed, &mut client).unwrap();
+            let logical_client_h = client.bottom * 96 / (dpi as i32);
             assert!(
-                logical_bottom <= ED_PANE_H,
-                "footer bottom {logical_bottom} exceeds pane height {ED_PANE_H}",
+                logical_bottom <= logical_client_h,
+                "footer bottom {logical_bottom} exceeds pane client {logical_client_h}; \
+                 the manager did not grow to the layout",
             );
             DestroyWindow(ed).unwrap();
             DestroyWindow(host).unwrap();

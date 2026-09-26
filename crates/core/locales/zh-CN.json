@@ -272,6 +272,8 @@
   "settings_tab_power": "电源管理",
   "settings_tab_theme": "昼夜主题",
   "settings_tab_app": "应用设置",
+  "settings_tab_appearance": "外观联动",
+  "settings_appearance_hint": "壁纸与指针方案随每次昼夜切换一起应用；留空表示不更改",
   "settings_power_title": "保持唤醒",
   "settings_idle_title": "空闲监测",
   "settings_keep_screen": "保持唤醒时同时保持屏幕常亮",
