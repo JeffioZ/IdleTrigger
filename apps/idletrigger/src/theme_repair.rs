@@ -21,7 +21,21 @@ use crate::wide;
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {
     let session = crate::theme_com::Session::new()?;
-    let snapshot = current_theme_snapshot()?;
+    let snapshot = match current_theme_snapshot() {
+        Ok(text) => text,
+        Err(error) => {
+            // Auto Dark Mode's light path: without a theme file to patch,
+            // a broadcast refresh still nudges DWM (its "Standard" level).
+            // The full colorization round needs a real .theme file, which
+            // the user can create by switching themes once in Windows
+            // Personalization.
+            crate::log_line(&format!(
+                "dwm refresh: no theme file ({error}); broadcast-only refresh"
+            ));
+            notify_theme_changed();
+            return Ok(());
+        }
+    };
     let apps_light = read_registry_dword(PERSONALIZE_KEY, "AppsUseLightTheme")
         .map(|v| v != 0)
         .unwrap_or_else(|| theme_mode(&snapshot, "AppMode"));

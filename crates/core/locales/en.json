@@ -313,7 +313,6 @@
   "settings_save_conflict": "The configuration changed elsewhere. Close and reopen Settings before saving.",
   "settings_system_apply_failed": "Settings were saved, but Windows could not apply these options: %s. Please retry.",
   "theme_repair_failed": "Theme repair did not complete: %s",
-  "theme_repair_no_theme_file": "The current Windows theme file is missing, so repair cannot run. Switch themes once in Windows Personalization settings (so a theme file exists) and try again",
   "tip_nosleep_battery": "Allow Stay Awake to continue on battery power. When off, it runs only while connected to AC power",
   "tip_nosleep_battery_threshold": "Stop Stay Awake below this battery percentage. Enter 0 for no minimum battery level",
   "tip_idle_warning_seconds": "Show a cancellable countdown before the idle action, 10 seconds minimum",
@@ -399,5 +398,6 @@
   "settings_wall_add": "Add wallpaper…",
   "settings_wall_remove": "Remove selected",
   "settings_all_files": "All files",
-  "tip_wallpaper_library": "Wallpapers you added; pick a file to remove it. Light/dark rows choose from this library"
+  "tip_wallpaper_library": "Wallpapers you added; pick a file to remove it. Light/dark rows choose from this library",
+  "settings_wallpaper_library_empty": "No wallpapers added yet"
 }

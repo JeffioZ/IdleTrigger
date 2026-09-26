@@ -190,8 +190,11 @@ pub fn fit_content(hwnd: HWND, width: i32, height: i32) {
         }
         ensure_state(hwnd, client.right, client.bottom);
         let state = state(hwnd).unwrap();
+        // Record the caller's content extent as-is: widening it to the
+        // client size would arm the horizontal scrollbar on every
+        // full-width form (client minus the scrollbar is always narrower).
         state.height.set(height.max(client.bottom));
-        state.width.set(width.max(client.right));
+        state.width.set(width);
         scroll_x(hwnd, state.restore_x.get());
         scroll_to(hwnd, state.restore.get());
         crate::list_style::refresh(hwnd);

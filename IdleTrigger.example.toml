@@ -51,6 +51,7 @@ theme_dark_on_battery = true
 # 检测到全屏应用、演示模式或前台游戏活动时暂不自动切换主题 / Pause automatic theme switching during fullscreen apps, presentations, or foreground game activity
 theme_skip_fullscreen = true
 # 随昼夜切换应用的浅色/深色壁纸路径；留空表示不更改壁纸 / Wallpaper path applied with the light/dark switch; empty keeps it unchanged
+# 路径含反斜杠时用单引号字面量字符串，如 theme_light_wallpaper = 'C:\walls\day.jpg' / With backslashes use single-quoted literal strings
 # theme_light_wallpaper = ""
 # theme_dark_wallpaper = ""
 # 壁纸方案库（设置界面“外观联动”页添加；浅色/深色从库中选择）/ Wallpaper library (added on the Settings Appearance page; the light/dark rows pick from it)

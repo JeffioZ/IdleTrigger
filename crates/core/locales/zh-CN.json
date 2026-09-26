@@ -313,7 +313,6 @@
   "settings_save_conflict": "配置已在其他位置更改，请关闭并重新打开“设置”后再保存。",
   "settings_system_apply_failed": "设置已保存，但 Windows 未能应用以下选项：%s。请重试。",
   "theme_repair_failed": "主题修复未完成：%s",
-  "theme_repair_no_theme_file": "找不到当前 Windows 主题文件，无法修复。请先在系统“个性化”设置中切换一次主题（让 Windows 生成主题文件），然后再试",
   "tip_nosleep_battery": "允许保持唤醒在使用电池时继续工作；关闭后仅在接通电源时生效",
   "tip_nosleep_battery_threshold": "电量低于此百分比时停止保持唤醒。输入 0 表示不设置最低电量",
   "tip_idle_warning_seconds": "空闲动作执行前显示可取消倒计时，最少 10 秒",
@@ -399,5 +398,6 @@
   "settings_wall_add": "添加壁纸…",
   "settings_wall_remove": "移除所选",
   "settings_all_files": "所有文件",
-  "tip_wallpaper_library": "已添加的壁纸列表；选中一项后可移除。浅色/深色行从此库中选择"
+  "tip_wallpaper_library": "已添加的壁纸列表；选中一项后可移除。浅色/深色行从此库中选择",
+  "settings_wallpaper_library_empty": "尚未添加壁纸"
 }

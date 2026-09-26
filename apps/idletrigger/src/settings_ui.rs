@@ -1082,8 +1082,13 @@ fn cursor_choice_labels() -> Vec<String> {
     items
 }
 
-/// Library dropdown rows: file names (full path when names collide).
+/// Library dropdown rows: file names (full path when names collide). An
+/// empty library keeps one header row so the choice never sits on an empty
+/// item list.
 fn wallpaper_library_labels() -> Vec<String> {
+    if crate::runtime::lock(&WALLPAPER_LIBRARY).is_empty() {
+        return vec![t_pub("settings_wallpaper_library_empty")];
+    }
     let library = crate::runtime::lock(&WALLPAPER_LIBRARY);
     let names: Vec<String> = library
         .iter()
