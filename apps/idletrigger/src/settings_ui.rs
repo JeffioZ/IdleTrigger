@@ -17,9 +17,7 @@ use windows::core::PCWSTR;
 
 use crate::{t_pub, theme};
 
-// Control ids — Go settingspanel.go numbering.
-const ID_TITLE: i32 = 100;
-const ID_DESCRIPTION: i32 = 101;
+// Control ids — Go settingspanel.go numbering, extended in the Rust port.
 const ID_TAB_POWER: i32 = 102;
 const ID_TAB_THEME: i32 = 103;
 const ID_TAB_APP: i32 = 104;
@@ -78,7 +76,6 @@ const ID_PAUSE_ON_LOCK: i32 = 177;
 // Appearance page: paired light/dark columns over a wallpaper library.
 // Labels and combos each own a unique id — sharing ids makes GetDlgItem
 // resolve only the first control and leaks the second across pages.
-const ID_APPEARANCE_TITLE: i32 = 178;
 const ID_ROW_WALL_LBL: i32 = 179;
 const ID_LIGHT_WALL: i32 = 180;
 const ID_DARK_WALL: i32 = 183;
@@ -86,10 +83,21 @@ const ID_ROW_CURSOR_LBL: i32 = 185;
 const ID_LIGHT_CURSOR: i32 = 186;
 const ID_DARK_CURSOR: i32 = 188;
 const ID_TAB_APPEARANCE: i32 = 191;
-const ID_APPEARANCE_HINT: i32 = 192;
 const ID_CURSOR_INSTALL: i32 = 197;
 const ID_COL_LIGHT: i32 = 198;
 const ID_COL_DARK: i32 = 199;
+// Header page title/subtitle pairs: every page repeats its nav label plus a
+// one-line intro in the window-header spot; page switching swaps the pair.
+const ID_PAGE_TITLE_POWER: i32 = 200;
+const ID_PAGE_SUB_POWER: i32 = 201;
+const ID_PAGE_TITLE_THEME: i32 = 202;
+const ID_PAGE_SUB_THEME: i32 = 203;
+const ID_PAGE_TITLE_APPEARANCE: i32 = 204;
+const ID_PAGE_SUB_APPEARANCE: i32 = 205;
+const ID_PAGE_TITLE_NOTIFICATIONS: i32 = 206;
+const ID_PAGE_SUB_NOTIFICATIONS: i32 = 207;
+const ID_PAGE_TITLE_APP: i32 = 208;
+const ID_PAGE_SUB_APP: i32 = 209;
 
 /// Session state for the wallpaper library: seeded from the config when the
 /// settings window opens, mutated by Add/Remove, committed on Save.
@@ -350,23 +358,58 @@ fn refresh_theme() {
 
 unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_font: HFONT) {
     unsafe {
-        // Header.
-        label(
-            hwnd,
-            ID_TITLE,
-            &t_pub("settings_title"),
-            title_font,
-            (24, 16, 460, 24),
-            false,
-        );
-        label(
-            hwnd,
-            ID_DESCRIPTION,
-            &t_pub("settings_description"),
-            font,
-            (24, 42, 652, 20),
-            false,
-        );
+        // Header: the active page's nav label plus a one-line intro take the
+        // old generic window-title/description spot; the visible pair swaps
+        // with the page (see page_ids).
+        for (title_id, sub_id, title_key, sub_key) in [
+            (
+                ID_PAGE_TITLE_POWER,
+                ID_PAGE_SUB_POWER,
+                "settings_tab_power",
+                "settings_power_page_hint",
+            ),
+            (
+                ID_PAGE_TITLE_THEME,
+                ID_PAGE_SUB_THEME,
+                "settings_tab_theme",
+                "settings_theme_page_hint",
+            ),
+            (
+                ID_PAGE_TITLE_APPEARANCE,
+                ID_PAGE_SUB_APPEARANCE,
+                "settings_tab_appearance",
+                "settings_appearance_page_hint",
+            ),
+            (
+                ID_PAGE_TITLE_NOTIFICATIONS,
+                ID_PAGE_SUB_NOTIFICATIONS,
+                "settings_tab_notifications",
+                "settings_notifications_page_hint",
+            ),
+            (
+                ID_PAGE_TITLE_APP,
+                ID_PAGE_SUB_APP,
+                "settings_tab_app",
+                "settings_app_page_hint",
+            ),
+        ] {
+            label(
+                hwnd,
+                title_id,
+                &t_pub(title_key),
+                title_font,
+                (24, 16, 460, 24),
+                false,
+            );
+            label(
+                hwnd,
+                sub_id,
+                &t_pub(sub_key),
+                font,
+                (24, 42, 652, 20),
+                false,
+            );
+        }
         label(
             hwnd,
             ID_VERSION,
@@ -612,30 +655,14 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         // Appearance page (its own tab): paired light/dark columns for
         // wallpaper and cursor schemes, over a shared wallpaper library.
         // Layout grid: row labels 208..272, light column 280..470, dark
-        // column 478..668.
-        label(
-            hwnd,
-            ID_APPEARANCE_TITLE,
-            &t_pub("settings_theme_appearance_group"),
-            section_font,
-            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
-            false,
-        );
-        label(
-            hwnd,
-            ID_APPEARANCE_HINT,
-            &t_pub("settings_appearance_hint"),
-            font,
-            (CONTENT_X, SECTION_TOP + SECTION_TITLE_H + 10, 468, 40),
-            false,
-        );
-        // Column headers above the paired picks.
+        // column 478..668. The header pair above carries the intro, so the
+        // columns start straight at SECTION_TOP.
         label(
             hwnd,
             ID_COL_LIGHT,
             &t_pub("settings_light_side"),
             section_font,
-            (280, 172, 190, 22),
+            (280, SECTION_TOP, 190, 22),
             false,
         );
         label(
@@ -643,7 +670,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_COL_DARK,
             &t_pub("settings_dark_side"),
             section_font,
-            (478, 172, 190, 22),
+            (478, SECTION_TOP, 190, 22),
             false,
         );
         // Wallpaper row: pick from the library per side.
@@ -652,11 +679,16 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_ROW_WALL_LBL,
             &t_pub("settings_row_wallpaper"),
             font,
-            (CONTENT_X, 206, 64, 22),
+            (CONTENT_X, SECTION_TOP + 34, 64, 22),
             false,
         );
         for (id, x) in [(ID_LIGHT_WALL, 280), (ID_DARK_WALL, 478)] {
-            combo_items(hwnd, id, (x, 198, 190, FIELD_H), &wallpaper_pick_items(""));
+            combo_items(
+                hwnd,
+                id,
+                (x, SECTION_TOP + 26, 190, FIELD_H),
+                &wallpaper_pick_items(""),
+            );
         }
         // Cursor row: installed schemes per side.
         label(
@@ -664,11 +696,16 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_ROW_CURSOR_LBL,
             &t_pub("settings_row_cursor"),
             font,
-            (CONTENT_X, 252, 64, 22),
+            (CONTENT_X, SECTION_TOP + 80, 64, 22),
             false,
         );
         for (id, x) in [(ID_LIGHT_CURSOR, 280), (ID_DARK_CURSOR, 478)] {
-            combo(hwnd, id, (x, 244, 190, FIELD_H), &cursor_choice_labels());
+            combo(
+                hwnd,
+                id,
+                (x, SECTION_TOP + 72, 190, FIELD_H),
+                &cursor_choice_labels(),
+            );
         }
         // One installer for both cursor columns; the dropdowns refresh on
         // open, so the freshly installed scheme shows up right away.
@@ -676,7 +713,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_CURSOR_INSTALL,
             &t_pub("settings_install_inf"),
-            (CONTENT_X, 298, 224, FIELD_H),
+            (CONTENT_X, SECTION_TOP + 126, 224, FIELD_H),
         );
 
         // Application page.
@@ -1494,6 +1531,8 @@ pub fn refresh_location_status() {
 fn page_ids(page: i32) -> &'static [i32] {
     match page {
         0 => &[
+            ID_PAGE_TITLE_POWER,
+            ID_PAGE_SUB_POWER,
             ID_POWER_TITLE,
             ID_KEEP_SCREEN,
             ID_BATTERY_ALLOWED,
@@ -1511,6 +1550,8 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_IDLE_ENHANCED,
         ],
         1 => &[
+            ID_PAGE_TITLE_THEME,
+            ID_PAGE_SUB_THEME,
             ID_THEME_SCHEDULE_TITLE,
             ID_THEME_BEHAVIOR_TITLE,
             ID_THEME_MODE_LBL,
@@ -1528,8 +1569,8 @@ fn page_ids(page: i32) -> &'static [i32] {
         ],
 
         2 => &[
-            ID_APPEARANCE_TITLE,
-            ID_APPEARANCE_HINT,
+            ID_PAGE_TITLE_APPEARANCE,
+            ID_PAGE_SUB_APPEARANCE,
             ID_COL_LIGHT,
             ID_COL_DARK,
             ID_ROW_WALL_LBL,
@@ -1541,6 +1582,8 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_CURSOR_INSTALL,
         ],
         4 => &[
+            ID_PAGE_TITLE_APP,
+            ID_PAGE_SUB_APP,
             ID_APP_GENERAL_TITLE,
             ID_APP_ABOUT_TITLE,
             ID_LANGUAGE_LBL,
@@ -1552,6 +1595,8 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_PROJECT_HOME,
         ],
         _ => &[
+            ID_PAGE_TITLE_NOTIFICATIONS,
+            ID_PAGE_SUB_NOTIFICATIONS,
             ID_NOTIFICATIONS_TITLE,
             ID_LOCK_KEYS,
             ID_LOCK_CAPS,
@@ -2233,7 +2278,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     let id = GetWindowLongPtrW(child_hwnd, GWL_ID) as i32;
                     let is_section = matches!(
                         id,
-                        ID_TITLE
+                        ID_PAGE_TITLE_POWER
+                            | ID_PAGE_TITLE_THEME
+                            | ID_PAGE_TITLE_APPEARANCE
+                            | ID_PAGE_TITLE_NOTIFICATIONS
+                            | ID_PAGE_TITLE_APP
                             | ID_POWER_TITLE
                             | ID_IDLE_TITLE
                             | ID_THEME_SCHEDULE_TITLE
@@ -2245,7 +2294,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                     let is_muted = matches!(
                         id,
-                        ID_DESCRIPTION
+                        ID_PAGE_SUB_POWER
+                            | ID_PAGE_SUB_THEME
+                            | ID_PAGE_SUB_APPEARANCE
+                            | ID_PAGE_SUB_NOTIFICATIONS
+                            | ID_PAGE_SUB_APP
                             | ID_VERSION
                             | ID_POWER_HINT
                             | ID_THEME_HINT
@@ -2532,14 +2585,24 @@ pub fn refresh_language() {
         let _ = SetWindowTextW(hwnd, PCWSTR(wide(&t_pub("settings_title")).as_ptr()));
     }
     for (id, key) in [
-        (ID_TITLE, "settings_title"),
-        (ID_DESCRIPTION, "settings_description"),
+        (ID_PAGE_TITLE_POWER, "settings_tab_power"),
+        (ID_PAGE_SUB_POWER, "settings_power_page_hint"),
+        (ID_PAGE_TITLE_THEME, "settings_tab_theme"),
+        (ID_PAGE_SUB_THEME, "settings_theme_page_hint"),
+        (ID_PAGE_TITLE_APPEARANCE, "settings_tab_appearance"),
+        (ID_PAGE_SUB_APPEARANCE, "settings_appearance_page_hint"),
+        (ID_PAGE_TITLE_NOTIFICATIONS, "settings_tab_notifications"),
+        (
+            ID_PAGE_SUB_NOTIFICATIONS,
+            "settings_notifications_page_hint",
+        ),
+        (ID_PAGE_TITLE_APP, "settings_tab_app"),
+        (ID_PAGE_SUB_APP, "settings_app_page_hint"),
         (ID_TAB_POWER, "settings_tab_power"),
         (ID_TAB_THEME, "settings_tab_theme"),
         (ID_TAB_NOTIFICATIONS, "settings_tab_notifications"),
         (ID_TAB_APP, "settings_tab_app"),
         (ID_TAB_APPEARANCE, "settings_tab_appearance"),
-        (ID_APPEARANCE_HINT, "settings_appearance_hint"),
         (ID_POWER_TITLE, "settings_power_title"),
         (ID_KEEP_SCREEN, "settings_keep_screen"),
         (ID_BATTERY_ALLOWED, "settings_battery_allowed"),
@@ -2560,8 +2623,6 @@ pub fn refresh_language() {
         (ID_THEME_BEHAVIOR_TITLE, "settings_theme_behavior_group"),
         (ID_THEME_BATTERY, "menu_theme_battery_dark"),
         (ID_THEME_FULLSCREEN, "menu_theme_skip_fullscreen"),
-        (ID_APPEARANCE_TITLE, "settings_theme_appearance_group"),
-        (ID_APPEARANCE_HINT, "settings_appearance_hint"),
         (ID_COL_LIGHT, "settings_light_side"),
         (ID_COL_DARK, "settings_dark_side"),
         (ID_ROW_WALL_LBL, "settings_row_wallpaper"),
@@ -2736,7 +2797,7 @@ mod locale_tests {
         refresh_language();
         assert_eq!(get(window, ID_IDLE_TIMEOUT), edit);
         assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
-        assert_eq!(control_text(window, ID_TITLE), "设置");
+        assert_eq!(control_text(window, ID_PAGE_TITLE_POWER), "电源管理");
         assert_eq!(combo_sel(window, ID_LANGUAGE), 2);
         assert_eq!(*crate::runtime::lock(&DRAFT_BASE), baseline);
         PAGE.store(1, Ordering::SeqCst);
