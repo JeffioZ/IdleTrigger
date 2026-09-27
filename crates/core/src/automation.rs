@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const DEFAULT_IDLE_MINUTES: i32 = 30;
-pub const DEFAULT_WARNING_SECONDS: i32 = 60;
+/// Shared with the idle monitor's `idle_warning_seconds` default so both
+/// countdown paths present one consistent default to users.
+pub const DEFAULT_WARNING_SECONDS: i32 = 30;
 pub const MIN_WARNING_SECONDS: i32 = 10;
 pub const MAX_RULES: usize = 64;
 pub const MAX_PROCESSES_PER_RULE: usize = 64;
