@@ -43,6 +43,12 @@ pub struct Config {
     pub theme_wallpapers: Vec<String>,
     pub theme_light_cursor_scheme: String,
     pub theme_dark_cursor_scheme: String,
+    /// Snapshot of the wallpaper state before the first day/night
+    /// application (compact tab-separated encoding; empty = not captured).
+    pub theme_restore_wallpaper: String,
+    /// Snapshot of the cursor state before the first day/night application
+    /// (scheme name + 15 role paths, tab-separated; empty = not captured).
+    pub theme_restore_cursor: String,
 }
 
 impl Default for Config {
@@ -79,6 +85,8 @@ impl Default for Config {
             theme_wallpapers: Vec::new(),
             theme_light_cursor_scheme: String::new(),
             theme_dark_cursor_scheme: String::new(),
+            theme_restore_wallpaper: String::new(),
+            theme_restore_cursor: String::new(),
         }
     }
 }
@@ -310,6 +318,12 @@ fn read_config(
         theme_dark_cursor_scheme: as_str(document, "theme_dark_cursor_scheme", bad_fields)
             .unwrap_or(&defaults.theme_dark_cursor_scheme)
             .to_string(),
+        theme_restore_wallpaper: as_str(document, "theme_restore_wallpaper", bad_fields)
+            .unwrap_or(&defaults.theme_restore_wallpaper)
+            .to_string(),
+        theme_restore_cursor: as_str(document, "theme_restore_cursor", bad_fields)
+            .unwrap_or(&defaults.theme_restore_cursor)
+            .to_string(),
     }
 }
 
@@ -460,6 +474,16 @@ fn save_candidate(
         "theme_dark_cursor_scheme",
         &config.theme_dark_cursor_scheme,
     );
+    set_str(
+        document,
+        "theme_restore_wallpaper",
+        &config.theme_restore_wallpaper,
+    );
+    set_str(
+        document,
+        "theme_restore_cursor",
+        &config.theme_restore_cursor,
+    );
     set_str(document, "language", &config.language);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -604,6 +628,8 @@ mod save_tests {
             theme_wallpapers: vec!["C:\\walls\\day.jpg".into(), "D:\\pics\\night.png".into()],
             theme_light_cursor_scheme: "Windows Standard".into(),
             theme_dark_cursor_scheme: "Windows Black".into(),
+            theme_restore_wallpaper: "picture\tfill\tMON1\tC:\\walls\\orig.jpg".into(),
+            theme_restore_cursor: "No Scheme\t\tC:\\c\\a.cur".into(),
         };
         let path = std::env::temp_dir().join(format!(
             "idletrigger-full-field-{}-{}.toml",

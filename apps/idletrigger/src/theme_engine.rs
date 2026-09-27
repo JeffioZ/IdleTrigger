@@ -6,10 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{ERROR_SUCCESS, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS, LPARAM, WPARAM};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, RegCloseKey, RegOpenKeyExW,
     RegSetValueExW,
+};
+use windows::Win32::UI::Shell::{
+    DESKTOP_WALLPAPER_POSITION, DWPOS_FILL, DesktopWallpaper, IDesktopWallpaper,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -684,6 +691,8 @@ fn apply_appearance(dark: bool) {
             },
         )
     });
+    // Capture the pre-switch state before the first modification lands.
+    ensure_restore_snapshot(!wallpaper.trim().is_empty(), !scheme.trim().is_empty());
     if !wallpaper.trim().is_empty()
         && let Err(error) = apply_wallpaper(&wallpaper)
     {
@@ -835,6 +844,21 @@ fn apply_cursor_scheme(name: &str) -> Result<(), String> {
             ));
         }
 
+        write_cursor_state(&paths, name)
+    }
+}
+
+/// Writes the full per-role cursor state and refreshes the live cursors:
+/// the shared sink for scheme application, snapshot restore, and defaults.
+fn write_cursor_state(paths: &[String], scheme_name: &str) -> Result<(), String> {
+    if paths.len() != CURSOR_NAMES.len() {
+        return Err(format!(
+            "cursor state defines {} of {} roles",
+            paths.len(),
+            CURSOR_NAMES.len()
+        ));
+    }
+    unsafe {
         let cursors = wide(CURSORS_KEY);
         let mut target = HKEY::default();
         let opened = RegOpenKeyExW(
@@ -847,10 +871,10 @@ fn apply_cursor_scheme(name: &str) -> Result<(), String> {
         if opened != ERROR_SUCCESS {
             return Err(format!("open Cursors: {}", opened.0));
         }
-        // Write every cursor of the scheme; a scheme may also reset the
-        // (Base)SchemeDefault marker so the picker shows the scheme name.
+        // Write every role; the (Scheme Default) marker makes the picker
+        // show the scheme name (empty for defaults/scheme-less snapshots).
         let mut failed = Vec::new();
-        for (value, path) in CURSOR_NAMES.iter().zip(&paths) {
+        for (value, path) in CURSOR_NAMES.iter().zip(paths) {
             let wide_value = wide(value);
             let wide_path = wide(path);
             let bytes: Vec<u8> = wide_path
@@ -870,7 +894,7 @@ fn apply_cursor_scheme(name: &str) -> Result<(), String> {
             }
         }
         let scheme_marker = wide("(Scheme Default)");
-        let name_wide = wide(name);
+        let name_wide = wide(scheme_name);
         let name_bytes: Vec<u8> = name_wide
             .iter()
             .flat_map(|u| u.to_le_bytes())
@@ -898,6 +922,426 @@ fn apply_cursor_scheme(name: &str) -> Result<(), String> {
         } else {
             Err("SystemParametersInfoW(SPI_SETCURSORS) rejected the request".into())
         }
+    }
+}
+
+// ============ Appearance restore: pre-switch snapshot + defaults ============
+
+/// The system default cursor set: per-role REG_EXPAND_SZ paths as shipped
+/// with a fresh Windows profile (CURSOR_NAMES order).
+const DEFAULT_CURSOR_PATHS: [&str; 15] = [
+    "%SystemRoot%\\cursors\\aero_arrow.cur",
+    "%SystemRoot%\\cursors\\aero_helpsel.cur",
+    "%SystemRoot%\\cursors\\aero_working.ani",
+    "%SystemRoot%\\cursors\\aero_busy.ani",
+    "%SystemRoot%\\cursors\\aero_pen.cur",
+    "%SystemRoot%\\cursors\\aero_unavail.cur",
+    "%SystemRoot%\\cursors\\aero_ns.cur",
+    "%SystemRoot%\\cursors\\aero_ew.cur",
+    "%SystemRoot%\\cursors\\aero_cross.cur",
+    "%SystemRoot%\\cursors\\aero_ibeam.cur",
+    "%SystemRoot%\\cursors\\aero_nwse.cur",
+    "%SystemRoot%\\cursors\\aero_nesw.cur",
+    "%SystemRoot%\\cursors\\aero_move.cur",
+    "%SystemRoot%\\cursors\\aero_up.cur",
+    "%SystemRoot%\\cursors\\aero_link.cur",
+];
+
+/// Fill-position names in DESKTOP_WALLPAPER_POSITION order.
+const WALLPAPER_POSITIONS: [&str; 6] = ["center", "tile", "stretch", "fit", "fill", "span"];
+
+/// Parsed wallpaper snapshot. Slideshow and Spotlight setups degrade to
+/// the current frame as a static picture: Windows exposes no API to re-arm
+/// either mode, so restore is honestly "the picture of that moment".
+#[derive(Clone, Debug, PartialEq)]
+enum WallpaperSnapshot {
+    Solid(u8, u8, u8),
+    Picture {
+        position: String,
+        pairs: Vec<(String, String)>,
+    },
+}
+
+impl WallpaperSnapshot {
+    /// Tab-separated encoding: paths and monitor device paths never contain
+    /// tabs, so no escaping is needed.
+    fn encode(&self) -> String {
+        match self {
+            WallpaperSnapshot::Solid(r, g, b) => format!("solid\t{r}\t{g}\t{b}"),
+            WallpaperSnapshot::Picture { position, pairs } => {
+                let mut parts = vec!["picture".to_string(), position.clone()];
+                for (device, image) in pairs {
+                    parts.push(device.clone());
+                    parts.push(image.clone());
+                }
+                parts.join("\t")
+            }
+        }
+    }
+
+    fn decode(encoded: &str) -> Option<Self> {
+        let mut parts = encoded.split('\t');
+        match parts.next()? {
+            "solid" => {
+                let r: u8 = parts.next()?.parse().ok()?;
+                let g: u8 = parts.next()?.parse().ok()?;
+                let b: u8 = parts.next()?.parse().ok()?;
+                Some(WallpaperSnapshot::Solid(r, g, b))
+            }
+            "picture" => {
+                let position = parts.next()?.to_string();
+                let mut pairs = Vec::new();
+                while let Some(device) = parts.next() {
+                    let image = parts.next()?;
+                    if !device.is_empty() && !image.is_empty() {
+                        pairs.push((device.to_string(), image.to_string()));
+                    }
+                }
+                if pairs.is_empty() {
+                    return None;
+                }
+                Some(WallpaperSnapshot::Picture { position, pairs })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Parsed cursor snapshot: the picker's scheme-name marker plus the 15
+/// per-role paths exactly as stored (REG_EXPAND_SZ stays unexpanded).
+fn parse_cursor_snapshot(encoded: &str) -> Option<(String, Vec<String>)> {
+    let parts: Vec<&str> = encoded.split('\t').collect();
+    if parts.len() != CURSOR_NAMES.len() + 1 {
+        return None;
+    }
+    Some((
+        parts[0].to_string(),
+        parts[1..].iter().map(|p| p.to_string()).collect(),
+    ))
+}
+
+/// One-shot STA guard: CoInitializeEx balanced by CoUninitialize.
+struct ComApartment(());
+
+impl ComApartment {
+    fn enter() -> Result<Self, String> {
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_ok() {
+            Ok(ComApartment(()))
+        } else {
+            Err(format!("CoInitializeEx failed: {hr}"))
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
+fn desktop_wallpaper() -> Result<(ComApartment, IDesktopWallpaper), String> {
+    let apartment = ComApartment::enter()?;
+    let api = unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL) }
+        .map_err(|error| format!("DesktopWallpaper COM: {error}"))?;
+    Ok((apartment, api))
+}
+
+/// Reads a CoTaskMem-allocated wide string, then frees it.
+fn take_pwstr(pw: windows::core::PWSTR) -> Option<String> {
+    unsafe {
+        if pw.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *pw.as_ptr().add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(pw.as_ptr(), len));
+        CoTaskMemFree(Some(pw.as_ptr().cast()));
+        Some(text)
+    }
+}
+
+/// Captures the current wallpaper state. A setup without any per-monitor
+/// image is a solid-color background.
+pub fn snapshot_wallpaper() -> Result<String, String> {
+    let (_apartment, api) = desktop_wallpaper()?;
+    unsafe {
+        let count = api
+            .GetMonitorDevicePathCount()
+            .map_err(|error| format!("monitor count: {error}"))?;
+        let mut pairs = Vec::new();
+        for index in 0..count {
+            let Ok(device) = api.GetMonitorDevicePathAt(index) else {
+                continue;
+            };
+            let Some(device) = take_pwstr(device) else {
+                continue;
+            };
+            let device_z = wide(&device);
+            let image = api
+                .GetWallpaper(PCWSTR(device_z.as_ptr()))
+                .ok()
+                .and_then(take_pwstr)
+                .unwrap_or_default();
+            if !image.is_empty() {
+                pairs.push((device, image));
+            }
+        }
+        let snapshot = if pairs.is_empty() {
+            let color = api
+                .GetBackgroundColor()
+                .map_err(|error| format!("background color: {error}"))?;
+            WallpaperSnapshot::Solid(
+                (color.0 & 0xFF) as u8,
+                ((color.0 >> 8) & 0xFF) as u8,
+                ((color.0 >> 16) & 0xFF) as u8,
+            )
+        } else {
+            let position = api
+                .GetPosition()
+                .map(|pos| {
+                    WALLPAPER_POSITIONS
+                        .get(pos.0 as usize)
+                        .copied()
+                        .unwrap_or("fill")
+                })
+                .unwrap_or("fill");
+            WallpaperSnapshot::Picture {
+                position: position.to_string(),
+                pairs,
+            }
+        };
+        Ok(snapshot.encode())
+    }
+}
+
+/// Applies a parsed wallpaper snapshot. Monitors that no longer exist and
+/// images that vanished are skipped (best effort, like the scheme switch).
+fn apply_wallpaper_snapshot(snapshot: &WallpaperSnapshot) -> Result<(), String> {
+    let (_apartment, api) = desktop_wallpaper()?;
+    match snapshot {
+        WallpaperSnapshot::Solid(r, g, b) => unsafe {
+            api.SetWallpaper(PCWSTR::null(), PCWSTR::null())
+                .map_err(|error| format!("clear wallpaper: {error}"))?;
+            let color = COLORREF((*r as u32) | ((*g as u32) << 8) | ((*b as u32) << 16));
+            api.SetBackgroundColor(color)
+                .map_err(|error| format!("background color: {error}"))?;
+            Ok(())
+        },
+        WallpaperSnapshot::Picture { position, pairs } => {
+            let mut applied = 0usize;
+            let mut skipped = Vec::new();
+            for (device, image) in pairs {
+                if !std::path::Path::new(image).is_file() {
+                    skipped.push(image.clone());
+                    continue;
+                }
+                let device_z = wide(device);
+                let image_z = wide(image);
+                if unsafe { api.SetWallpaper(PCWSTR(device_z.as_ptr()), PCWSTR(image_z.as_ptr())) }
+                    .is_ok()
+                {
+                    applied += 1;
+                } else {
+                    skipped.push(device.clone());
+                }
+            }
+            if let Some(index) = WALLPAPER_POSITIONS
+                .iter()
+                .position(|name| *name == *position)
+            {
+                let _ = unsafe { api.SetPosition(DESKTOP_WALLPAPER_POSITION(index as i32)) };
+            }
+            if applied == 0 {
+                return Err(format!(
+                    "no monitor restorable (skipped: {})",
+                    skipped.join(", ")
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Captures the live per-role cursor state, including the picker's
+/// scheme-name marker (empty when no scheme is selected).
+pub fn snapshot_cursor() -> Result<String, String> {
+    unsafe {
+        let cursors = wide(CURSORS_KEY);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(cursors.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        ) != ERROR_SUCCESS
+        {
+            return Err("open Cursors for snapshot".into());
+        }
+        let mut parts = vec![read_registry_string(hkey, "(Scheme Default)")];
+        for name in CURSOR_NAMES {
+            parts.push(read_registry_string(hkey, name));
+        }
+        let _ = RegCloseKey(hkey);
+        Ok(parts.join("\t"))
+    }
+}
+
+/// Reads one REG_SZ/REG_EXPAND_SZ value (empty when missing or of another
+/// type). EXPAND_SZ data is returned unexpanded, preserving %SystemRoot%
+/// forms for faithful re-writing.
+fn read_registry_string(hkey: HKEY, name: &str) -> String {
+    unsafe {
+        let wide_name = wide(name);
+        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE(0);
+        let mut size = 0u32;
+        let query = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(wide_name.as_ptr()),
+            None,
+            Some(&mut kind),
+            None,
+            Some(&mut size),
+        );
+        if query != ERROR_SUCCESS
+            || !matches!(
+                kind,
+                windows::Win32::System::Registry::REG_SZ
+                    | windows::Win32::System::Registry::REG_EXPAND_SZ
+            )
+        {
+            return String::new();
+        }
+        let mut buffer = vec![0u8; size as usize];
+        let read = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(wide_name.as_ptr()),
+            None,
+            None,
+            Some(buffer.as_mut_ptr()),
+            Some(&mut size),
+        );
+        if read != ERROR_SUCCESS {
+            return String::new();
+        }
+        buffer.truncate(size as usize);
+        let units: Vec<u16> = buffer
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .collect();
+        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        String::from_utf16_lossy(&units[..end])
+    }
+}
+
+/// True when at least one pre-change snapshot exists (UI enable state).
+pub fn has_restore_snapshot() -> bool {
+    crate::cfg_map(|c| !c.theme_restore_wallpaper.is_empty() || !c.theme_restore_cursor.is_empty())
+}
+
+/// Per-side restore outcome: None = that side has no snapshot (nothing was
+/// attempted); Some(Err) = the restore was attempted and failed.
+pub type RestoreSides = (Option<Result<(), String>>, Option<Result<(), String>>);
+
+/// Restores the state captured before the first day/night application.
+pub fn restore_previous_appearance() -> RestoreSides {
+    let (wallpaper, cursor) = crate::cfg_map(|c| {
+        (
+            c.theme_restore_wallpaper.clone(),
+            c.theme_restore_cursor.clone(),
+        )
+    });
+    let wallpaper = (!wallpaper.is_empty()).then(|| {
+        WallpaperSnapshot::decode(&wallpaper)
+            .ok_or_else(|| "wallpaper snapshot malformed".to_string())
+            .and_then(|snapshot| apply_wallpaper_snapshot(&snapshot))
+    });
+    let cursor = (!cursor.is_empty()).then(|| {
+        parse_cursor_snapshot(&cursor)
+            .ok_or_else(|| "cursor snapshot malformed".to_string())
+            .and_then(|(name, paths)| write_cursor_state(&paths, &name))
+    });
+    (wallpaper, cursor)
+}
+
+/// Factory defaults: the Windows image wallpaper plus the aero cursor set.
+pub fn restore_default_appearance() -> RestoreSides {
+    (
+        Some(apply_default_wallpaper()),
+        Some(apply_default_cursor()),
+    )
+}
+
+fn apply_default_wallpaper() -> Result<(), String> {
+    let image = std::path::PathBuf::from(r"C:\Windows\web\wallpaper\Windows\img0.jpg");
+    if !image.is_file() {
+        return Err("default wallpaper image not found".into());
+    }
+    let (_apartment, api) = desktop_wallpaper()?;
+    let image_z = wide(&image.to_string_lossy());
+    unsafe {
+        api.SetWallpaper(PCWSTR::null(), PCWSTR(image_z.as_ptr()))
+            .map_err(|error| format!("default wallpaper: {error}"))?;
+        let _ = api.SetPosition(DWPOS_FILL);
+    }
+    Ok(())
+}
+
+fn apply_default_cursor() -> Result<(), String> {
+    let paths: Vec<String> = DEFAULT_CURSOR_PATHS.iter().map(|p| p.to_string()).collect();
+    write_cursor_state(&paths, "")
+}
+
+/// Captures the pre-switch state right before the first wallpaper/cursor
+/// modification and keeps it (sticky) until the config is hand-cleared:
+/// the data source for the appearance page's restore action.
+fn ensure_restore_snapshot(wallpaper_change: bool, cursor_change: bool) {
+    let exists = crate::cfg_map(|c| {
+        (
+            !c.theme_restore_wallpaper.is_empty(),
+            !c.theme_restore_cursor.is_empty(),
+        )
+    });
+    let want_wallpaper = wallpaper_change && !exists.0;
+    let want_cursor = cursor_change && !exists.1;
+    if !want_wallpaper && !want_cursor {
+        return;
+    }
+    let wallpaper = want_wallpaper
+        .then(snapshot_wallpaper)
+        .and_then(|result| match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                crate::log_line(&format!("wallpaper snapshot failed: {error}"));
+                None
+            }
+        });
+    let cursor = want_cursor
+        .then(snapshot_cursor)
+        .and_then(|result| match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                crate::log_line(&format!("cursor snapshot failed: {error}"));
+                None
+            }
+        });
+    if wallpaper.is_none() && cursor.is_none() {
+        return;
+    }
+    if let Err(error) = crate::edit_config(|c| {
+        if let Some(value) = &wallpaper {
+            c.theme_restore_wallpaper = value.clone();
+        }
+        if let Some(value) = &cursor {
+            c.theme_restore_cursor = value.clone();
+        }
+    }) {
+        crate::log_line(&format!("restore snapshot save failed: {error}"));
     }
 }
 
@@ -1159,5 +1603,68 @@ mod solar_tests {
         );
         assert_eq!(next_transition(10000, 600, Some((420, 1140))), 10000 + 540);
         assert_eq!(next_transition(10000, 420, Some((420, 1140))), 10000 + 720);
+    }
+}
+
+#[cfg(test)]
+mod restore_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn wallpaper_snapshot_round_trips() {
+        let solid = WallpaperSnapshot::Solid(10, 20, 30);
+        assert_eq!(WallpaperSnapshot::decode(&solid.encode()), Some(solid));
+        let picture = WallpaperSnapshot::Picture {
+            position: "fit".into(),
+            pairs: vec![
+                (
+                    "\\\\?\\DISPLAY#ABC#{guid}".into(),
+                    "C:\\pics\\wall paper;1.jpg".into(),
+                ),
+                ("\\\\?\\DISPLAY#DEF#{guid}".into(), "D:\\other.png".into()),
+            ],
+        };
+        assert_eq!(WallpaperSnapshot::decode(&picture.encode()), Some(picture));
+    }
+
+    #[test]
+    fn wallpaper_snapshot_decode_rejects_junk() {
+        assert!(WallpaperSnapshot::decode("").is_none());
+        assert!(WallpaperSnapshot::decode("nonsense").is_none());
+        assert!(WallpaperSnapshot::decode("solid\t1\t2").is_none());
+        assert!(WallpaperSnapshot::decode("solid\t256\t0\t0").is_none());
+        // A dangling monitor path without its image is malformed.
+        assert!(WallpaperSnapshot::decode("picture\tfill\t\\\\?\\DISPLAY#A#{g}").is_none());
+        // No usable pairs.
+        assert!(WallpaperSnapshot::decode("picture\tfill").is_none());
+    }
+
+    #[test]
+    fn cursor_snapshot_round_trips_with_empty_roles() {
+        let parts: Vec<String> = std::iter::once("My Scheme".to_string())
+            .chain((0..15).map(|index| {
+                if index % 2 == 0 {
+                    format!("%SystemRoot%\\cursors\\aero{index}.cur")
+                } else {
+                    String::new()
+                }
+            }))
+            .collect();
+        let encoded = parts.join("\t");
+        let Some((name, paths)) = parse_cursor_snapshot(&encoded) else {
+            panic!("valid snapshot must parse");
+        };
+        assert_eq!(name, "My Scheme");
+        assert_eq!(paths.len(), CURSOR_NAMES.len());
+        assert_eq!(paths[1], "");
+        assert_eq!(format!("{name}\t{}", paths.join("\t")), encoded);
+    }
+
+    #[test]
+    fn cursor_snapshot_decode_rejects_wrong_field_count() {
+        assert!(parse_cursor_snapshot("").is_none());
+        assert!(parse_cursor_snapshot("only\tthree\tfields").is_none());
+        let short: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        assert!(parse_cursor_snapshot(&short.join("\t")).is_none());
     }
 }

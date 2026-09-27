@@ -83,7 +83,6 @@ const ID_ROW_CURSOR_LBL: i32 = 185;
 const ID_LIGHT_CURSOR: i32 = 186;
 const ID_DARK_CURSOR: i32 = 188;
 const ID_TAB_APPEARANCE: i32 = 191;
-const ID_CURSOR_INSTALL: i32 = 197;
 const ID_COL_LIGHT: i32 = 198;
 const ID_COL_DARK: i32 = 199;
 // Header page title/subtitle pairs: every page repeats its nav label plus a
@@ -98,11 +97,22 @@ const ID_PAGE_TITLE_NOTIFICATIONS: i32 = 206;
 const ID_PAGE_SUB_NOTIFICATIONS: i32 = 207;
 const ID_PAGE_TITLE_APP: i32 = 208;
 const ID_PAGE_SUB_APP: i32 = 209;
+// Appearance restore pair: pre-change snapshot + factory defaults.
+const ID_RESTORE_PREV: i32 = 210;
+const ID_RESTORE_DEFAULT: i32 = 211;
+const ID_RESTORE_HINT: i32 = 212;
 
 /// Session state for the wallpaper library: seeded from the config when the
 /// settings window opens, mutated by Add/Remove, committed on Save.
 static WALLPAPER_LIBRARY: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Each cursor dropdown's selection right before it opens. The Install
+/// footer row overwrites the control value while the picker runs, so the
+/// pre-open selection is restored once the installer flow finishes.
+static CURSOR_PREVIOUS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<i32, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 // Layout tokens — Go controls.go build() constants.
 const CLIENT_W: i32 = 700;
@@ -151,6 +161,15 @@ static DRAFT_BASE: std::sync::Mutex<Option<idletrigger_core::config::Config>> =
 static PAGE: AtomicI32 = AtomicI32::new(0);
 static AUTOSTART_BASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TOOLTIP_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Validation-line kind: true renders in the error color, false in normal
+/// text (informational feedback such as a successful restore).
+static VALIDATION_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Writes the shared validation line with its semantic kind.
+fn set_validation(hwnd: HWND, text: &str, error: bool) {
+    VALIDATION_ERROR.store(error, Ordering::SeqCst);
+    set_text(hwnd, ID_VALIDATION, text);
+}
 
 fn s(v: i32) -> i32 {
     crate::scale_pub(v)
@@ -690,7 +709,8 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 &wallpaper_pick_items(""),
             );
         }
-        // Cursor row: installed schemes per side.
+        // Cursor row: installed schemes per side, with the .inf installer
+        // as a footer action in each dropdown (wallpaper Browse parity).
         label(
             hwnd,
             ID_ROW_CURSOR_LBL,
@@ -700,20 +720,37 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             false,
         );
         for (id, x) in [(ID_LIGHT_CURSOR, 280), (ID_DARK_CURSOR, 478)] {
-            combo(
+            combo_items(
                 hwnd,
                 id,
                 (x, SECTION_TOP + 72, 190, FIELD_H),
-                &cursor_choice_labels(),
+                &cursor_choice_rows(),
             );
         }
-        // One installer for both cursor columns; the dropdowns refresh on
-        // open, so the freshly installed scheme shows up right away.
+        // Restore pair: back to the state captured before the first
+        // day/night application, or to system factory defaults.
         push_button(
             hwnd,
-            ID_CURSOR_INSTALL,
-            &t_pub("settings_install_inf"),
+            ID_RESTORE_PREV,
+            &t_pub("settings_restore_prev"),
             (CONTENT_X, SECTION_TOP + 126, 224, FIELD_H),
+        );
+        push_button(
+            hwnd,
+            ID_RESTORE_DEFAULT,
+            &t_pub("settings_restore_default"),
+            (CONTENT_X + 244, SECTION_TOP + 126, 224, FIELD_H),
+        );
+        // Muted caption under the disabled restore button: explains when a
+        // pre-change snapshot appears (tooltips cannot fire on disabled
+        // controls, so the reason must stay visible).
+        label(
+            hwnd,
+            ID_RESTORE_HINT,
+            &t_pub("settings_restore_hint"),
+            font,
+            (CONTENT_X, SECTION_TOP + 164, 468, 22),
+            false,
         );
 
         // Application page.
@@ -1067,11 +1104,22 @@ fn combo_items(parent: HWND, id: i32, b: (i32, i32, i32, i32), rows: &[crate::ch
     crate::choice::create_rows(parent, id, (x, y, w, FIELD_H), rows, body_font());
 }
 
-/// Cursor dropdown rows: a leading "no linkage" entry plus installed schemes.
-fn cursor_choice_labels() -> Vec<String> {
-    let mut items = vec![t_pub("settings_appearance_none")];
-    items.extend(crate::theme_engine::cursor_schemes());
-    items
+/// Cursor dropdown rows: a leading "no linkage" entry, the installed
+/// schemes (value = scheme name), and a trailing Install action that runs
+/// the .inf installer.
+fn cursor_choice_rows() -> Vec<crate::choice::ChoiceItem> {
+    let mut rows = vec![crate::choice::ChoiceItem::option(
+        "",
+        &t_pub("settings_appearance_none"),
+    )];
+    for scheme in crate::theme_engine::cursor_schemes() {
+        rows.push(crate::choice::ChoiceItem::option(&scheme, &scheme));
+    }
+    rows.push(crate::choice::ChoiceItem::option(
+        "__install__",
+        &t_pub("settings_install_inf"),
+    ));
+    rows
 }
 
 /// Picker rows for one wallpaper side: "No change", the recently used
@@ -1156,12 +1204,9 @@ fn remove_wallpaper(hwnd: HWND, path: &str) {
     refresh_wallpaper_choices(hwnd);
 }
 
-/// Reloads both cursor dropdowns, keeping current selections by label.
+/// Reloads both cursor dropdowns, keeping current selections by value.
 fn refresh_cursor_choices(hwnd: HWND) {
-    let rows: Vec<crate::choice::ChoiceItem> = cursor_choice_labels()
-        .iter()
-        .map(|label| crate::choice::ChoiceItem::option(label, label))
-        .collect();
+    let rows = cursor_choice_rows();
     refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &rows);
     refresh_choice_rows(hwnd, ID_DARK_CURSOR, &rows);
 }
@@ -1208,8 +1253,8 @@ fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
 }
 
 /// Installs a pointer-scheme .inf through the system installer (the
-/// context-menu "Install" verb). The scheme appears in the dropdowns when
-/// they next open; we never parse or execute inf content ourselves.
+/// context-menu "Install" verb); we never parse or execute inf content
+/// ourselves.
 fn install_cursor_inf(owner: HWND) {
     use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW};
     unsafe {
@@ -1253,8 +1298,28 @@ fn install_cursor_inf(owner: HWND) {
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
-        refresh_cursor_choices(owner);
     }
+}
+
+/// The Install footer row was picked on one side: run the .inf installer,
+/// then restore the selection that was in place before the dropdown opened
+/// — the action itself is not a scheme. The install verb is asynchronous,
+/// so a freshly installed scheme shows up when the dropdown next opens (its
+/// rows refresh right before the popup appears).
+fn run_cursor_install(hwnd: HWND, id: i32) {
+    let previous = crate::runtime::lock(&CURSOR_PREVIOUS)
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
+    install_cursor_inf(hwnd);
+    let rows = cursor_choice_rows();
+    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &rows);
+    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &rows);
+    let index = rows
+        .iter()
+        .position(|r| !r.header && r.value == previous)
+        .map_or(0, |i| i as i32);
+    crate::choice::select_index(get(hwnd, id), index);
 }
 
 /// Wallpaper picker: the formats Windows accepts as desktop backgrounds,
@@ -1453,17 +1518,25 @@ fn populate(hwnd: HWND) {
             .unwrap_or(0);
         crate::choice::select_index(get(hwnd, id), index);
     }
-    // Cursor dropdowns: 0 = no linkage, otherwise the scheme's row; a
-    // scheme that no longer exists falls back to no linkage.
-    let schemes = crate::theme_engine::cursor_schemes();
-    let scheme_index = |name: &str| -> i32 {
-        schemes
-            .iter()
-            .position(|s| s.eq_ignore_ascii_case(name.trim()))
-            .map_or(0, |i| i as i32 + 1)
-    };
-    crate::choice::select_index(get(hwnd, ID_LIGHT_CURSOR), scheme_index(&light_cursor));
-    crate::choice::select_index(get(hwnd, ID_DARK_CURSOR), scheme_index(&dark_cursor));
+    // Cursor dropdowns: rows carry the scheme name as the value ("" = no
+    // linkage); a scheme that no longer exists falls back to no linkage.
+    let cursor_rows = cursor_choice_rows();
+    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &cursor_rows);
+    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &cursor_rows);
+    for (id, scheme) in [
+        (ID_LIGHT_CURSOR, &light_cursor),
+        (ID_DARK_CURSOR, &dark_cursor),
+    ] {
+        let index = if scheme.trim().is_empty() {
+            0
+        } else {
+            cursor_rows
+                .iter()
+                .position(|r| r.value.eq_ignore_ascii_case(scheme.trim()))
+                .map_or(0, |i| i as i32)
+        };
+        crate::choice::select_index(get(hwnd, id), index);
+    }
 
     let mode_idx = if theme_mode == "sunrise" { 1 } else { 0 };
     crate::choice::select_index(get(hwnd, ID_THEME_MODE), mode_idx);
@@ -1579,7 +1652,9 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_ROW_CURSOR_LBL,
             ID_LIGHT_CURSOR,
             ID_DARK_CURSOR,
-            ID_CURSOR_INSTALL,
+            ID_RESTORE_PREV,
+            ID_RESTORE_DEFAULT,
+            ID_RESTORE_HINT,
         ],
         4 => &[
             ID_PAGE_TITLE_APP,
@@ -1631,6 +1706,13 @@ fn apply_dependent_states(hwnd: HWND) {
             let battery = is_checked(hwnd, ID_BATTERY_ALLOWED);
             let _ = EnableWindow(get(hwnd, ID_BATTERY_THRESH), battery);
             let _ = EnableWindow(get(hwnd, FIELD_SURFACE_BASE + ID_BATTERY_THRESH), battery);
+        }
+        if page == 2 {
+            // The pre-change restore needs a captured snapshot; the muted
+            // caption under it explains when one appears.
+            let snapshot = crate::theme_engine::has_restore_snapshot();
+            let _ = EnableWindow(get(hwnd, ID_RESTORE_PREV), snapshot);
+            show(ID_RESTORE_HINT, !snapshot);
         }
         if page == 1 {
             let sunrise = combo_sel(hwnd, ID_THEME_MODE) == 1;
@@ -1728,15 +1810,15 @@ fn collect_draft(hwnd: HWND) -> Draft {
         } else {
             battery_text.trim().parse().ok()
         };
-    // Scheme row -> name, 0 = no linkage.
-    let scheme_at = |row: usize| -> String {
-        if row == 0 {
-            return String::new();
+    // The row value already is the scheme name ("" = no linkage); the
+    // Install footer is an action, never a saved selection.
+    let scheme_at = |id: i32| -> String {
+        let value = crate::choice::value(get(hwnd, id));
+        if value.is_empty() || value == "__install__" {
+            String::new()
+        } else {
+            value
         }
-        crate::theme_engine::cursor_schemes()
-            .get(row - 1)
-            .cloned()
-            .unwrap_or_default()
     };
     // The row value already is the wallpaper path ("" = no change).
     let wall_at = |id: i32| -> String {
@@ -1765,9 +1847,9 @@ fn collect_draft(hwnd: HWND) -> Draft {
         light_wallpaper: wall_at(ID_LIGHT_WALL),
         dark_wallpaper: wall_at(ID_DARK_WALL),
         wallpapers: crate::runtime::lock(&WALLPAPER_LIBRARY).clone(),
-        // Map the dropdown row back to a scheme name (0 = empty = off).
-        light_cursor: scheme_at(combo_sel(hwnd, ID_LIGHT_CURSOR)),
-        dark_cursor: scheme_at(combo_sel(hwnd, ID_DARK_CURSOR)),
+        // Map the selected row's value back to a scheme name ("" = off).
+        light_cursor: scheme_at(ID_LIGHT_CURSOR),
+        dark_cursor: scheme_at(ID_DARK_CURSOR),
         language_idx: combo_sel(hwnd, ID_LANGUAGE).min(2),
         lock_keys: is_checked(hwnd, ID_LOCK_KEYS),
         caps: is_checked(hwnd, ID_LOCK_CAPS),
@@ -1932,12 +2014,22 @@ fn draft_differs(draft: &Draft) -> bool {
         || draft.logging != cfg_logging
 }
 
+/// Draft-vs-live comparison key that ignores the restore snapshot fields:
+/// only the background appearance switch fills them, never a draft.
+fn without_restore_snapshot(
+    mut config: idletrigger_core::config::Config,
+) -> idletrigger_core::config::Config {
+    config.theme_restore_wallpaper.clear();
+    config.theme_restore_cursor.clear();
+    config
+}
+
 fn save() {
     unsafe {
         let hwnd = current();
         let draft = collect_draft(hwnd);
         if let Some((page, id, key)) = validate_draft(&draft) {
-            set_text(hwnd, ID_VALIDATION, &t_pub(key));
+            set_validation(hwnd, &t_pub(key), true);
             PAGE.store(page, Ordering::SeqCst);
             apply_dependent_states(hwnd);
             let target = get(hwnd, id);
@@ -1950,7 +2042,13 @@ fn save() {
         let autostart_was = crate::system::autostart_is_enabled();
         let base = crate::runtime::lock(&DRAFT_BASE).clone();
         if let Err(err) = crate::commit_config(|c, _| {
-            if base.as_ref() != Some(c) {
+            // The background day/night switch may capture the restore
+            // snapshot while this dialog is open, and a draft never edits
+            // those two fields — they must not read as an external
+            // conflict, or the dialog stays unsaveable until reopened.
+            if Some(without_restore_snapshot(c.clone()))
+                != base.as_ref().map(|b| without_restore_snapshot(b.clone()))
+            {
                 return Err(t_pub("settings_save_conflict"));
             }
             c.keep_screen_on = draft.keep_screen;
@@ -1987,7 +2085,7 @@ fn save() {
             c.logging_enabled = draft.logging;
             Ok(())
         }) {
-            set_text(hwnd, ID_VALIDATION, &err);
+            set_validation(hwnd, &err, true);
             return;
         }
         *crate::runtime::lock(&DRAFT_BASE) = Some(crate::cfg_map(Clone::clone));
@@ -2000,6 +2098,9 @@ fn save() {
         crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
         crate::refresh_checkboxes();
         crate::refresh_status();
+        // apply_current_side may have captured the first appearance
+        // snapshot: refresh the restore button's enable state and caption.
+        apply_dependent_states(hwnd);
         // Settings do not directly change the active palette. Theme changes
         // arrive through the normal notification path; retheming here can
         // cloak/reveal this newly created dialog just before we destroy it.
@@ -2108,7 +2209,8 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_ROW_CURSOR_LBL, "tip_theme_cursor"),
         (ID_LIGHT_CURSOR, "tip_theme_cursor"),
         (ID_DARK_CURSOR, "tip_theme_cursor"),
-        (ID_CURSOR_INSTALL, "tip_theme_cursor"),
+        (ID_RESTORE_PREV, "tip_theme_restore_prev"),
+        (ID_RESTORE_DEFAULT, "tip_theme_restore_default"),
         (ID_LANGUAGE_LBL, "tip_language"),
         (ID_LANGUAGE, "tip_language"),
         (ID_LOCK_KEYS, "tip_lock_keys"),
@@ -2174,6 +2276,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             set_text(hwnd, ID_VALIDATION, "");
                         } else if let Some(path) = value.strip_prefix("__remove__") {
                             remove_wallpaper(hwnd, path);
+                            set_text(hwnd, ID_VALIDATION, "");
+                        }
+                        LRESULT(0)
+                    }
+                    CBN_SELCHANGE if idc == ID_LIGHT_CURSOR || idc == ID_DARK_CURSOR => {
+                        // The Install footer runs the .inf installer and then
+                        // restores the pre-open selection on this side.
+                        if crate::choice::value(get(hwnd, idc)) == "__install__" {
+                            run_cursor_install(hwnd, idc);
                             set_text(hwnd, ID_VALIDATION, "");
                         }
                         LRESULT(0)
@@ -2305,9 +2416,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             | ID_THEME_LOCATION_STATUS
                             | ID_VALIDATION
                             | ID_NOTIFICATIONS_HINT
+                            | ID_RESTORE_HINT
                     );
                     let disabled = !IsWindowEnabled(child_hwnd).as_bool();
-                    let text = if id == ID_VALIDATION && GetWindowTextLengthW(child_hwnd) > 0 {
+                    let text = if id == ID_VALIDATION
+                        && GetWindowTextLengthW(child_hwnd) > 0
+                        && VALIDATION_ERROR.load(Ordering::SeqCst)
+                    {
                         palette.danger_surface_text
                     } else if disabled {
                         palette.disabled_text
@@ -2329,7 +2444,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     return LRESULT(theme::bg_brush().0 as isize);
                 }
                 let validation = get(hwnd, ID_VALIDATION);
-                let is_error = child_hwnd == validation && GetWindowTextLengthW(validation) > 0;
+                let is_error = child_hwnd == validation
+                    && GetWindowTextLengthW(validation) > 0
+                    && VALIDATION_ERROR.load(Ordering::SeqCst);
                 let color = if is_error {
                     // Validation messages render in the error color.
                     theme::palette().danger_surface_text
@@ -2527,16 +2644,50 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 // install that just finished or a library edit shows up.
                 if idc == ID_LIGHT_CURSOR || idc == ID_DARK_CURSOR {
                     refresh_cursor_choices(hwnd);
+                    // Snapshot for the Install footer's post-run restore.
+                    let value = crate::choice::value(get(hwnd, idc));
+                    crate::runtime::lock(&CURSOR_PREVIOUS).insert(idc, value);
                 }
                 crate::choice::toggle(get(hwnd, idc), hwnd, idc);
             }
-            ID_CURSOR_INSTALL => install_cursor_inf(hwnd),
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
+            ID_RESTORE_PREV => {
+                report_restore_result(hwnd, crate::theme_engine::restore_previous_appearance());
+            }
+            ID_RESTORE_DEFAULT => {
+                report_restore_result(hwnd, crate::theme_engine::restore_default_appearance());
+            }
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_SAVE => save(),
             ID_CANCEL => close_request(),
             _ => {}
         }
+    }
+}
+
+/// Shared feedback for the two restore actions: nothing captured (tooltip-
+/// level information), partial failure (error), or success — the restore
+/// messages are informational, so they render in normal text, not the
+/// validation error color.
+fn report_restore_result(hwnd: HWND, sides: crate::theme_engine::RestoreSides) {
+    let sides = [sides.0, sides.1];
+    if sides.iter().flatten().count() == 0 {
+        set_validation(hwnd, &t_pub("settings_restore_prev_missing"), false);
+        return;
+    }
+    let errors: Vec<String> = sides
+        .iter()
+        .flatten()
+        .filter_map(|result| result.as_ref().err().cloned())
+        .collect();
+    if errors.is_empty() {
+        set_validation(hwnd, &t_pub("settings_restore_done"), false);
+    } else {
+        set_validation(
+            hwnd,
+            &t_pub("settings_restore_failed").replacen("%s", &errors.join("; "), 1),
+            true,
+        );
     }
 }
 
@@ -2627,7 +2778,9 @@ pub fn refresh_language() {
         (ID_COL_DARK, "settings_dark_side"),
         (ID_ROW_WALL_LBL, "settings_row_wallpaper"),
         (ID_ROW_CURSOR_LBL, "settings_row_cursor"),
-        (ID_CURSOR_INSTALL, "settings_install_inf"),
+        (ID_RESTORE_PREV, "settings_restore_prev"),
+        (ID_RESTORE_DEFAULT, "settings_restore_default"),
+        (ID_RESTORE_HINT, "settings_restore_hint"),
         (ID_APP_GENERAL_TITLE, "settings_app_general_group"),
         (ID_LANGUAGE_LBL, "settings_language"),
         (ID_HOTKEYS, "menu_hotkeys"),
@@ -2653,8 +2806,6 @@ pub fn refresh_language() {
     );
     for (id, labels) in [
         (ID_IDLE_ACTION, idle_action_labels()),
-        (ID_LIGHT_CURSOR, cursor_choice_labels()),
-        (ID_DARK_CURSOR, cursor_choice_labels()),
         (
             ID_THEME_MODE,
             vec![
@@ -2687,11 +2838,12 @@ pub fn refresh_language() {
         crate::choice::set_items(control, &items);
         crate::choice::select_index(control, selected);
     }
-    // The wallpaper rows carry localized action entries ("No change",
-    // "Browse…", "Remove…"), so they need the same language rebuild; the
-    // file-name library entries keep their labels via the value-preserving
-    // refresh.
+    // The wallpaper and cursor rows carry localized action entries ("No
+    // change", "Browse…", "Install…"), so they need the same language
+    // rebuild; the file-name and scheme-name entries keep their labels via
+    // the value-preserving refresh.
     refresh_wallpaper_choices(hwnd);
+    refresh_cursor_choices(hwnd);
     set_text(
         hwnd,
         ID_THEME_LOCATION_STATUS,

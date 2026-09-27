@@ -59,6 +59,9 @@ theme_skip_fullscreen = true
 # 随昼夜切换应用的已安装指针方案名（控制面板 → 鼠标 → 指针中的方案）；留空表示不更改 / Installed cursor-scheme name applied with the light/dark switch; empty keeps it unchanged
 # theme_light_cursor_scheme = ""
 # theme_dark_cursor_scheme = ""
+# 昼夜切换首次修改前的壁纸/指针快照（首次应用时自动记录，外观页“恢复修改前的外观”的数据源；一般无需手工编辑）/ Wallpaper/cursor state before the first day/night switch (captured automatically on first application; feeds the appearance-page restore; no need to edit by hand)
+# theme_restore_wallpaper = ""
+# theme_restore_cursor = ""
 
 # -- 设置 / Settings --
 # 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒，Win+Shift+D 切换昼夜 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake, Win+Shift+D switch day/night
