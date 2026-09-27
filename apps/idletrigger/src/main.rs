@@ -128,7 +128,7 @@ const BUTTON_H: i32 = 36;
 /// read as a quiet toolbar strip under their section row.
 const CHIP_H: i32 = 28;
 
-// Internal window messages (WM_APP range).
+// Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
 const WM_IDLE_CANCEL: u32 = 0x8003;
 const WM_REFRESH_UI: u32 = 0x8004;
@@ -196,6 +196,7 @@ mod theme_recovery;
 mod theme_refresh;
 mod theme_repair;
 mod tooltips;
+mod tray;
 mod viewport;
 
 const PANEL_TIMER: usize = 1;
@@ -219,9 +220,6 @@ static PANEL: AtomicIsize = AtomicIsize::new(0);
 static WARNING: AtomicIsize = AtomicIsize::new(0);
 pub static ACTION_WARN_HWND: AtomicIsize = AtomicIsize::new(0);
 pub static LOCK_NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
-static TRAY_PTR: AtomicIsize = AtomicIsize::new(0);
-// Last theme the tray icon was rendered for (Go s.trayThemeDark).
-static TRAY_THEME_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CHK_NOSLEEP: AtomicIsize = AtomicIsize::new(0);
 static CHK_IDLE: AtomicIsize = AtomicIsize::new(0);
 static CHK_AUTOMATION: AtomicIsize = AtomicIsize::new(0);
@@ -229,10 +227,6 @@ static LBL_POWER_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_AUTOMATION_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_THEME_SCHEDULE: AtomicIsize = AtomicIsize::new(0);
 static WARN_TEXT: AtomicIsize = AtomicIsize::new(0);
-
-static TRAY_ALIVE: AtomicBool = AtomicBool::new(false);
-static MENU_OPEN_ID: Mutex<Option<tray_icon::menu::MenuId>> = Mutex::new(None);
-static MENU_EXIT_ID: Mutex<Option<tray_icon::menu::MenuId>> = Mutex::new(None);
 
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
 static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -384,12 +378,8 @@ fn refresh_language() {
             }
         }
     }
-    let tray = TRAY_PTR.load(Ordering::SeqCst);
-    if tray != 0 {
-        unsafe {
-            (&*(tray as *const tray_icon::TrayIcon)).set_menu(Some(Box::new(tray_menu())));
-        }
-    }
+    // The tray menu is rebuilt at popup time, so language changes apply on
+    // the next right click without any explicit rebuild here.
     settings_ui::refresh_language();
     automation_ui::refresh_language();
     tooltips::refresh_all(panel);
@@ -552,13 +542,10 @@ fn main() {
             let _ = RegisterPowerSettingNotification(recipient, &guid, DEVICE_NOTIFY_WINDOW_HANDLE);
         }
     }
-    // The tray handle is not `Send`; keep it alive on the main thread for the
-    // whole run (dropped after the message loop ends).
-    // Menu theming must precede native menu creation (muda HMENU).
-    theme::set_process_menu_theme(theme::is_dark());
-    let _tray_guard = tray_init();
-    TRAY_ALIVE.store(_tray_guard.is_some(), Ordering::SeqCst);
-    if _tray_guard.is_none() {
+    // The native tray icon lives on the hidden window for the whole run;
+    // tray::remove takes it down after the message loop ends.
+    let tray_alive = tray::add(hwnd(&HIDDEN));
+    if !tray_alive {
         log_line("tray creation failed; keeping the control panel visible");
     }
 
@@ -591,13 +578,13 @@ fn main() {
     refresh_status();
     spawn_idle_thread();
 
-    if !start_minimized || _tray_guard.is_none() {
+    if !start_minimized || !tray_alive {
         // Atomic first presentation: no light flash in dark mode.
         FirstFrameGate::begin(hwnd(&PANEL)).reveal();
     }
 
     let mut msg = msg_default();
-    'pump: loop {
+    loop {
         let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if result.0 <= 0 {
             break;
@@ -608,43 +595,13 @@ fn main() {
                 DispatchMessageW(&msg);
             }
         }
-        let mut exit = false;
-        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
-            if let tray_icon::TrayIconEvent::Click {
-                button: tray_icon::MouseButton::Left,
-                button_state: tray_icon::MouseButtonState::Up,
-                ..
-            } = event
-            {
-                toggle_panel();
-            }
-        }
-        while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            let is_open = MENU_OPEN_ID
-                .lock()
-                .map(|g| g.as_ref() == Some(&event.id))
-                .unwrap_or(false);
-            let is_exit = MENU_EXIT_ID
-                .lock()
-                .map(|g| g.as_ref() == Some(&event.id))
-                .unwrap_or(false);
-            if is_open {
-                toggle_panel();
-            } else if is_exit {
-                exit = true;
-            }
-        }
-        if exit {
-            unsafe { PostQuitMessage(0) };
-            break 'pump;
-        }
+        // Tray clicks and menu choices arrive as hidden-window messages now
+        // and are handled inside hidden_proc; the pump only transports.
     }
 
     EXITING.store(true, Ordering::SeqCst);
     system::unregister_all();
-    TRAY_PTR.store(0, Ordering::SeqCst);
-    drop(_tray_guard);
-    TRAY_ALIVE.store(false, Ordering::SeqCst);
+    tray::remove();
     unsafe {
         let _ = SetThreadExecutionState(ES_CONTINUOUS);
     }
@@ -695,6 +652,11 @@ unsafe extern "system" fn hidden_proc(
         let registered = REGISTERED_SHOW_PANEL.load(Ordering::SeqCst);
         if registered != 0 && msg == registered {
             show_panel();
+            return LRESULT(0);
+        }
+        // Explorer restarted: re-register the tray icon.
+        if tray::is_taskbar_created(msg) {
+            tray::on_taskbar_created();
             return LRESULT(0);
         }
         match msg {
@@ -756,6 +718,10 @@ unsafe extern "system" fn hidden_proc(
                     apply_stay_awake();
                     refresh_status();
                 }
+                LRESULT(0)
+            }
+            tray::CALLBACK_MSG => {
+                tray::handle_callback(wparam, lparam);
                 LRESULT(0)
             }
             WM_IDLE_WARN => {
@@ -2233,178 +2199,26 @@ fn make_font(size_px: i32, weight: i32) -> HFONT {
 
 // ---- Tray ----------------------------------------------------------------
 
-fn tray_init() -> Option<Box<tray_icon::TrayIcon>> {
-    use tray_icon::TrayIconBuilder;
-
-    // Extract from our own EXE so it works on any machine, not just the
-    // build host with its source tree; dark/light variant follows the theme.
-    let icon = tray_icon_for_theme()?;
-
-    let menu = tray_menu();
-
-    let tray = TrayIconBuilder::new()
-        .with_icon(icon)
-        .with_menu(Box::new(menu))
-        .with_tooltip("IdleTrigger")
-        .with_menu_on_left_click(false) // Go: left toggles panel, right opens menu
-        .build()
-        .ok()?;
-    // The main-thread guard owns the stable allocation. Clear the borrowed
-    // pointer before dropping it after the message loop.
-    let tray = Box::new(tray);
-    TRAY_PTR.store(
-        (&*tray as *const tray_icon::TrayIcon) as isize,
-        Ordering::SeqCst,
-    );
-    Some(tray)
-}
-
-fn tray_menu() -> tray_icon::menu::Menu {
-    use tray_icon::menu::{ContextMenu, Menu, MenuItem, PredefinedMenuItem};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetMenuInfo, HMENU, MENUINFO, MIM_STYLE, MNS_NOCHECK, SetMenuInfo,
-    };
-    let menu = Menu::new();
-    let open = MenuItem::new(t("menu_open_panel"), true, None);
-    let exit = MenuItem::new(t("menu_exit"), true, None);
-    let _ = menu.append(&open);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&exit);
-    // These text-only actions need no checkmark gutter. Keep native text
-    // measurement so each language and DPI gets its own compact menu width.
-    unsafe {
-        let handle = HMENU(menu.hpopupmenu() as *mut _);
-        let mut info = MENUINFO {
-            cbSize: std::mem::size_of::<MENUINFO>() as u32,
-            fMask: MIM_STYLE,
-            ..Default::default()
-        };
-        if GetMenuInfo(handle, &mut info).is_ok() {
-            info.dwStyle |= MNS_NOCHECK;
-            let _ = SetMenuInfo(handle, &info);
-        }
+/// Updates the tray tooltip with a status line capped like Go's 120 UTF-16
+/// units. Only call on the UI thread. Skips the `Shell_NotifyIconW` round
+/// trip when the truncated text is unchanged: this runs every second from
+/// `refresh_status`.
+fn tray_update_tooltip(line: &str) {
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+    let mut wide: Vec<u16> = line.encode_utf16().collect();
+    if wide.len() > 118 {
+        wide.truncate(118);
+        wide.extend_from_slice("…".encode_utf16().collect::<Vec<u16>>().as_slice());
     }
-    *crate::runtime::lock(&MENU_OPEN_ID) = Some(open.id().clone());
-    *crate::runtime::lock(&MENU_EXIT_ID) = Some(exit.id().clone());
-    menu
-}
-
-/// Loads an embedded icon from the running module, independent of path length.
-fn exe_embedded_icon_by(resource_id: Option<i32>) -> Option<tray_icon::Icon> {
-    use windows::Win32::UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
-    unsafe {
-        let module = GetModuleHandleW(None).ok()?;
-        let icon = HICON(
-            LoadImageW(
-                Some(module.into()),
-                PCWSTR(resource_id.unwrap_or(1) as usize as *const u16),
-                IMAGE_ICON,
-                32,
-                32,
-                LR_DEFAULTCOLOR,
-            )
-            .ok()?
-            .0,
-        );
-        // Convert HICON to RGBA for tray-icon's Icon type.
-        let rgba = hicon_to_rgba(icon);
-        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
-        tray_icon::Icon::from_rgba(rgba?, 32, 32).ok()
-    }
-}
-
-// Go resourceid: tray-dark (3) shows on light mode, tray-light (4) on dark.
-const TRAY_ICON_DARK_STROKES: i32 = 3;
-const TRAY_ICON_LIGHT_STROKES: i32 = 4;
-
-/// The tray icon matching the active theme (Go updateIcon mapping).
-fn tray_icon_for_theme() -> Option<tray_icon::Icon> {
-    let id = if theme::is_dark() {
-        TRAY_ICON_LIGHT_STROKES
-    } else {
-        TRAY_ICON_DARK_STROKES
-    };
-    exe_embedded_icon_by(Some(id)).or_else(|| exe_embedded_icon_by(None))
-}
-
-/// Swaps the tray icon when the theme flipped (Go refreshTrayThemeIcon on
-/// the tray tick). Only call on the UI thread.
-fn tray_refresh_theme_icon() {
-    let dark = theme::is_dark();
-    if dark == TRAY_THEME_DARK.swap(dark, Ordering::SeqCst) {
+    let text = String::from_utf16_lossy(&wide);
+    let mut last = runtime::lock(&LAST);
+    if last.as_deref() == Some(text.as_str()) {
         return;
     }
-    let ptr = TRAY_PTR.load(Ordering::SeqCst);
-    if ptr == 0 {
-        return;
-    }
-    unsafe {
-        let tray = &*(ptr as *const tray_icon::TrayIcon);
-        if let Some(icon) = tray_icon_for_theme() {
-            let _ = tray.set_icon(Some(icon));
-        }
-        // Rebuild the tray menu so the native HMENU picks up the current
-        // immersive theme (muda caches the rendering mode at creation).
-        theme::set_process_menu_theme(dark);
-        tray.set_menu(Some(Box::new(tray_menu())));
-    }
-}
-
-/// Converts an HICON to an RGBA byte vector.
-unsafe fn hicon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<Vec<u8>> {
-    use windows::Win32::Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits, HGDIOBJ,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
-
-    unsafe {
-        let mut info = ICONINFO::default();
-        if GetIconInfo(icon, &mut info).is_err() {
-            return None;
-        }
-        let hdc = windows::Win32::Graphics::Gdi::CreateCompatibleDC(None);
-        let mut bitmap = windows::Win32::Graphics::Gdi::BITMAP::default();
-        let _ = windows::Win32::Graphics::Gdi::GetObjectW(
-            HGDIOBJ(info.hbmColor.0),
-            std::mem::size_of::<windows::Win32::Graphics::Gdi::BITMAP>() as i32,
-            Some(&mut bitmap as *mut _ as *mut _),
-        );
-        let (w, h) = (bitmap.bmWidth, bitmap.bmHeight);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-
-        let mut bi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h, // top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ok = GetDIBits(
-            hdc,
-            info.hbmColor,
-            0,
-            h as u32,
-            Some(pixels.as_mut_ptr().cast()),
-            &mut bi,
-            DIB_RGB_COLORS,
-        );
-        let _ = DeleteObject(HGDIOBJ(info.hbmColor.0));
-        let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
-        let _ = DeleteDC(hdc);
-
-        if ok == 0 {
-            return None;
-        }
-        // BGRA → RGBA
-        for chunk in pixels.as_chunks_mut::<4>().0 {
-            chunk.swap(0, 2);
-        }
-        Some(pixels)
+    // Cache only after the modify succeeds, so a failed round trip
+    // retries on the next refresh.
+    if tray::set_tooltip(&text) {
+        *last = Some(text);
     }
 }
 
@@ -2503,36 +2317,6 @@ fn theme_tooltip_value_short() -> String {
 /// 浅7:00/深19:00, 日出6:33/日落18:34, with the fixed-fallback suffix.
 fn theme_schedule_text_short() -> String {
     theme_schedule_summary(true)
-}
-
-/// Updates the tray tooltip with a status line capped like Go's 120 UTF-16
-/// units. Only call on the UI thread. Skips the `Shell_NotifyIconW` round
-/// trip when the truncated text is unchanged: this runs every second from
-/// `refresh_status`, and tray-icon always forwards the modify.
-fn tray_update_tooltip(line: &str) {
-    static LAST: Mutex<Option<String>> = Mutex::new(None);
-    let ptr = TRAY_PTR.load(Ordering::SeqCst);
-    if ptr == 0 {
-        return;
-    }
-    let mut wide: Vec<u16> = line.encode_utf16().collect();
-    if wide.len() > 118 {
-        wide.truncate(118);
-        wide.extend_from_slice("…".encode_utf16().collect::<Vec<u16>>().as_slice());
-    }
-    let text = String::from_utf16_lossy(&wide);
-    let mut last = runtime::lock(&LAST);
-    if last.as_deref() == Some(text.as_str()) {
-        return;
-    }
-    unsafe {
-        let tray = &*(ptr as *const tray_icon::TrayIcon);
-        // Cache only after the modify succeeds, so a failed round trip
-        // retries on the next refresh.
-        if tray.set_tooltip(Some(&text)).is_ok() {
-            *last = Some(text);
-        }
-    }
 }
 
 // ---- Panel behavior ------------------------------------------------------
@@ -3136,7 +2920,7 @@ fn refresh_status() {
     let effective_nosleep = NOSLEEP_EXECUTION_ON.load(Ordering::SeqCst);
     let idle_running = power.idle_requested && !power.idle_paused && !effective_nosleep;
     tray_update_tooltip(&build_tray_tooltip(effective_nosleep, idle_running, &power));
-    tray_refresh_theme_icon();
+    tray::refresh_theme_icon();
     tooltips::refresh_all(hwnd(&PANEL));
 }
 
@@ -3861,7 +3645,7 @@ fn theme_changes_survive_native_messages() {
     *crate::runtime::lock(&CONFIG) = Some(Default::default());
     *I18N.write().unwrap() = Some(I18n::load("en"));
     create_windows();
-    let tray = tray_init().expect("test tray");
+    assert!(tray::add(hwnd(&HIDDEN)), "test tray");
     FirstFrameGate::begin(hwnd(&PANEL)).reveal();
     unsafe {
         assert!(SetWindowSubclass(hwnd(&PANEL), Some(observe_show), 2, 0).as_bool());
@@ -4003,8 +3787,7 @@ fn theme_changes_survive_native_messages() {
             assert_eq!(cloaked, 0, "completed frame must be visible to DWM");
         }
     }
-    TRAY_PTR.store(0, Ordering::SeqCst);
-    drop(tray);
+    tray::remove();
     unsafe {
         DestroyWindow(hwnd(&PANEL)).unwrap();
         DestroyWindow(hwnd(&HIDDEN)).unwrap();

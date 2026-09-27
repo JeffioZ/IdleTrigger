@@ -22,9 +22,7 @@ path = "build_version.rs"
 [dependencies]
 idletrigger-core = { workspace = true }
 toml_edit = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-tray-icon = { workspace = true }
 windows = { workspace = true }
 
 [build-dependencies]

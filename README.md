@@ -62,7 +62,7 @@ or the [development guide](docs/development.md) to build and verify the app.
 
 ## 🤝 Credits
 
-IdleTrigger uses the [tray-icon](https://crates.io/crates/tray-icon), [windows-rs](https://crates.io/crates/windows), [toml_edit](https://crates.io/crates/toml_edit), and [serde](https://crates.io/crates/serde) crates. The Go implementation's tray code was adapted from [getlantern/systray v1.2.2](https://github.com/getlantern/systray) (Apache-2.0 notice preserved in the git history). Stay Awake was inspired by [NoSleep](https://github.com/CHerSun/NoSleep). The Windows 11 theme-repair behavior is an independent implementation informed by [Auto Dark Mode's DWM refresh strategy](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs).
+IdleTrigger uses the [windows-rs](https://crates.io/crates/windows), [toml_edit](https://crates.io/crates/toml_edit), and [serde](https://crates.io/crates/serde) crates; the tray icon and its native menu are implemented directly with `Shell_NotifyIconW` and `TrackPopupMenu`. The Go implementation's tray code was adapted from [getlantern/systray v1.2.2](https://github.com/getlantern/systray) (Apache-2.0 notice preserved in the git history). Stay Awake was inspired by [NoSleep](https://github.com/CHerSun/NoSleep). The Windows 11 theme-repair behavior is an independent implementation informed by [Auto Dark Mode's DWM refresh strategy](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs).
 
 ## 📄 License
 

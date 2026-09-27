@@ -375,19 +375,12 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
             )
             .unwrap();
             choice::close(false);
-            {
-                use tray_icon::menu::ContextMenu;
-                theme::prepare_popup_menu(panel, dark);
-                let menu = tray_menu();
-                capture_native_popup(
-                    panel,
-                    folder.join(format!("{language}-tray-{dark}.bmp")),
-                    true,
-                    || unsafe {
-                        menu.show_context_menu_for_hwnd(panel.0 as isize, None);
-                    },
-                );
-            }
+            capture_native_popup(
+                panel,
+                folder.join(format!("{language}-tray-{dark}.bmp")),
+                true,
+                || crate::tray::show_context_menu(panel),
+            );
             automation_ui::show();
             let manager = automation_ui::theme_hwnds()[0];
             assert_form_surfaces_are_buffered(manager);

@@ -527,8 +527,8 @@ pub fn prepare_popup_menu(owner: HWND, dark: bool) {
 
 /// Process-wide menu theme (Go PreparePopupMenu minus the owner window):
 /// refresh the immersive color policy, set the process preference, and flush
-/// cached menu themes. Called at startup and on every theme flip so the tray
-/// menu (owned by the tray-icon crate) follows dark/light.
+/// cached menu themes. Called from apply_to_all so native popup menus follow
+/// dark/light even before their per-popup preparation.
 pub fn set_process_menu_theme(dark: bool) {
     prepare_popup_menu(HWND::default(), dark);
 }
