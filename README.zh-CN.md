@@ -61,7 +61,7 @@
 
 ## 🤝 致谢
 
-IdleTrigger 使用 [tray-icon](https://crates.io/crates/tray-icon)、[windows-rs](https://crates.io/crates/windows)、[toml_edit](https://crates.io/crates/toml_edit)、[serde](https://crates.io/crates/serde) 等 crate。Go 版的托盘集成基于 [getlantern/systray v1.2.2](https://github.com/getlantern/systray) 调整（Apache-2.0 声明保留在 git 历史中）。保持唤醒功能受到 [NoSleep](https://github.com/CHerSun/NoSleep) 启发。Windows 11 主题修复为独立实现，其行为参考了 [Auto Dark Mode 的 DWM 刷新策略](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs)。
+IdleTrigger 使用 [windows-rs](https://crates.io/crates/windows)、[toml_edit](https://crates.io/crates/toml_edit)、[serde](https://crates.io/crates/serde) 等 crate；托盘图标及原生菜单直接使用 `Shell_NotifyIconW` 与 `TrackPopupMenu` 实现。Go 版的托盘代码基于 [getlantern/systray v1.2.2](https://github.com/getlantern/systray) 调整（Apache-2.0 声明保留在 git 历史中）。保持唤醒功能受到 [NoSleep](https://github.com/CHerSun/NoSleep) 启发。Windows 11 主题修复为独立实现，其行为参考了 [Auto Dark Mode 的 DWM 刷新策略](https://github.com/AutoDarkMode/Windows-Auto-Night-Mode/blob/master/AutoDarkModeSvc/Handlers/DwmRefreshHandler.cs)。
 
 ## 📄 许可证
 
