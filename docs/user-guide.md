@@ -2,9 +2,9 @@
 
 ## Start and exit / 启动与退出
 
-Put the EXE in a writable folder and run it. Left-click its tray icon to open or close the panel; right-click for Open and Exit. While a modal dialog is open, another tray click brings that dialog forward. One GUI instance runs per Windows session, even when different copies of the EXE are launched.
+Put the EXE in a writable folder and run it. Left-click its tray icon to open or close the panel (Esc closes it too); right-click for Open and Exit. While a modal dialog is open, another tray click brings that dialog forward. One GUI instance runs per Windows session, even when different copies of the EXE are launched.
 
-将 EXE 放入可写目录后运行。左键托盘图标开关浮层，右键可打开或退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
+将 EXE 放入可写目录后运行。左键托盘图标开关浮层（按 Esc 也可关闭），右键可打开或退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
 
 Enable Start with Windows in Settings if needed. If already enabled, startup repairs its registered path when you run the EXE from a new location. `--minimized` starts with the panel hidden; `--delay=N` delays initialization by up to 60 seconds.
 
@@ -19,7 +19,7 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 - Enhanced monitoring is optional, for periodic resets of the Windows idle counter; ordinary input still resets the timer.
 
 - **保持唤醒**阻止系统自动睡眠；屏幕常亮是单独选项。电池限制暂停实际状态，不改写已保存开关。
-- **限时保持唤醒**通过面板档位临时保持 30 分钟、1 小时或 2 小时，不改写已保存开关；到期自动恢复，重启后消失，任何关闭保持唤醒的请求都会同时取消限时。面板状态行与托盘 tooltip 会说明当前是谁在阻止睡眠——任务规则，或限时及其剩余时间。
+- **限时保持唤醒**通过面板预设临时保持 30 分钟、1 小时或 2 小时，不改写已保存开关；到期自动恢复，重启后消失，任何关闭保持唤醒的请求都会同时取消限时，再次点击已选预设或状态行的取消链接可提前结束。面板状态行与托盘 tooltip 会说明当前是谁在阻止睡眠——任务规则，或限时及其剩余时间。
 - **空闲监测**读取 Windows 键鼠空闲状态，启用时重新计时。输入、取消或修改动作会使已有提醒失效；提醒倒计时最少 10 秒，且始终可取消本次动作。
 - 两项功能同时收到启用请求时，保持唤醒优先。面板显示合并任务覆盖和暂停条件后的状态。
 - 增强监测用于空闲计数被周期性重置的情况，默认关闭；普通输入仍重置计时。
@@ -48,9 +48,9 @@ Theme scheduling supports fixed times and sunrise/sunset. Optional IP lookup use
 
 昼夜主题支持固定时间和日出日落。可选 IP 定位使用 `ipwho.is`，成功结果在内存缓存 24 小时，失败后 30 分钟再试；依次使用 Windows 时区、UTC 偏移、默认位置兜底。极昼极夜使用配置中的固定时间。
 
-Fullscreen/presentation and foreground game activity can pause automatic switching. Battery dark mode can override the schedule. A manual switch lasts until the next scheduled transition, and the panel's snooze chips postpone the next scheduled switch by 30 minutes, 1 hour, or until the next light boundary — the schedule line shows the deadline and a cancel chip clears it. Win+Shift+D performs a manual switch when global hotkeys are enabled. Optional appearance linkage applies a per-side wallpaper and an installed cursor scheme together with each switch; failures are logged and never block the theme itself. Theme repair is available on demand and reports failures. Automatic switching also coalesces display/resume events, waits for a stable display configuration, and limits repeated repairs. Lock-key notices can be enabled independently and hidden during fullscreen use.
+Fullscreen/presentation and foreground game activity can pause automatic switching. Battery dark mode can override the schedule. A manual switch lasts until the next scheduled transition, and the panel's snooze chips postpone the next scheduled switch by 30 minutes, 1 hour, or until the next light boundary — the schedule line shows the deadline, and clicking the armed chip again or the cancel link clears it. Win+Shift+D performs a manual switch when global hotkeys are enabled. Optional appearance linkage applies a per-side wallpaper and an installed cursor scheme together with each switch; failures are logged and never block the theme itself. Theme repair is available on demand and reports failures. Automatic switching also coalesces display/resume events, waits for a stable display configuration, and limits repeated repairs. Lock-key notices can be enabled independently and hidden during fullscreen use.
 
-全屏、演示和前台游戏活动可暂停自动切换。电池深色选项可覆盖计划。手动切换保留至下一次计划转换；面板上的推迟档位可将下一次计划切换延后 30 分钟、1 小时或直至下一次浅色边界——调度行显示截止时间，取消档位可立即恢复。启用全局热键时，Win+Shift+D 可手动切换昼夜。可选的外观联动会在每次切换时同时应用对应的壁纸与已安装指针方案；单项失败只记录日志，不阻塞主题切换本身。可手动运行主题修复并查看失败提示；自动切换也会合并显示器和恢复事件，等待显示配置稳定，并限制重复修复。锁定键提示可单独启用，并在全屏时隐藏。
+全屏、演示和前台游戏活动可暂停自动切换。电池深色选项可覆盖计划。手动切换保留至下一次计划转换；面板上的推迟预设可将下一次计划切换延后 30 分钟、1 小时或直至下一次浅色边界——调度行显示截止时间，再次点击已选预设或取消链接可立即恢复。启用全局热键时，Win+Shift+D 可手动切换昼夜。可选的外观联动会在每次切换时同时应用对应的壁纸与已安装指针方案；单项失败只记录日志，不阻塞主题切换本身。可手动运行主题修复并查看失败提示；自动切换也会合并显示器和恢复事件，等待显示配置稳定，并限制重复修复。锁定键提示可单独启用，并在全屏时隐藏。
 
 ## Files and saves / 文件与保存
 

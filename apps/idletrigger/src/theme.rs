@@ -50,6 +50,10 @@ pub struct Palette {
     pub danger_focus: u32,
     pub tooltip_bg: u32,
     pub tooltip_text: u32,
+    /// Pill switch track in the off state: darker than `border` on light so
+    /// the switch reads clearly against the near-white window background,
+    /// lighter on dark.
+    pub switch_track: u32,
 }
 
 const LIGHT_PALETTE: Palette = Palette {
@@ -85,6 +89,7 @@ const LIGHT_PALETTE: Palette = Palette {
     danger_focus: 0x00E3E5FF,          // RGB(255,229,227)
     tooltip_bg: 0x00FFFDFB,            // RGB(251,253,255)
     tooltip_text: 0x00241E19,
+    switch_track: 0x006A625A, // RGB(90,98,106)
 };
 
 const DARK_PALETTE: Palette = Palette {
@@ -120,6 +125,7 @@ const DARK_PALETTE: Palette = Palette {
     danger_focus: 0x00E3E5FF,          // RGB(255,229,227)
     tooltip_bg: 0x00433B34,            // RGB(52,59,67)
     tooltip_text: 0x00FAF7F4,
+    switch_track: 0x0092847A, // RGB(122,132,146)
 };
 
 /// One (surface, disabled-surface) brush pair, shareable across threads.
@@ -620,6 +626,18 @@ mod visual_tests {
             for ink in [p.link, p.link_hover, p.link_pressed] {
                 assert!(contrast(ink, p.window_bg) >= 4.5);
             }
+            // The off-state switch track must separate from the window
+            // background and from the light thumb riding on it.
+            assert!(contrast(p.switch_track, p.window_bg) >= 3.0);
+            assert!(contrast(p.switch_track, p.accent_text) >= 3.0);
+            // Secondary inks (group labels, unselected segments, chip text)
+            // and every hover surface must stay readable. Accent ink only
+            // ever sits on the plain background (see draw_chip), so that is
+            // the pair locked here.
+            assert!(contrast(p.text2, p.window_bg) >= 4.5);
+            assert!(contrast(p.text2, p.hover_surface) >= 4.5);
+            assert!(contrast(p.text, p.hover_surface) >= 4.5);
+            assert!(contrast(p.accent, p.window_bg) >= 3.0);
         }
     }
 }

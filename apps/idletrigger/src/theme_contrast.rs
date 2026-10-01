@@ -97,6 +97,7 @@ fn from_colors(
         danger_focus: selected_text,
         tooltip_bg: tip_bg,
         tooltip_text: tip_text,
+        switch_track: frame,
     }
 }
 

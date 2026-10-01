@@ -581,3 +581,215 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
         "hidden theme changes left the original class brush installed"
     );
 }
+
+/// The pill switch must render smooth (anti-aliased), correctly proportioned,
+/// and palette-driven at every DPI scale and in both themes — the three
+/// failure modes of the abandoned first attempt. Renders off a screen into a
+/// memory bitmap and asserts geometry, colors, and edge gradients directly.
+#[test]
+fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    unsafe {
+        for dark in [false, true] {
+            theme::force_dark(dark);
+            let p = theme::palette();
+            for scale in [96, 120, 144, 192] {
+                let width = paint::sp(SWITCH_HIT_W, scale);
+                let height = paint::sp(BUTTON_H, scale);
+                let screen = GetDC(None);
+                let dc = CreateCompatibleDC(Some(screen));
+                let bitmap = CreateCompatibleBitmap(screen, width, height);
+                assert!(!dc.is_invalid() && !bitmap.is_invalid());
+                let old = SelectObject(dc, HGDIOBJ(bitmap.0));
+                let bounds = RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                };
+                // Same metrics as paint::draw_switch.
+                let track_w = paint::sp(40, scale);
+                let track_h = paint::sp(20, scale);
+                let thumb_d = paint::sp(16, scale);
+                let inset = ((track_h - thumb_d) / 2).max(1);
+                let track_left = (width - track_w) / 2;
+                let center_y = height / 2;
+
+                let render = |active: bool| {
+                    // Sentinel fill proves the painter covers its bounds.
+                    let sentinel = windows::Win32::Foundation::COLORREF(0x00FF00FF);
+                    let brush = CreateSolidBrush(sentinel);
+                    FillRect(dc, &bounds, brush);
+                    let _ = DeleteObject(HGDIOBJ(brush.0));
+                    paint::draw_switch(
+                        dc,
+                        &bounds,
+                        p,
+                        p.window_bg,
+                        paint::ControlState {
+                            active,
+                            ..Default::default()
+                        },
+                        scale,
+                    );
+                };
+                let px = |x: i32, y: i32| GetPixel(dc, x, y).0;
+
+                render(false);
+                // Corners outside the pill keep the themed background: no
+                // bleed outside the track bounds.
+                assert_eq!(px(0, 0), p.window_bg, "off: corner bleed at {scale}");
+                let off_thumb_cx = track_left + inset + thumb_d / 2;
+                let track_cx = track_left + track_w - inset - thumb_d / 2;
+                assert_eq!(
+                    px(off_thumb_cx, center_y),
+                    p.accent_text,
+                    "off: thumb ink at {scale}/{dark}"
+                );
+                assert_eq!(
+                    px(track_cx, center_y),
+                    p.switch_track,
+                    "off: track ink at {scale}/{dark}"
+                );
+                // Anti-aliasing: the pill and thumb edges must pass through
+                // blended pixels — a hard-edged GDI fallback has none.
+                // Sample three rows around the center and the two columns
+                // beyond each track end, where curvature guarantees
+                // fractional coverage somewhere.
+                let known = |c: u32| c == p.window_bg || c == p.switch_track || c == p.accent_text;
+                let blends = |known: &dyn Fn(u32) -> bool| -> i32 {
+                    let mut count = 0;
+                    for y in [center_y - 2, center_y, center_y + 2] {
+                        for x in (track_left - 2)..(track_left + track_w + 2) {
+                            if !known(px(x, y)) {
+                                count += 1;
+                            }
+                        }
+                    }
+                    count
+                };
+                let blends_off = blends(&known);
+                assert!(
+                    blends_off >= 3,
+                    "off: no anti-aliased edges at {scale}/{dark}"
+                );
+
+                render(true);
+                assert_eq!(px(0, 0), p.window_bg, "on: corner bleed at {scale}");
+                let on_thumb_cx = track_left + track_w - inset - thumb_d / 2;
+                assert_eq!(
+                    px(on_thumb_cx, center_y),
+                    p.accent_text,
+                    "on: thumb ink at {scale}/{dark}"
+                );
+                assert_eq!(
+                    px(track_left + inset + thumb_d / 2, center_y),
+                    p.accent,
+                    "on: track ink at {scale}/{dark}"
+                );
+                let known_on = |c: u32| c == p.window_bg || c == p.accent || c == p.accent_text;
+                let blends_on = blends(&known_on);
+                assert!(
+                    blends_on >= 3,
+                    "on: no anti-aliased edges at {scale}/{dark}"
+                );
+
+                // The thumb travels the full track: find its left edge in the
+                // off render and its right edge in the on render by scanning
+                // for the thumb ink just outside its known core.
+                let ink_left_edge = |from: i32, ink: u32| -> i32 {
+                    let mut x = from;
+                    while x < track_left + track_w && px(x, center_y) != ink {
+                        x += 1;
+                    }
+                    x
+                };
+                render(false);
+                let off_left = ink_left_edge(track_left, p.accent_text);
+                render(true);
+                // On-state thumb ink is accent_text; the leftmost accent_text
+                // pixel marks where the thumb begins its travel home.
+                let on_left = ink_left_edge(track_left, p.accent_text);
+                let travel = track_w - thumb_d - 2 * inset;
+                let measured = on_left - off_left;
+                assert!(
+                    (measured - travel).abs() <= 2,
+                    "thumb travel {measured} != {travel} at {scale}"
+                );
+
+                SelectObject(dc, old);
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(dc);
+                let _ = ReleaseDC(None, screen);
+            }
+        }
+    }
+}
+
+/// Regression: header action links must be painted in the panel's first
+/// visible frame. An early SetWindowPos z-order raise on never-painted
+/// owner-draw buttons ate their initial WM_DRAWITEM, leaving 管理/修复
+/// invisible until a hover invalidated them.
+#[test]
+fn header_links_paint_in_the_first_visible_frame() {
+    const CHILD: &str = "IDLETRIGGER_TEST_HEADER_LINK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::header_links_paint_in_the_first_visible_frame",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("header-link child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "header-link child failed: {status}");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(80);
+    unsafe {
+        let mut visible = 0;
+        for id in [IDC_MANAGE_BUTTON, IDC_THEME_REPAIR] {
+            let link = GetDlgItem(Some(panel), id as i32).unwrap();
+            let dc = GetDC(Some(link));
+            let mut rect = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(link, &mut rect);
+            let bg = theme::bg_color();
+            for x in rect.left..rect.right {
+                for y in rect.top..rect.bottom {
+                    if GetPixel(dc, x, y).0 != bg {
+                        visible += 1;
+                    }
+                }
+            }
+            let _ = ReleaseDC(Some(link), dc);
+        }
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+        assert!(
+            visible > 20,
+            "header links not painted in the first frame (visible pixels: {visible})"
+        );
+    }
+}

@@ -80,13 +80,18 @@ const IDC_THEME_SNOOZE_30M: usize = 156;
 const IDC_THEME_SNOOZE_1H: usize = 157;
 const IDC_THEME_SNOOZE_MORNING: usize = 158;
 const IDC_THEME_SNOOZE_CANCEL: usize = 159;
+/// "Off" segment of the power strategy segmented control.
+const IDC_POWER_NONE: usize = 160;
 const IDC_EXIT_BUTTON: usize = 140;
 const IDC_WARN_TEXT: usize = 130;
 const IDC_WARN_CANCEL: usize = 131;
 
-// Owner-drawn static ranges: 201-209 section headers, 211-219 subtitles.
+// Owner-drawn static ranges: 201-209 section headers, 211-219 subtitles,
+// 220 the footer hairline, 221-229 plain row labels.
 const STATIC_SECTION_BASE: usize = 201;
 const STATIC_SUBTITLE_BASE: usize = 211;
+const IDC_FOOTER_RULE: usize = 220;
+const IDC_ROW_LABEL_BASE: usize = 221;
 
 // Fonts retained for WM_DRAWITEM painting (Go keeps them on the panel).
 
@@ -111,22 +116,43 @@ fn panel_font_subtitle() -> HFONT {
     make_font(12, 600)
 }
 
-// Layout tokens, identical to the Go control panel (96-DPI logical pixels):
-// visual style may differ between toolkits, geometry must not.
+/// Status lines use regular weight so they read a step quieter than the
+/// semibold action links sharing their rows.
+fn panel_font_status() -> HFONT {
+    make_font(12, 400)
+}
+
+// Layout tokens (96-DPI logical pixels). One row grammar per section: a
+// small group label, then rows that each hold exactly one control (segmented
+// control, right-aligned switch, or an equal-split chip strip), then a
+// status line whose right slot belongs to action links. Sections separate by
+// whitespace; only the footer gets a hairline.
 const PANEL_CLIENT_WIDTH: i32 = 486;
-// pad18 + (22+2 + 36+2 + 28+2 + 18 + 14) ×3 sections … exact flow ends at
-// 404 including the theme schedule subtitle and the two compact chip rows.
-const PANEL_CLIENT_HEIGHT: i32 = 404;
+// Exact flow: pad18 + (18+6 + 36+6 + 28+6 + 20) + 18 + (18+6 + 36+6 + 20)
+// + 18 + (18+6 + 36+6 + 28+6 + 20) + 18 + (1+12 + 36) + pad18 = 465.
+const PANEL_CLIENT_HEIGHT: i32 = 465;
 const PAD: i32 = 18;
 const GAP: i32 = 8;
-const SECTION_GAP: i32 = 14;
-const LABEL_GAP: i32 = 2;
-const SECTION_H: i32 = 22;
-const SUBTITLE_H: i32 = 18;
+const SECTION_GAP: i32 = 18;
+const LABEL_GAP: i32 = 6;
+const SECTION_H: i32 = 18;
+const SUBTITLE_H: i32 = 20;
 const BUTTON_H: i32 = 36;
 /// Preset chips are secondary shortcuts: shorter than real buttons so they
 /// read as a quiet toolbar strip under their section row.
 const CHIP_H: i32 = 28;
+/// Hit column reserved at a row's right edge for a pill switch.
+const SWITCH_HIT_W: i32 = 60;
+/// Fixed width of an action link slot on a section header row.
+const LINK_W: i32 = 64;
+/// Links paint inside the 18px header row but their hit area extends to a
+/// comfortable target height (the extra band only fills background).
+const LINK_HIT_H: i32 = 24;
+/// Segments sit closer than ordinary controls so the trio reads as one
+/// segmented group with groove dividers, not three buttons.
+const SEGMENT_GAP: i32 = 3;
+/// Gap between the footer hairline and the navigation buttons.
+const FOOTER_GAP: i32 = 12;
 
 // Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
@@ -259,12 +285,28 @@ fn is_chip_id(id: usize) -> bool {
         IDC_NOSLEEP_TIMED_30M
             | IDC_NOSLEEP_TIMED_1H
             | IDC_NOSLEEP_TIMED_2H
-            | IDC_NOSLEEP_TIMED_CANCEL
             | IDC_THEME_SNOOZE_30M
             | IDC_THEME_SNOOZE_1H
             | IDC_THEME_SNOOZE_MORNING
-            | IDC_THEME_SNOOZE_CANCEL
     )
+}
+
+/// Action links on section header rows (owner-draw buttons drawn as
+/// hyperlinks so they keep native input, tab order, and accessibility).
+fn is_link_id(id: usize) -> bool {
+    matches!(
+        id,
+        IDC_NOSLEEP_TIMED_CANCEL | IDC_THEME_SNOOZE_CANCEL | IDC_MANAGE_BUTTON | IDC_THEME_REPAIR
+    )
+}
+
+/// The instant-action theme chip names the side it will switch to.
+fn theme_switch_chip_label() -> String {
+    if theme::is_dark() {
+        t("theme_switch_to_light")
+    } else {
+        t("theme_switch_to_dark")
+    }
 }
 
 /// Whether this chip's preset is the armed one in its row.
@@ -337,47 +379,35 @@ fn refresh_language() {
         (STATIC_SECTION_BASE, "menu_power_management"),
         (STATIC_SECTION_BASE + 1, "menu_automation_section"),
         (STATIC_SECTION_BASE + 2, "menu_theme_switch"),
-        (IDC_NOSLEEP, "menu_nosleep_enable"),
-        (IDC_IDLE, "menu_idle_enable"),
+        (IDC_POWER_NONE, "power_mode_off"),
+        (IDC_NOSLEEP, "power_nosleep"),
+        (IDC_IDLE, "power_idle"),
+        (IDC_NOSLEEP_TIMED_30M, "chip_timed_30m"),
+        (IDC_NOSLEEP_TIMED_1H, "chip_timed_1h"),
+        (IDC_NOSLEEP_TIMED_2H, "chip_timed_2h"),
+        (IDC_ROW_LABEL_BASE, "automation_master"),
+        (IDC_ROW_LABEL_BASE + 1, "menu_theme_enable"),
+        // Switch controls carry the same text as their row labels for
+        // screen readers (their painter draws geometry only).
         (IDC_AUTOMATION, "automation_master"),
-        (IDC_MANAGE_BUTTON, "menu_automation_manage"),
         (IDC_THEME_ENABLE, "menu_theme_enable"),
-        (IDC_THEME_SWITCH, "menu_theme_switch_now"),
-        (IDC_THEME_REPAIR, "menu_theme_repair"),
+        (IDC_THEME_SNOOZE_30M, "chip_snooze_30m"),
+        (IDC_THEME_SNOOZE_1H, "chip_snooze_1h"),
+        (IDC_THEME_SNOOZE_MORNING, "chip_snooze_morning"),
+        (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
+        (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
+        (IDC_MANAGE_BUTTON, "panel_manage_link"),
+        (IDC_THEME_REPAIR, "panel_repair_link"),
         (IDC_SYSTEM_BUTTON, "menu_system_controls"),
         (IDC_SETTINGS_BUTTON, "settings_open"),
         (IDC_EXIT_BUTTON, "menu_exit_panel"),
     ] {
         let control = unsafe { GetDlgItem(Some(panel), id as i32).unwrap_or_default() };
         set_control_text(control, &t(key));
-        if matches!(id, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
-            unsafe {
-                let mut rect = RECT::default();
-                let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(control, &mut rect);
-                let font = HFONT(
-                    SendMessageW(
-                        control,
-                        windows::Win32::UI::WindowsAndMessaging::WM_GETFONT,
-                        None,
-                        None,
-                    )
-                    .0 as *mut _,
-                );
-                let width = checkbox_hit_width(panel, font, &t(key))
-                    .min(split_row(PANEL_CLIENT_WIDTH - 2 * PAD, 2));
-                let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                    control,
-                    None,
-                    0,
-                    0,
-                    scale(width),
-                    rect.bottom,
-                    windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
-                );
-            }
-        }
     }
+    let theme_chip =
+        unsafe { GetDlgItem(Some(panel), IDC_THEME_SWITCH as i32) }.unwrap_or_default();
+    set_control_text(theme_chip, &theme_switch_chip_label());
     // The tray menu is rebuilt at popup time, so language changes apply on
     // the next right click without any explicit rebuild here.
     settings_ui::refresh_language();
@@ -854,6 +884,31 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
 
+/// Full (un-ellipsized) text of a panel status line, for its tooltip. The
+/// drawn line truncates with an end ellipsis, so the tooltip is where the
+/// complete attribution lives.
+pub(crate) fn status_line_text(id: usize) -> String {
+    let panel = hwnd(&PANEL);
+    if panel.is_invalid() {
+        return String::new();
+    }
+    window_text(unsafe { GetDlgItem(Some(panel), id as i32) }.unwrap_or_default())
+}
+
+/// Verbose power overview for the summary line's tooltip: the panel line
+/// itself uses the compact wording to stay on one row, so the tooltip is
+/// the place for the detailed statuses.
+pub(crate) fn power_overview_verbose() -> String {
+    let (awake, idle) = power_status();
+    format!(
+        "{}{}{}{}",
+        t("power_overview_prefix"),
+        awake,
+        t("power_overview_separator"),
+        idle
+    )
+}
+
 /// Runs a window-proc body with a panic guard. A panic crossing the
 /// "system" ABI aborts the process before anything else could react, so
 /// each proc catches its own body here, logs, and degrades to
@@ -887,11 +942,14 @@ fn invalidate_control(id: usize) {
     }
 }
 
-/// Semantic on/off state for the owner-drawn toggles (Go p.toggles).
+/// Semantic on/off state for the owner-drawn toggles (Go p.toggles). The
+/// segmented "Off" control is active only when neither power strategy is
+/// enabled in the saved config.
 fn toggle_value(id: usize) -> bool {
     match id {
         IDC_NOSLEEP => cfg_map(|c| c.nosleep_enabled),
         IDC_IDLE => cfg_map(|c| c.idle_enabled),
+        IDC_POWER_NONE => cfg_map(|c| !c.nosleep_enabled && !c.idle_enabled),
         IDC_AUTOMATION => cfg_map(|c| c.automation_enabled),
         IDC_THEME_ENABLE => cfg_map(|c| c.theme_switch_enabled),
         _ => false,
@@ -921,14 +979,17 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             draw_section_static(dc, bounds, &label, p, scale);
         } else if (STATIC_SUBTITLE_BASE..STATIC_SUBTITLE_BASE + 9).contains(&id) {
             draw_subtitle_static(dc, bounds, &label, p);
-        } else if matches!(
-            id,
-            IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION | IDC_THEME_ENABLE
-        ) {
+        } else if id == IDC_FOOTER_RULE {
+            paint::fill_rect(dc, bounds, p.subtle_border);
+        } else if (IDC_ROW_LABEL_BASE..IDC_ROW_LABEL_BASE + 9).contains(&id) {
+            paint::draw_row_label(dc, bounds, panel_font_body(), &label, p, p.window_bg);
+        } else if matches!(id, IDC_POWER_NONE | IDC_NOSLEEP | IDC_IDLE) {
+            // Power strategy segments: one etched group with a moving
+            // accent highlight (paint::draw_segment).
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
             accessibility::check(item.control, state.active);
-            paint::draw_checkbox(
+            paint::draw_segment(
                 dc,
                 bounds,
                 panel_font_body(),
@@ -936,15 +997,21 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
                 p,
                 p.window_bg,
                 state,
-                scale,
-                16,
+                paint::control_radius(),
             );
+        } else if matches!(id, IDC_AUTOMATION | IDC_THEME_ENABLE) {
+            // Right-aligned pill switches for label-left rows.
+            let mut state = nativeform::control_state(item.control, item.state);
+            state.active = toggle_value(id);
+            accessibility::check(item.control, state.active);
+            paint::draw_switch(dc, bounds, p, p.window_bg, state, scale);
         } else if id == IDC_EXIT_BUTTON {
             draw_exit_button(item, dc, bounds, &label, p, scale);
         } else if is_chip_id(id) {
             let mut state = nativeform::control_state(item.control, item.state);
             // The armed preset keeps an accent outline until it expires.
             state.active = chip_armed(id);
+            accessibility::clear(item.control);
             paint::draw_chip(
                 dc,
                 bounds,
@@ -954,6 +1021,34 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
                 p.window_bg,
                 state,
                 paint::control_radius(),
+                false,
+            );
+        } else if id == IDC_THEME_SWITCH {
+            // Instant action sharing the snooze strip: link-colored ink.
+            let state = nativeform::control_state(item.control, item.state);
+            accessibility::clear(item.control);
+            paint::draw_chip(
+                dc,
+                bounds,
+                panel_font_body(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                paint::control_radius(),
+                true,
+            );
+        } else if is_link_id(id) {
+            let state = nativeform::control_state(item.control, item.state);
+            paint::draw_text_link(
+                dc,
+                bounds,
+                panel_font_subtitle(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                scale,
             );
         } else {
             let state = nativeform::control_state(item.control, item.state);
@@ -971,36 +1066,38 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
     }
 }
 
-/// Section header: accent bar + bold title + divider (Go drawStatic).
+/// Section group label: small secondary text, separated from neighbors by
+/// whitespace alone. High contrast keeps the old accent bar and divider —
+/// with no color gradation available, the extra structure is the only
+/// grouping cue that survives.
 unsafe fn draw_section_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::Palette, scale: i32) {
     use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Graphics::Gdi as gdi;
     paint::fill_rect(dc, bounds, p.window_bg);
-    let accent_height = paint::sp(16, scale);
-    let accent = RECT {
-        left: bounds.left,
-        top: bounds.top + (bounds.bottom - bounds.top - accent_height) / 2,
-        right: bounds.left + paint::sp(3, scale),
-        bottom: bounds.top + (bounds.bottom - bounds.top + accent_height) / 2,
+    let high_contrast = crate::theme_contrast::palette().is_some();
+    let font = if high_contrast {
+        panel_font_section()
+    } else {
+        panel_font_subtitle()
     };
-    paint::fill_rect(dc, &accent, p.accent);
-
-    let mut text_bounds = RECT {
-        left: bounds.left + paint::sp(10, scale),
-        ..*bounds
-    };
+    let color = if high_contrast { p.text } else { p.text2 };
     let mut text: Vec<u16> = label.encode_utf16().collect();
-    let mut measured = text_bounds;
+    let mut measured = *bounds;
     unsafe {
-        gdi::SetTextColor(dc, COLORREF(p.text));
+        gdi::SetTextColor(dc, COLORREF(color));
         gdi::SetBkMode(dc, gdi::TRANSPARENT);
-        let old = gdi::SelectObject(dc, gdi::HGDIOBJ(panel_font_section().0));
+        let old = gdi::SelectObject(dc, gdi::HGDIOBJ(font.0));
         let _ = gdi::DrawTextW(
             dc,
             &mut text,
             &mut measured,
             gdi::DT_LEFT | gdi::DT_VCENTER | gdi::DT_SINGLELINE | gdi::DT_CALCRECT,
         );
+        let mut text_bounds = *bounds;
+        if high_contrast {
+            // The measured title leaves room for the divider that follows.
+            text_bounds.left += paint::sp(10, scale);
+        }
         let _ = gdi::DrawTextW(
             dc,
             &mut text,
@@ -1009,19 +1106,30 @@ unsafe fn draw_section_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::Pa
         );
         gdi::SelectObject(dc, old);
     }
-    // Divider follows the measured title width.
-    let divider = RECT {
-        left: (measured.right + paint::sp(14, scale)).min(bounds.right),
-        top: bounds.top + paint::sp(10, scale),
-        right: bounds.right,
-        bottom: bounds.top + paint::sp(10, scale) + 1,
-    };
-    if divider.left < divider.right {
-        paint::fill_rect(dc, &divider, p.subtle_border);
+    if high_contrast {
+        let accent_height = paint::sp(16, scale);
+        let accent = RECT {
+            left: bounds.left,
+            top: bounds.top + (bounds.bottom - bounds.top - accent_height) / 2,
+            right: bounds.left + paint::sp(3, scale),
+            bottom: bounds.top + (bounds.bottom - bounds.top + accent_height) / 2,
+        };
+        paint::fill_rect(dc, &accent, p.accent);
+        let divider = RECT {
+            left: (measured.right + paint::sp(14, scale)).min(bounds.right),
+            top: bounds.top + paint::sp(10, scale),
+            right: bounds.right,
+            bottom: bounds.top + paint::sp(10, scale) + 1,
+        };
+        if divider.left < divider.right {
+            paint::fill_rect(dc, &divider, p.subtle_border);
+        }
     }
 }
 
-/// Muted status line under a row (Go drawStatic subtitle).
+/// Muted status line under a row (Go drawStatic subtitle). One line with an
+/// end ellipsis — long attributions never wrap into a half-clipped second
+/// line; the full text rides the line's tooltip.
 unsafe fn draw_subtitle_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::Palette) {
     use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Graphics::Gdi as gdi;
@@ -1034,12 +1142,16 @@ unsafe fn draw_subtitle_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::P
         let mut text_bounds = *bounds;
         gdi::SetTextColor(dc, COLORREF(p.muted));
         gdi::SetBkMode(dc, gdi::TRANSPARENT);
-        let old = gdi::SelectObject(dc, gdi::HGDIOBJ(panel_font_subtitle().0));
+        let old = gdi::SelectObject(dc, gdi::HGDIOBJ(panel_font_status().0));
         let _ = gdi::DrawTextW(
             dc,
             &mut text,
             &mut text_bounds,
-            gdi::DT_LEFT | gdi::DT_VCENTER | gdi::DT_WORDBREAK,
+            gdi::DT_LEFT
+                | gdi::DT_VCENTER
+                | gdi::DT_SINGLELINE
+                | gdi::DT_NOPREFIX
+                | gdi::DT_END_ELLIPSIS,
         );
         gdi::SelectObject(dc, old);
     }
@@ -1083,7 +1195,7 @@ unsafe fn draw_exit_button(
     paint::draw_button_label(dc, bounds, panel_font_body(), label, text, false, 8, 8);
     if state.focused && !state.disabled {
         let inset = paint::sp(2, scale);
-        paint::frame_rect(
+        paint::draw_focus_frame(
             dc,
             &RECT {
                 left: bounds.left + inset,
@@ -1112,29 +1224,44 @@ unsafe extern "system" fn panel_proc(
                 let _ = ShowWindow(hwnd_, SW_HIDE);
                 LRESULT(0)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN
+                if wparam.0 as u16 == windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0 =>
+            {
+                let _ = ShowWindow(hwnd_, SW_HIDE);
+                LRESULT(0)
+            }
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
                 if matches!(code, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
                     on_toggle(code);
                     // Owner-drawn toggles need a repaint after the state flip.
                     invalidate_control(code);
+                    invalidate_control(IDC_POWER_NONE);
+                } else if code == IDC_POWER_NONE {
+                    on_power_none_segment();
                 } else if matches!(
                     code,
                     IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
                 ) {
-                    let seconds = match code {
-                        IDC_NOSLEEP_TIMED_30M => 30 * 60,
-                        IDC_NOSLEEP_TIMED_1H => 60 * 60,
-                        _ => 2 * 60 * 60,
-                    };
-                    set_timed_nosleep(seconds, false);
-                    // Repaint both ends of the swap: the newly armed chip
-                    // gains the outline, the previous one must lose it.
-                    let previous = TIMED_ARMED_CHIP.swap(code, Ordering::SeqCst);
-                    if previous != code {
-                        invalidate_control(previous);
+                    // Clicking the armed preset again cancels the overlay —
+                    // the same affordance the status-line link offers.
+                    if TIMED_ARMED_CHIP.load(Ordering::SeqCst) == code {
+                        clear_timed_nosleep();
+                    } else {
+                        let seconds = match code {
+                            IDC_NOSLEEP_TIMED_30M => 30 * 60,
+                            IDC_NOSLEEP_TIMED_1H => 60 * 60,
+                            _ => 2 * 60 * 60,
+                        };
+                        set_timed_nosleep(seconds, false);
+                        // Repaint both ends of the swap: the newly armed chip
+                        // gains the outline, the previous one must lose it.
+                        let previous = TIMED_ARMED_CHIP.swap(code, Ordering::SeqCst);
+                        if previous != code {
+                            invalidate_control(previous);
+                        }
+                        invalidate_control(code);
                     }
-                    invalidate_control(code);
                 } else if code == IDC_NOSLEEP_TIMED_CANCEL {
                     clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
@@ -1153,16 +1280,22 @@ unsafe extern "system" fn panel_proc(
                     code,
                     IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
                 ) {
-                    match code {
-                        IDC_THEME_SNOOZE_30M => theme_engine::snooze(30),
-                        IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
-                        _ => theme_engine::snooze_until_morning(),
+                    // Clicking the armed snooze again cancels it, mirroring
+                    // the status-line link.
+                    if SNOOZE_ARMED_CHIP.load(Ordering::SeqCst) == code {
+                        theme_engine::snooze_cancel();
+                    } else {
+                        match code {
+                            IDC_THEME_SNOOZE_30M => theme_engine::snooze(30),
+                            IDC_THEME_SNOOZE_1H => theme_engine::snooze(60),
+                            _ => theme_engine::snooze_until_morning(),
+                        }
+                        let previous = SNOOZE_ARMED_CHIP.swap(code, Ordering::SeqCst);
+                        if previous != code {
+                            invalidate_control(previous);
+                        }
+                        invalidate_control(code);
                     }
-                    let previous = SNOOZE_ARMED_CHIP.swap(code, Ordering::SeqCst);
-                    if previous != code {
-                        invalidate_control(previous);
-                    }
-                    invalidate_control(code);
                     refresh_status();
                 } else if code == IDC_THEME_SNOOZE_CANCEL {
                     theme_engine::snooze_cancel();
@@ -1433,7 +1566,6 @@ fn create_windows() {
         }
         let _dpi = dpi::Scope::window(panel);
         let font = make_font(14, 400);
-        let section_font = make_font(14, 700);
         let subtitle_font = make_font(12, 600);
         let mut frame = RECT {
             left: 0,
@@ -1461,11 +1593,12 @@ fn create_windows() {
         theme::apply_to_window(panel);
         set_window_icons(panel, instance);
 
-        // Vertical flow copied from the Go compact_controls builder:
-        // sections, rows, and subtitles advance y by the shared tokens.
+        // Vertical flow: one row grammar per section — a group label, then
+        // rows that each hold exactly one control, then a status line.
+        // Section actions sit at the right end of the header row; only the
+        // footer gets a hairline.
         let row_width = PANEL_CLIENT_WIDTH - 2 * PAD; // 450
-        let two_w = split_row(row_width, 2); // 221
-        let three_w = split_row(row_width, 3); // 144
+        let seg_w = (row_width - 2 * SEGMENT_GAP) / 3; // 148
         let mut y = PAD;
 
         section_header(
@@ -1474,72 +1607,87 @@ fn create_windows() {
             y,
             STATIC_SECTION_BASE,
             instance,
-            section_font,
+            subtitle_font,
         );
+        // Section actions live at the right end of the group-label row
+        // (the standard "header + action" pattern); the timed cancel link
+        // occupies a fixed slot that stays hidden until something is armed.
+        let timed_cancel = owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("menu_nosleep_timed_cancel"),
+                x: scale(PAD + row_width - LINK_W),
+                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
+                width: scale(LINK_W),
+                id: IDC_NOSLEEP_TIMED_CANCEL,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_HIT_H),
+        );
+        BTN_NOSLEEP_TIMED_CANCEL.store(timed_cancel.0 as isize, Ordering::SeqCst);
+        if timed_nosleep_state().is_none() {
+            let _ = ShowWindow(timed_cancel, SW_HIDE);
+        }
         y += SECTION_H + LABEL_GAP;
-        // Toggle controls shrink to their drawn checkbox footprint (Go row()).
-        let nosleep_w = checkbox_hit_width(panel, font, &t("menu_nosleep_enable"))
-            .min(two_w)
-            .max(1);
-        let chk_nosleep = checkbox(&ControlSpec {
-            parent: panel,
-            label: t("menu_nosleep_enable"),
-            x: scale(PAD),
-            y: scale(y),
-            width: scale(nosleep_w),
-            id: IDC_NOSLEEP,
-            instance,
-            font,
-        });
-        CHK_NOSLEEP.store(chk_nosleep.0 as isize, Ordering::SeqCst);
-        let idle_w = checkbox_hit_width(panel, font, &t("menu_idle_enable"))
-            .min(two_w)
-            .max(1);
-        let chk_idle = checkbox(&ControlSpec {
-            parent: panel,
-            label: t("menu_idle_enable"),
-            // Slot position stays on the split grid; only the control width
-            // shrinks to the drawn checkbox footprint (Go row()).
-            x: scale(PAD + two_w + GAP),
-            y: scale(y),
-            width: scale(idle_w),
-            id: IDC_IDLE,
-            instance,
-            font,
-        });
-        CHK_IDLE.store(chk_idle.0 as isize, Ordering::SeqCst);
-        y += BUTTON_H + LABEL_GAP;
-        // Timed stay-awake preset chips: one click arms the runtime overlay
-        // (set_timed_nosleep) without touching the saved switches. Sized to
-        // their labels and left-aligned so the strip reads as a quiet
-        // toolbar, not a row of primary actions.
-        let timed_buttons = [
-            (IDC_NOSLEEP_TIMED_30M, "menu_nosleep_timed_30m"),
-            (IDC_NOSLEEP_TIMED_1H, "menu_nosleep_timed_1h"),
-            (IDC_NOSLEEP_TIMED_2H, "menu_nosleep_timed_2h"),
-            (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
-        ];
-        let mut chip_x = PAD;
-        for (id, key) in timed_buttons {
-            let label = t(key);
-            let width = chip_width(panel, font, &label);
-            let button = owner_button(
+        // Power strategy segmented control: Stay Awake and Idle Monitoring
+        // are mutually exclusive in the saved config (on_toggle forces the
+        // other off), so the segments make that radio semantics visible.
+        // Clicking the selected segment clears it, like the old checkbox.
+        for (index, (id, key)) in [
+            (IDC_POWER_NONE, "power_mode_off"),
+            (IDC_NOSLEEP, "power_nosleep"),
+            (IDC_IDLE, "power_idle"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let segment = owner_button(
                 &ControlSpec {
                     parent: panel,
-                    label,
-                    x: scale(chip_x),
+                    label: t(key),
+                    x: scale(PAD + index as i32 * (seg_w + SEGMENT_GAP)),
                     y: scale(y),
-                    width: scale(width),
+                    width: scale(seg_w),
+                    id,
+                    instance,
+                    font,
+                },
+                scale(BUTTON_H),
+            );
+            match id {
+                IDC_NOSLEEP => CHK_NOSLEEP.store(segment.0 as isize, Ordering::SeqCst),
+                IDC_IDLE => CHK_IDLE.store(segment.0 as isize, Ordering::SeqCst),
+                _ => {}
+            }
+        }
+        y += BUTTON_H + LABEL_GAP;
+        // Timed stay-awake preset chips: one click arms the runtime overlay
+        // (set_timed_nosleep) without touching the saved switches. The strip
+        // splits the full row so its right edge aligns with the segments
+        // above.
+        for (index, (id, key)) in [
+            (IDC_NOSLEEP_TIMED_30M, "chip_timed_30m"),
+            (IDC_NOSLEEP_TIMED_1H, "chip_timed_1h"),
+            (IDC_NOSLEEP_TIMED_2H, "chip_timed_2h"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (slot_x, slot_w) = row_slot(row_width, 3, index as i32);
+            owner_button(
+                &ControlSpec {
+                    parent: panel,
+                    label: t(key),
+                    x: scale(PAD + slot_x),
+                    y: scale(y),
+                    width: scale(slot_w),
                     id,
                     instance,
                     font,
                 },
                 scale(CHIP_H),
             );
-            if id == IDC_NOSLEEP_TIMED_CANCEL {
-                BTN_NOSLEEP_TIMED_CANCEL.store(button.0 as isize, Ordering::SeqCst);
-            }
-            chip_x += width + GAP;
         }
         y += CHIP_H + LABEL_GAP;
         let power_summary = owner_static(
@@ -1564,42 +1712,52 @@ fn create_windows() {
             y,
             STATIC_SECTION_BASE + 1,
             instance,
-            section_font,
+            subtitle_font,
+        );
+        owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("panel_manage_link"),
+                x: scale(PAD + row_width - LINK_W),
+                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
+                width: scale(LINK_W),
+                id: IDC_MANAGE_BUTTON,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_HIT_H),
         );
         y += SECTION_H + LABEL_GAP;
-        let automation_w = checkbox_hit_width(panel, font, &t("automation_master"))
-            .min(two_w)
-            .max(1);
-        let chk_automation = checkbox(&ControlSpec {
-            parent: panel,
-            label: t("automation_master"),
-            x: scale(PAD),
-            y: scale(y),
-            width: scale(automation_w),
-            id: IDC_AUTOMATION,
-            instance,
-            font,
-        });
-        CHK_AUTOMATION.store(chk_automation.0 as isize, Ordering::SeqCst);
-        let manage_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + two_w + GAP),
-            scale(y),
-            scale(two_w),
+        // Label-left row with a right-aligned pill switch.
+        owner_static(
+            &ControlSpec {
+                parent: panel,
+                label: t("automation_master"),
+                x: scale(PAD),
+                y: scale(y),
+                width: scale(row_width - SWITCH_HIT_W - GAP),
+                id: IDC_ROW_LABEL_BASE,
+                instance,
+                font,
+            },
             scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_MANAGE_BUTTON as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("manage button");
-        let _ = set_control_font(manage_btn, font);
-        nativeform::track(manage_btn);
-        let manage_label = t("menu_automation_manage");
-        set_control_text(manage_btn, &manage_label);
+        );
+        // The switch's window text is its accessible name; draw_switch
+        // paints geometry only, so the label costs nothing visually.
+        let chk_automation = owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("automation_master"),
+                x: scale(PAD + row_width - SWITCH_HIT_W),
+                y: scale(y),
+                width: scale(SWITCH_HIT_W),
+                id: IDC_AUTOMATION,
+                instance,
+                font,
+            },
+            scale(BUTTON_H),
+        );
+        CHK_AUTOMATION.store(chk_automation.0 as isize, Ordering::SeqCst);
         y += BUTTON_H + LABEL_GAP;
         let automation_summary = owner_static(
             &ControlSpec {
@@ -1623,105 +1781,95 @@ fn create_windows() {
             y,
             STATIC_SECTION_BASE + 2,
             instance,
-            section_font,
+            subtitle_font,
+        );
+        let snooze_cancel = owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("menu_theme_snooze_cancel"),
+                x: scale(PAD + row_width - 2 * LINK_W - GAP),
+                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
+                width: scale(LINK_W),
+                id: IDC_THEME_SNOOZE_CANCEL,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_HIT_H),
+        );
+        BTN_THEME_SNOOZE_CANCEL.store(snooze_cancel.0 as isize, Ordering::SeqCst);
+        if theme_engine::snooze_deadline().is_none() {
+            let _ = ShowWindow(snooze_cancel, SW_HIDE);
+        }
+        owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("panel_repair_link"),
+                x: scale(PAD + row_width - LINK_W),
+                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
+                width: scale(LINK_W),
+                id: IDC_THEME_REPAIR,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_HIT_H),
         );
         y += SECTION_H + LABEL_GAP;
-        // Go themeRow: the toggle reserves at least 154px so its full label
-        // fits; the two direct actions split the remainder equally.
-        let theme_toggle_w = checkbox_hit_width(panel, font, &t("menu_theme_enable"))
-            .max(154)
-            .min(row_width - 2 * GAP);
-        let theme_action_w = (row_width - theme_toggle_w - 2 * GAP) / 2;
-        let theme_toggle = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD),
-            scale(y),
-            scale(theme_toggle_w),
+        // Label-left row with a right-aligned pill switch.
+        owner_static(
+            &ControlSpec {
+                parent: panel,
+                label: t("menu_theme_enable"),
+                x: scale(PAD),
+                y: scale(y),
+                width: scale(row_width - SWITCH_HIT_W - GAP),
+                id: IDC_ROW_LABEL_BASE + 1,
+                instance,
+                font,
+            },
             scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_THEME_ENABLE as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("theme enable");
-        let _ = set_control_font(theme_toggle, font);
-        nativeform::track(theme_toggle);
-        let theme_enable_label = t("menu_theme_enable");
-        set_control_text(theme_toggle, &theme_enable_label);
-        let theme_switch_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + theme_toggle_w + GAP),
-            scale(y),
-            scale(theme_action_w),
+        );
+        owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("menu_theme_enable"),
+                x: scale(PAD + row_width - SWITCH_HIT_W),
+                y: scale(y),
+                width: scale(SWITCH_HIT_W),
+                id: IDC_THEME_ENABLE,
+                instance,
+                font,
+            },
             scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_THEME_SWITCH as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("theme switch");
-        let _ = set_control_font(theme_switch_btn, font);
-        nativeform::track(theme_switch_btn);
-        let theme_switch_label = t("menu_theme_switch_now");
-        set_control_text(theme_switch_btn, &theme_switch_label);
-        let theme_repair_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + theme_toggle_w + GAP + theme_action_w + GAP),
-            scale(y),
-            scale(theme_action_w),
-            scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_THEME_REPAIR as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("theme repair");
-        let _ = set_control_font(theme_repair_btn, font);
-        nativeform::track(theme_repair_btn);
-        let theme_repair_label = t("menu_theme_repair");
-        set_control_text(theme_repair_btn, &theme_repair_label);
+        );
         y += BUTTON_H + LABEL_GAP;
-        // Snooze chips: postpone the next scheduled switch (runtime-only),
-        // same quiet toolbar treatment as the timed row.
-        let snooze_buttons = [
-            (IDC_THEME_SNOOZE_30M, "menu_theme_snooze_30m"),
-            (IDC_THEME_SNOOZE_1H, "menu_theme_snooze_1h"),
-            (IDC_THEME_SNOOZE_MORNING, "menu_theme_snooze_morning"),
-            (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
-        ];
-        let mut chip_x = PAD;
-        for (id, key) in snooze_buttons {
-            let label = t(key);
-            let width = chip_width(panel, font, &label);
-            let button = owner_button(
+        // The instant switch-now action shares the snooze strip; its
+        // link-colored ink sets "acts immediately" apart from the deferred
+        // snoozes beside it.
+        for (index, (id, label)) in [
+            (IDC_THEME_SWITCH, theme_switch_chip_label()),
+            (IDC_THEME_SNOOZE_30M, t("chip_snooze_30m")),
+            (IDC_THEME_SNOOZE_1H, t("chip_snooze_1h")),
+            (IDC_THEME_SNOOZE_MORNING, t("chip_snooze_morning")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (slot_x, slot_w) = row_slot(row_width, 4, index as i32);
+            owner_button(
                 &ControlSpec {
                     parent: panel,
                     label,
-                    x: scale(chip_x),
+                    x: scale(PAD + slot_x),
                     y: scale(y),
-                    width: scale(width),
+                    width: scale(slot_w),
                     id,
                     instance,
                     font,
                 },
                 scale(CHIP_H),
             );
-            if id == IDC_THEME_SNOOZE_CANCEL {
-                BTN_THEME_SNOOZE_CANCEL.store(button.0 as isize, Ordering::SeqCst);
-            }
-            chip_x += width + GAP;
         }
         y += CHIP_H + LABEL_GAP;
-        // Schedule subtitle under the theme row (Go p.themeSchedule).
         let theme_schedule = owner_static(
             &ControlSpec {
                 parent: panel,
@@ -1738,14 +1886,31 @@ fn create_windows() {
         LBL_THEME_SCHEDULE.store(theme_schedule.0 as isize, Ordering::SeqCst);
         y += SUBTITLE_H + SECTION_GAP;
 
+        // Footer hairline separates navigation from the feature sections.
+        owner_static(
+            &ControlSpec {
+                parent: panel,
+                label: String::new(),
+                x: scale(PAD),
+                y: scale(y),
+                width: scale(row_width),
+                id: IDC_FOOTER_RULE,
+                instance,
+                font,
+            },
+            scale(1),
+        );
+        y += 1 + FOOTER_GAP;
+
+        let (footer_x, footer_w) = row_slot(row_width, 3, 0);
         let system_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
             w!(""),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD),
+            scale(PAD + footer_x),
             scale(y),
-            scale(three_w),
+            scale(footer_w),
             scale(BUTTON_H),
             Some(panel),
             Some(HMENU(IDC_SYSTEM_BUTTON as *mut _)),
@@ -1758,14 +1923,15 @@ fn create_windows() {
         let system_label = t("menu_system_controls");
         set_control_text(system_btn, &system_label);
 
+        let (footer_x, footer_w) = row_slot(row_width, 3, 1);
         let settings_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
             w!(""),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + three_w + GAP),
+            scale(PAD + footer_x),
             scale(y),
-            scale(three_w),
+            scale(footer_w),
             scale(BUTTON_H),
             Some(panel),
             Some(HMENU(IDC_SETTINGS_BUTTON as *mut _)),
@@ -1777,14 +1943,15 @@ fn create_windows() {
         nativeform::track(settings_btn);
         let settings_label = t("settings_open");
         set_control_text(settings_btn, &settings_label);
+        let (footer_x, footer_w) = row_slot(row_width, 3, 2);
         let exit_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
             w!(""),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + 2 * (three_w + GAP)),
+            scale(PAD + footer_x),
             scale(y),
-            scale(three_w),
+            scale(footer_w),
             scale(BUTTON_H),
             Some(panel),
             Some(HMENU(IDC_EXIT_BUTTON as *mut _)),
@@ -2032,13 +2199,19 @@ fn position_panel_for_show(panel: HWND) {
     }
 }
 
-/// Splits a row into `count` equal widths separated by GAP, like the Go
-/// `splitRow` helper.
-fn split_row(total: i32, count: i32) -> i32 {
+/// Equal-width slot `index` of `count` in a GAP-separated row, spreading
+/// the remainder pixels over the leftmost slots so every equal-split row
+/// ends flush with the panel's right padding.
+fn row_slot(row_width: i32, count: i32, index: i32) -> (i32, i32) {
     if count <= 0 {
-        return 0;
+        return (0, 0);
     }
-    (total - (count - 1) * GAP) / count
+    let gaps = (count - 1) * GAP;
+    let base = (row_width - gaps) / count;
+    let remainder = (row_width - gaps) % count;
+    let width = base + i32::from(index < remainder);
+    let x = index * (base + GAP) + index.min(remainder);
+    (x, width)
 }
 
 fn section_header(
@@ -2127,55 +2300,6 @@ fn owner_static(spec: &ControlSpec, height: i32) -> HWND {
     unsafe { create_control(spec, w!("STATIC"), 13, height) }
 }
 
-fn checkbox(spec: &ControlSpec) -> HWND {
-    owner_button(spec, scale(BUTTON_H))
-}
-
-/// Logical width that tightly contains the checkbox glyph + label + focus
-/// inset (Go CheckboxHitWidth), so toggle hit areas match what is drawn.
-/// Logical pixel width of a single-line label at the given font (Go
-/// GetTextExtent-based measuring shared by the hit-width helpers).
-fn measured_text_width(parent: HWND, font: HFONT, label: &str) -> i32 {
-    unsafe {
-        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(parent));
-        if hdc.is_invalid() {
-            return 0;
-        }
-        let old = windows::Win32::Graphics::Gdi::SelectObject(
-            hdc,
-            windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
-        );
-        let mut text: Vec<u16> = label.encode_utf16().collect();
-        let mut bounds = RECT::default();
-        let height = windows::Win32::Graphics::Gdi::DrawTextW(
-            hdc,
-            &mut text,
-            &mut bounds,
-            windows::Win32::Graphics::Gdi::DT_LEFT
-                | windows::Win32::Graphics::Gdi::DT_SINGLELINE
-                | windows::Win32::Graphics::Gdi::DT_CALCRECT,
-        );
-        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
-        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(parent), hdc);
-        if height == 0 || bounds.right <= bounds.left {
-            return 0;
-        }
-        let dpi = scale(96).max(96);
-        (bounds.right - bounds.left) * 96 / dpi
-    }
-}
-
-fn checkbox_hit_width(parent: HWND, font: HFONT, label: &str) -> i32 {
-    // 2 before the glyph, 16 glyph, 8 before label, 2 focus inset.
-    measured_text_width(parent, font, label) + 2 + 16 + 8 + 2
-}
-
-/// Width that fits a chip label inside draw_button's 10px side insets, with
-/// a floor so tiny labels still read as clickable.
-fn chip_width(parent: HWND, font: HFONT, label: &str) -> i32 {
-    (measured_text_width(parent, font, label) + 20).max(60)
-}
-
 fn static_text(spec: &ControlSpec) -> HWND {
     unsafe { create_control(spec, w!("STATIC"), 0, scale(20)) }
 }
@@ -2205,7 +2329,19 @@ fn make_font(size_px: i32, weight: i32) -> HFONT {
 /// `refresh_status`.
 fn tray_update_tooltip(line: &str) {
     static LAST: Mutex<Option<String>> = Mutex::new(None);
-    let mut wide: Vec<u16> = line.encode_utf16().collect();
+    // Graceful degradation before the hard cut: dropping the version suffix
+    // from the first line usually frees room for the last status line.
+    let mut text = line.to_string();
+    if text.encode_utf16().count() > 118
+        && let Some((first, rest)) = text.split_once('\n')
+        && let Some((_, bare_name)) = first.split_once(" v")
+    {
+        let candidate = format!("{bare_name}{rest}");
+        if candidate.encode_utf16().count() <= 118 {
+            text = candidate;
+        }
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
     if wide.len() > 118 {
         wide.truncate(118);
         wide.extend_from_slice("…".encode_utf16().collect::<Vec<u16>>().as_slice());
@@ -2277,7 +2413,7 @@ fn build_tray_tooltip(
         ));
         lines.push(line(
             "tooltip_idle",
-            format!("{}{unit} {action_label}", power.idle_minutes),
+            format!("{} {unit} {action_label}", power.idle_minutes),
         ));
     } else if power.idle_requested && (effective_nosleep || power.idle_paused) {
         lines.push(line("tooltip_idle", t("status_paused")));
@@ -2606,6 +2742,30 @@ fn on_toggle(code: usize) {
     refresh_checkboxes();
     refresh_status();
 }
+
+/// The segmented control's "Off" segment: clears both power strategies.
+/// A no-op when neither is enabled (avoids a pointless disk write), and
+/// otherwise goes through the same save path, so a Stay Awake on→off
+/// transition still drops the timed overlay inside commit_config.
+fn on_power_none_segment() {
+    if !cfg_map(|c| c.nosleep_enabled || c.idle_enabled) {
+        return;
+    }
+    if let Err(err) = edit_config(|c| {
+        c.nosleep_enabled = false;
+        c.idle_enabled = false;
+    }) {
+        warn_dialog("", &err);
+        return;
+    }
+    apply_stay_awake();
+    refresh_checkboxes();
+    refresh_status();
+    for id in [IDC_POWER_NONE, IDC_NOSLEEP, IDC_IDLE] {
+        invalidate_control(id);
+    }
+}
+
 /// Go dialog.Warn: simple warning box owned by the desktop (NULL parent),
 /// titled with the app name.
 fn warn_dialog(heading: &str, body: &str) {
@@ -2736,6 +2896,9 @@ fn refresh_checkboxes() {
         cfg_map(|c| c.theme_switch_enabled),
     );
     invalidate_control(IDC_THEME_ENABLE);
+    // The segmented "Off" control has no CHK_ slot of its own; its selection
+    // tracks "neither strategy enabled".
+    invalidate_control(IDC_POWER_NONE);
 }
 
 /// Single derivation of the effective power-management state, consumed by
@@ -2800,7 +2963,18 @@ pub(crate) fn effective_power_state() -> EffectivePowerState {
     }
 }
 
-fn power_status() -> (String, String) {
+/// Verbose statuses for tooltips and narration.
+pub(crate) fn power_status() -> (String, String) {
+    power_status_impl(false)
+}
+
+/// Compact statuses for the panel's one-line overview: short on/off words
+/// and tight parentheticals keep even attributed states on a single line.
+fn power_status_compact() -> (String, String) {
+    power_status_impl(true)
+}
+
+fn power_status_impl(compact: bool) -> (String, String) {
     let power = effective_power_state();
     let idle_action = cfg_map(|c| c.idle_action.clone());
     // Reason attribution: which task and/or the timed overlay is keeping the
@@ -2809,42 +2983,67 @@ fn power_status() -> (String, String) {
     let sources = automation::overrides().stay_awake_sources;
     if !sources.is_empty() {
         let separator = if i18n_is_chinese() { "、" } else { ", " };
-        reasons.push(t_args("status_reason_task", &[&sources.join(separator)]));
+        let key = if compact {
+            "panel_status_reason_task"
+        } else {
+            "status_reason_task"
+        };
+        reasons.push(t_args(key, &[&sources.join(separator)]));
     }
     if let Some((remaining, _)) = timed_nosleep_state() {
-        reasons.push(t_args(
-            "status_reason_timed",
-            &[&format_remaining(remaining)],
-        ));
+        let key = if compact {
+            "panel_status_reason_timed"
+        } else {
+            "status_reason_timed"
+        };
+        reasons.push(t_args(key, &[&format_remaining(remaining)]));
     }
     let manual_on = cfg_map(|c| c.nosleep_enabled);
+    // Reasons read as a natural list, not a formula.
+    let reason_sep = if i18n_is_chinese() { "、" } else { ", " };
+    let pick =
+        |compact_key: &str, verbose_key: &str| t(if compact { compact_key } else { verbose_key });
     // When the saved switch is off, the machine is kept awake purely by task
     // rules and/or the timed overlay — say so directly instead of claiming
     // the switch is "enabled".
     let mut awake_status = if !power.requested {
-        t("status_disabled")
+        pick("status_short_off", "status_disabled")
     } else if power.paused {
-        t("status_paused_by_automation")
+        pick(
+            "panel_status_paused_automation",
+            "status_paused_by_automation",
+        )
     } else if power.lock_paused {
-        t("status_paused_by_lock")
+        pick("panel_status_paused_lock", "status_paused_by_lock")
     } else if !power.battery_allowed {
-        t("status_paused_by_battery")
+        pick("panel_status_paused_battery", "status_paused_by_battery")
     } else if !manual_on && !reasons.is_empty() {
-        t_args("status_awake_overrides", &[&reasons.join("+")])
+        let key = if compact {
+            "panel_status_awake_overrides"
+        } else {
+            "status_awake_overrides"
+        };
+        t_args(key, &[&reasons.join(reason_sep)])
     } else if power.keep_screen {
-        t("status_enabled_keep_screen")
+        pick("panel_status_keep_screen", "status_enabled_keep_screen")
     } else {
-        t("status_enabled")
+        pick("status_short_on", "status_enabled")
     };
     if power.awake && manual_on && !reasons.is_empty() {
-        awake_status.push_str(&t_args("status_reason_suffix", &[&reasons.join("+")]));
+        awake_status.push_str(&t_args(
+            "status_reason_suffix",
+            &[&reasons.join(reason_sep)],
+        ));
     }
     let idle_status = if !power.idle_requested {
-        t("status_disabled")
+        pick("status_short_off", "status_disabled")
     } else if power.awake {
-        t("status_paused_by_nosleep")
+        pick("panel_status_paused_nosleep", "status_paused_by_nosleep")
     } else if power.idle_paused {
-        t("status_paused_by_automation")
+        pick(
+            "panel_status_paused_automation",
+            "status_paused_by_automation",
+        )
     } else {
         t_args(
             "status_monitor_active",
@@ -2879,7 +3078,7 @@ fn refresh_status() {
         let show = if snooze_armed { SW_SHOW } else { SW_HIDE };
         let _ = ShowWindow(hwnd(&BTN_THEME_SNOOZE_CANCEL), show);
     }
-    let (nosleep_status, idle_status) = power_status();
+    let (nosleep_status, idle_status) = power_status_compact();
     let overview = format!(
         "{}{}{}{}",
         t("power_overview_prefix"),
@@ -2912,6 +3111,16 @@ fn refresh_status() {
 
     set_text(&LBL_AUTOMATION_SUMMARY, &automation);
     set_text(&LBL_THEME_SCHEDULE, &theme_schedule_text());
+    // The switch-now chip names the side it will switch to; it flips after
+    // every manual switch or system theme change.
+    let panel = hwnd(&PANEL);
+    if !panel.is_invalid() {
+        let chip = unsafe { GetDlgItem(Some(panel), IDC_THEME_SWITCH as i32) }.unwrap_or_default();
+        let label = theme_switch_chip_label();
+        if !chip.is_invalid() && window_text(chip) != label {
+            set_control_text(chip, &label);
+        }
+    }
 
     // Tray tooltip mirrors the effective power-management state. The tray
     // line reads the latched execution flag (apply_stay_awake owns it), the

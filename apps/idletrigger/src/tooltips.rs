@@ -64,26 +64,47 @@ pub fn create_for_panel(panel: HWND) {
         // The WS_EX_TOPMOST style from creation keeps the tip above other
         // windows; nothing further to do here.
 
-        // (control id, i18n key) pairs — Go tooltips.go mapping.
+        // (control id, i18n key) pairs — Go tooltips.go mapping plus the
+        // segmented control, chip strips, and header action links. Status
+        // statics are added after this loop with their live text.
         let tools = [
+            (crate::IDC_POWER_NONE, "tip_power_none"),
             (crate::IDC_NOSLEEP, "tip_nosleep"),
             (crate::IDC_IDLE, "tip_idle"),
+            (crate::IDC_NOSLEEP_TIMED_30M, "tip_nosleep_timed_presets"),
+            (crate::IDC_NOSLEEP_TIMED_1H, "tip_nosleep_timed_presets"),
+            (crate::IDC_NOSLEEP_TIMED_2H, "tip_nosleep_timed_presets"),
+            (crate::IDC_NOSLEEP_TIMED_CANCEL, "tip_nosleep_timed_cancel"),
             (crate::IDC_AUTOMATION, "tip_automation_master"),
-            (crate::IDC_SYSTEM_BUTTON, "tip_quick_actions"),
-            (crate::IDC_SETTINGS_BUTTON, "tip_settings"),
+            (crate::IDC_MANAGE_BUTTON, "tip_automation"),
             (crate::IDC_THEME_ENABLE, "tip_theme"),
             (crate::IDC_THEME_SWITCH, "tip_theme_switch"),
+            (crate::IDC_THEME_SNOOZE_30M, "tip_theme_snooze_presets"),
+            (crate::IDC_THEME_SNOOZE_1H, "tip_theme_snooze_presets"),
+            (crate::IDC_THEME_SNOOZE_MORNING, "tip_theme_snooze_presets"),
+            (crate::IDC_THEME_SNOOZE_CANCEL, "tip_theme_snooze_cancel"),
             (crate::IDC_THEME_REPAIR, "tip_theme_repair"),
-            (crate::IDC_MANAGE_BUTTON, "tip_automation"),
+            (crate::IDC_SYSTEM_BUTTON, "tip_quick_actions"),
+            (crate::IDC_SETTINGS_BUTTON, "tip_settings"),
             (crate::IDC_EXIT_BUTTON, "tip_exit"),
         ];
         for (id, key) in tools {
-            add_tool(panel, id, key);
+            add_tool(panel, id, &crate::t_pub(key));
+        }
+        // Status lines draw with an end ellipsis; their tooltips carry the
+        // full untruncated text (kept current by refresh_all). Starting
+        // empty keeps the tool dormant until the first refresh fills it.
+        for id in [
+            crate::IDC_POWER_SUMMARY,
+            crate::IDC_AUTOMATION_SUMMARY,
+            crate::IDC_THEME_SCHEDULE,
+        ] {
+            add_tool(panel, id, &crate::status_line_text(id));
         }
     }
 }
 
-unsafe fn add_tool(panel: HWND, id: usize, key: &str) {
+unsafe fn add_tool(panel: HWND, id: usize, text: &str) {
     unsafe {
         let tip = HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _);
         if tip.is_invalid() {
@@ -100,8 +121,8 @@ unsafe fn add_tool(panel: HWND, id: usize, key: &str) {
             uId: target.0 as usize,
             ..Default::default()
         };
-        let text = wide(&crate::t_pub(key));
-        tool.lpszText = windows::core::PWSTR(text.as_ptr() as *mut _);
+        let wide_text = wide(text);
+        tool.lpszText = windows::core::PWSTR(wide_text.as_ptr() as *mut _);
         let _ = SendMessageW(
             tip,
             TTM_ADDTOOLW,
@@ -175,7 +196,13 @@ pub fn refresh_all(panel: HWND) {
                 Some(LPARAM(width)),
             );
         }
-        let tools: [(usize, TipText); 10] = [
+        const TOOL_COUNT: usize = 22;
+        let tools: [(usize, TipText); TOOL_COUNT] = [
+            (crate::IDC_POWER_NONE, TipText::Key("tip_power_none")),
+            (
+                crate::IDC_POWER_SUMMARY,
+                TipText::Text(crate::power_overview_verbose()),
+            ),
             (crate::IDC_NOSLEEP, TipText::Text(state_power_tip(true))),
             (crate::IDC_IDLE, TipText::Text(state_power_tip(false))),
             (
@@ -185,11 +212,19 @@ pub fn refresh_all(panel: HWND) {
                     "tip_automation_master",
                 )),
             ),
+            (
+                crate::IDC_AUTOMATION_SUMMARY,
+                TipText::Text(crate::status_line_text(crate::IDC_AUTOMATION_SUMMARY)),
+            ),
             (crate::IDC_SYSTEM_BUTTON, TipText::Key("tip_quick_actions")),
             (crate::IDC_SETTINGS_BUTTON, TipText::Key("tip_settings")),
             (
                 crate::IDC_THEME_ENABLE,
                 TipText::Text(toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")),
+            ),
+            (
+                crate::IDC_THEME_SCHEDULE,
+                TipText::Text(crate::status_line_text(crate::IDC_THEME_SCHEDULE)),
             ),
             // Action buttons describe what they do; only real toggles carry
             // the enabled/disabled state line.
@@ -197,9 +232,41 @@ pub fn refresh_all(panel: HWND) {
             (crate::IDC_THEME_REPAIR, TipText::Key("tip_theme_repair")),
             (crate::IDC_MANAGE_BUTTON, TipText::Key("tip_automation")),
             (crate::IDC_EXIT_BUTTON, TipText::Key("tip_exit")),
+            (
+                crate::IDC_NOSLEEP_TIMED_30M,
+                TipText::Key("tip_nosleep_timed_presets"),
+            ),
+            (
+                crate::IDC_NOSLEEP_TIMED_1H,
+                TipText::Key("tip_nosleep_timed_presets"),
+            ),
+            (
+                crate::IDC_NOSLEEP_TIMED_2H,
+                TipText::Key("tip_nosleep_timed_presets"),
+            ),
+            (
+                crate::IDC_NOSLEEP_TIMED_CANCEL,
+                TipText::Key("tip_nosleep_timed_cancel"),
+            ),
+            (
+                crate::IDC_THEME_SNOOZE_30M,
+                TipText::Key("tip_theme_snooze_presets"),
+            ),
+            (
+                crate::IDC_THEME_SNOOZE_1H,
+                TipText::Key("tip_theme_snooze_presets"),
+            ),
+            (
+                crate::IDC_THEME_SNOOZE_MORNING,
+                TipText::Key("tip_theme_snooze_presets"),
+            ),
+            (
+                crate::IDC_THEME_SNOOZE_CANCEL,
+                TipText::Key("tip_theme_snooze_cancel"),
+            ),
         ];
-        static LAST: std::sync::Mutex<[Option<String>; 10]> =
-            std::sync::Mutex::new([const { None }; 10]);
+        static LAST: std::sync::Mutex<[Option<String>; TOOL_COUNT]> =
+            std::sync::Mutex::new([const { None }; TOOL_COUNT]);
         let mut last = crate::runtime::lock(&LAST);
         for (slot, (id, source)) in tools.into_iter().enumerate() {
             let text = source.render();

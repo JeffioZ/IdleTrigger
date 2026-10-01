@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent,
+    TME_LEAVE, TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -298,6 +298,20 @@ unsafe extern "system" fn tracked_proc(
                 // The focus ring renders only for keyboard navigation.
                 if !FOCUS_VISIBLE.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     invalidate(hwnd);
+                }
+                // Esc on a tracked child closes the control panel. Draft-
+                // owning windows (settings, task editor) are deliberately
+                // excluded: their children's parent is not the panel.
+                if msg == WM_KEYDOWN
+                    && wparam.0 as u16 == VK_ESCAPE.0
+                    && GetParent(hwnd).is_ok_and(|parent| parent == crate::hwnd(&crate::PANEL))
+                {
+                    let _ = PostMessageW(
+                        Some(crate::hwnd(&crate::PANEL)),
+                        WM_CLOSE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
                 }
             }
             WM_MOUSEMOVE => {

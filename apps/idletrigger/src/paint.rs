@@ -14,7 +14,7 @@ use windows::Win32::Graphics::GdiPlus::Point as GpPoint;
 use windows::Win32::Graphics::GdiPlus::{
     FillModeWinding, GdipAddPathBezierI, GdipAddPathLineI, GdipClosePathFigure, GdipCreateFromHDC,
     GdipCreatePath, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-    GdipFillPath, GdipFillPolygonI, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
+    GdipFillEllipseI, GdipFillPath, GdipFillPolygonI, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
     GdipStartPathFigure, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
     GdiplusStartupOutput, GpBrush, GpGraphics, GpPath, GpSolidFill, PixelOffsetModeHalf,
     SmoothingMode,
@@ -307,6 +307,59 @@ pub fn fill_rounded_rect(
     }
 }
 
+/// Anti-aliased filled ellipse: fills the outer bounds with `border`, then
+/// the bounds inset by one physical pixel with `fill` — the same edge
+/// treatment as [`fill_rounded_rect`], so circles and rounded rects share
+/// one crispness across DPI scales.
+pub fn fill_ellipse(hdc: HDC, bounds: &RECT, fill: u32, border: u32) -> DrawResult {
+    if !ensure_started() || bounds.right - bounds.left <= 2 || bounds.bottom - bounds.top <= 2 {
+        return DrawResult::NotStarted;
+    }
+    let _guard = crate::runtime::lock(&DRAW_LOCK);
+    unsafe {
+        let Some(graphics) = GraphicsGuard::new(hdc) else {
+            return DrawResult::NotStarted;
+        };
+        let Some(border_brush) = BrushGuard::new(border) else {
+            return DrawResult::NotStarted;
+        };
+        let Some(fill_brush) = BrushGuard::new(fill) else {
+            return DrawResult::NotStarted;
+        };
+        let inner = RECT {
+            left: bounds.left + 1,
+            top: bounds.top + 1,
+            right: bounds.right - 1,
+            bottom: bounds.bottom - 1,
+        };
+        if GdipFillEllipseI(
+            graphics.0,
+            border_brush.0,
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+        )
+        .0 != 0
+        {
+            return DrawResult::MayBeDirty;
+        }
+        if GdipFillEllipseI(
+            graphics.0,
+            fill_brush.0,
+            inner.left,
+            inner.top,
+            inner.right - inner.left,
+            inner.bottom - inner.top,
+        )
+        .0 != 0
+        {
+            return DrawResult::MayBeDirty;
+        }
+        DrawResult::Completed
+    }
+}
+
 /// Anti-aliased filled polygon (Go FillPolygon).
 pub fn fill_polygon(hdc: HDC, points: &[GpPoint], color: u32) -> DrawResult {
     if !ensure_started() || points.len() < 3 {
@@ -406,6 +459,22 @@ pub fn frame_rect(hdc: HDC, bounds: &RECT, color: u32) {
     }
 }
 
+/// Keyboard-focus frame at two physical pixels: FrameRect alone stays 1px
+/// at every DPI scale, which reads as a hairline on high-DPI screens
+/// (WCAG 2.2 focus-appearance wants a clearly visible indicator).
+pub fn draw_focus_frame(hdc: HDC, bounds: &RECT, color: u32) {
+    frame_rect(hdc, bounds, color);
+    let inner = RECT {
+        left: bounds.left + 1,
+        top: bounds.top + 1,
+        right: bounds.right - 1,
+        bottom: bounds.bottom - 1,
+    };
+    if inner.right > inner.left && inner.bottom > inner.top {
+        frame_rect(hdc, &inner, color);
+    }
+}
+
 /// Logical→physical pixels via the live DPI scale (Go scaledPixels).
 pub fn sp(logical: i32, scale: i32) -> i32 {
     if scale <= 96 {
@@ -495,6 +564,151 @@ pub fn control_radius() -> i32 {
     crate::dpi::scale(6)
 }
 
+/// Pill toggle switch (Win11-style) for label-left rows. Geometry derives
+/// from the control's physical bounds and `scale`, never from integer
+/// logical rounding, so the track and thumb stay smooth and correctly
+/// proportioned at every per-monitor DPI. All colors come from palette
+/// tokens, which also drives the high-contrast mapping.
+pub fn draw_switch(
+    hdc: HDC,
+    bounds: &RECT,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    scale: i32,
+) {
+    fill_rect(hdc, bounds, background);
+    let track_w = sp(40, scale);
+    let track_h = sp(20, scale);
+    let thumb_d = sp(16, scale);
+    if track_w <= 0 || track_h <= 0 || thumb_d <= 0 {
+        return;
+    }
+    let left = bounds.left + (bounds.right - bounds.left - track_w) / 2;
+    let top = bounds.top + (bounds.bottom - bounds.top - track_h) / 2;
+    let track = RECT {
+        left,
+        top,
+        right: left + track_w,
+        bottom: top + track_h,
+    };
+    // Thumb inset from the track edge and travel distance between states.
+    // Pressing grows the thumb a touch around its own center (Win11 feel),
+    // clamped so it never crosses the track border.
+    let inset = ((track_h - thumb_d) / 2).max(1);
+    let grow = if state.pressed && !state.disabled {
+        sp(2, scale).min(inset.saturating_sub(1)).max(0)
+    } else {
+        0
+    };
+    let thumb_d = thumb_d + grow;
+    let center_y = track.top + track_h / 2;
+    let resting_center_x = if state.active {
+        track.right - inset - thumb_d / 2
+    } else {
+        track.left + inset + thumb_d / 2
+    };
+    let thumb = RECT {
+        left: resting_center_x - thumb_d / 2,
+        top: center_y - thumb_d / 2,
+        right: resting_center_x + (thumb_d + 1) / 2,
+        bottom: center_y + (thumb_d + 1) / 2,
+    };
+    // Track: solid pill in the state color; the off state hints at the
+    // action with an accent ring while hovered.
+    let (fill, ring) = if state.disabled {
+        (p.disabled_surface, p.subtle_border)
+    } else if state.active {
+        let color = if state.pressed {
+            p.accent_pressed
+        } else if state.hovered {
+            p.accent_hover
+        } else {
+            p.accent
+        };
+        (color, color)
+    } else if state.pressed {
+        (p.accent_pressed, p.accent_pressed)
+    } else if state.hovered {
+        (p.switch_track, p.accent_hover)
+    } else {
+        (p.switch_track, p.switch_track)
+    };
+    // draw_surface carries the GDI+ path plus the plain-GDI fallback.
+    draw_surface(
+        hdc,
+        &track,
+        background,
+        fill,
+        ring,
+        (track_h / 2 - 1).max(1),
+    );
+    let ink = thumb_fill(p, state);
+    if fill_ellipse(hdc, &thumb, ink, ink) == DrawResult::NotStarted {
+        ellipse_fallback(hdc, &thumb, ink);
+    }
+    if state.focused && !state.disabled {
+        let grow = sp(2, scale);
+        let frame = RECT {
+            left: track.left - grow,
+            top: track.top - grow,
+            right: track.right + grow,
+            bottom: track.bottom + grow,
+        };
+        draw_focus_frame(hdc, &frame, p.focus);
+    }
+}
+
+/// Thumb ink: light in both on/off states (Win11 style — the track color
+/// change alone communicates the state); disabled uses the muted ink.
+fn thumb_fill(p: &Palette, state: ControlState) -> u32 {
+    if state.disabled {
+        p.disabled_text
+    } else {
+        p.accent_text
+    }
+}
+
+fn ellipse_fallback(hdc: HDC, bounds: &RECT, color: u32) {
+    let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
+    if brush.is_invalid() {
+        return;
+    }
+    let old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
+    let old_pen = unsafe {
+        SelectObject(
+            hdc,
+            windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_PEN),
+        )
+    };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::Ellipse(
+            hdc,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom,
+        );
+    }
+    unsafe { SelectObject(hdc, old_pen) };
+    unsafe { SelectObject(hdc, old) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(brush.0)) };
+}
+
+/// Plain row label for label-left rows (grouped form list style): body font,
+/// primary text color, no surface of its own.
+pub fn draw_row_label(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+) {
+    fill_rect(hdc, bounds, background);
+    draw_label(hdc, bounds, font, label, p.text, true, 0, 0);
+}
+
 fn button_visual(p: &Palette, state: ControlState) -> (u32, u32, u32) {
     let (mut fill, mut border, mut text) = (p.surface, p.border, p.text);
     if state.hovered {
@@ -544,10 +758,11 @@ pub fn draw_button(
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
 }
 
-/// Ghost chip for secondary quick actions (preset strips): transparent fill,
-/// hairline border, muted text at rest — one step below the primary buttons
-/// in weight at every state, with an accent outline while armed.
-pub fn draw_chip(
+/// One segment of a mutually exclusive segmented control. The selected
+/// segment carries the accent fill; unselected segments sit "etched" into
+/// the window background (no raised surface), so the group reads as one
+/// control with a moving highlight rather than a row of buttons.
+pub fn draw_segment(
     hdc: HDC,
     bounds: &RECT,
     font: HFONT,
@@ -557,19 +772,79 @@ pub fn draw_chip(
     state: ControlState,
     radius: i32,
 ) {
+    let (fill, border, text) = if state.disabled {
+        (p.disabled_surface, p.subtle_border, p.disabled_text)
+    } else if state.active {
+        let mut fill = p.accent;
+        if state.hovered {
+            fill = p.accent_hover;
+        }
+        if state.pressed {
+            fill = p.accent_pressed;
+        }
+        (fill, fill, p.accent_text)
+    } else {
+        let (mut fill, mut border, mut text) = (background, p.subtle_border, p.text2);
+        if state.hovered {
+            fill = p.hover_surface;
+            border = p.border;
+            text = p.text;
+        }
+        if state.pressed {
+            border = p.accent;
+            text = p.text;
+        }
+        (fill, border, text)
+    };
+    let border = if state.focused && !state.disabled {
+        p.focus
+    } else {
+        border
+    };
+    draw_surface(hdc, bounds, background, fill, border, radius);
+    draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
+}
+
+/// Ghost chip for secondary quick actions (preset strips): transparent fill,
+/// hairline border, muted text at rest — one step below the primary buttons
+/// in weight at every state, with an accent outline while armed.
+///
+/// `emphasis` marks an instant-action chip sharing a preset strip with
+/// deferred actions: it uses the link ink so the one chip that acts
+/// immediately reads as a verb, like the panel's action links.
+pub fn draw_chip(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    radius: i32,
+    emphasis: bool,
+) {
+    // Three chip languages, one visual per meaning:
+    // - accent border + normal ink  -> armed preset (a state)
+    // - link-colored ink            -> instant action (a verb, like links)
+    // - subtle border + muted ink   -> ordinary preset
     let (mut fill, mut border, mut text) = (background, p.subtle_border, p.text2);
-    if state.hovered {
-        fill = p.hover_surface;
-        border = p.border;
-        text = p.text;
+    if emphasis {
+        text = p.link;
     }
     if state.active {
         border = p.accent;
-        text = p.accent;
+    }
+    // Hover swaps to the tinted fill and the normal ink: colored ink on the
+    // hover tint does not separate well in dark mode. The fill and border
+    // changes carry the hover state on their own.
+    if state.hovered {
+        fill = p.hover_surface;
+        border = if state.active { p.accent } else { p.border };
+        text = p.text;
     }
     if state.pressed {
         fill = p.hover_surface;
-        border = p.accent;
+        border = if emphasis { p.accent_pressed } else { p.accent };
         text = p.text;
     }
     if state.disabled {
@@ -881,11 +1156,7 @@ pub fn draw_text_link(
         SelectObject(hdc, old);
     }
     if state.focused {
-        let frame = RECT {
-            bottom: bounds.bottom - 1,
-            ..*bounds
-        };
-        frame_rect(hdc, &frame, p.focus);
+        draw_focus_frame(hdc, bounds, p.focus);
     }
 }
 
