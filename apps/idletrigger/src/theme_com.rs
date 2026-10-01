@@ -1,9 +1,9 @@
 //! Windows theme-manager interfaces used by the Windows 11 repair coordinator.
 //!
-//! `IThemeManager41` is undocumented: the vtable slots below (init@3,
-//! current@11, select@12, custom@13, update_custom@26; legacy apply@4) come
-//! from community reverse engineering and have been verified against the
-//! builds this repair path runs on (Windows 11 22621+, gated by
+//! `ThemeManager` is Auto Dark Mode's `IThemeManager2`: undocumented, with
+//! vtable slots (init@3, current@11, select@12, custom@13, add_and_select@20,
+//! update_custom@26) from community reverse engineering, verified against
+//! the builds this repair path runs on (Windows 11 22621+, gated by
 //! `full_dwm_refresh_available`). A future Windows build that reshuffles
 //! these slots would surface as a failed HRESULT here — collected into the
 //! repair error report — not as silent corruption; revisit the ordinals if
@@ -29,22 +29,18 @@ pub struct ThemeManagerVtbl {
     current: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT,
     select: unsafe extern "system" fn(*mut c_void, usize, i32, i32, u32, usize) -> HRESULT,
     custom: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT,
-    unused14: [usize; 12],
+    unused14: [usize; 6],
+    add_and_select: unsafe extern "system" fn(*mut c_void, usize, *const u16, u32, u32) -> HRESULT,
+    unused21: [usize; 5],
     update_custom: unsafe extern "system" fn(*mut c_void) -> HRESULT,
 }
-#[repr(transparent)]
-#[derive(Clone)]
-struct LegacyThemeManager(windows::core::IUnknown);
-unsafe impl Interface for LegacyThemeManager {
-    type Vtable = LegacyThemeManagerVtbl;
-    const IID: GUID = GUID::from_u128(0x0646ebbe_c1b7_4045_8fd0_ffd65d3fc792);
-}
-#[repr(C)]
-pub struct LegacyThemeManagerVtbl {
-    base: IUnknown_Vtbl,
-    unused3: usize,
-    apply: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
-}
+/// `ThemeApplyFlags::IgnoreBackground | IgnoreCursor | IgnoreDesktopIcons |
+/// IgnoreSound | IgnoreScreensaver`: everything except color — the section
+/// set Auto Dark Mode's DwmRefresh round trip keeps untouched.
+pub const IGNORE_MUTABLE_SECTIONS: u32 = 1 | 2 | 4 | 16 | 32;
+/// `ThemePackFlags::Silent`: hides progress UI and sounds.
+pub const PACK_SILENT: u32 = 1 << 2;
+
 struct Apartment;
 impl Drop for Apartment {
     fn drop(&mut self) {
@@ -56,7 +52,6 @@ impl Drop for Apartment {
 
 pub struct Session {
     manager: ThemeManager,
-    legacy: LegacyThemeManager,
     original: i32,
     _apartment: Apartment,
 }
@@ -76,11 +71,6 @@ impl Session {
                     CLSCTX_ALL,
                 )?;
                 (manager.vtable().init)(manager.as_raw(), 0).ok()?;
-                let legacy = CoCreateInstance(
-                    &GUID::from_u128(0xc04b329e_5823_4415_9c93_ba44688947b0),
-                    None,
-                    CLSCTX_ALL,
-                )?;
                 let mut original = 0;
                 (manager.vtable().current)(manager.as_raw(), &mut original).ok()?;
                 let mut custom = 0;
@@ -89,32 +79,48 @@ impl Session {
                 {
                     (manager.vtable().update_custom)(manager.as_raw()).ok()?;
                 }
-                Ok((manager, legacy, original))
+                Ok((manager, original))
             })();
-            let (manager, legacy, original) =
+            let (manager, original) =
                 result.map_err(|error| std::io::Error::other(error.to_string()))?;
             Ok(Self {
                 manager,
-                legacy,
                 original,
                 _apartment: apartment,
             })
         }
     }
-    pub fn apply(&self, path: &str) -> windows::core::Result<()> {
+    /// Applies a theme file by path with per-section ignore flags. Unlike
+    /// the legacy `ApplyTheme`, ignored sections are never touched — the
+    /// property that keeps the colorization round trip away from wallpaper,
+    /// cursors, sounds and screensavers.
+    pub fn add_and_select(
+        &self,
+        path: &str,
+        apply_flags: u32,
+        pack_flags: u32,
+    ) -> windows::core::Result<()> {
         let path = BSTR::from(path);
-        unsafe { (self.legacy.vtable().apply)(self.legacy.as_raw(), path.as_ptr()).ok() }
+        unsafe {
+            (self.manager.vtable().add_and_select)(
+                self.manager.as_raw(),
+                0,
+                path.as_ptr(),
+                apply_flags,
+                pack_flags,
+            )
+            .ok()
+        }
     }
     pub fn restore(&self) -> windows::core::Result<()> {
         // Preserve wallpaper, cursor, desktop icons, sounds and screensaver.
-        const COLOR_ONLY: u32 = 1 | 2 | 4 | 16 | 32;
         unsafe {
             (self.manager.vtable().select)(
                 self.manager.as_raw(),
                 0,
                 self.original,
                 1,
-                COLOR_ONLY,
+                IGNORE_MUTABLE_SECTIONS,
                 0,
             )
             .ok()
@@ -136,12 +142,12 @@ mod tests {
         assert_eq!(std::mem::offset_of!(ThemeManagerVtbl, select), 12 * pointer);
         assert_eq!(std::mem::offset_of!(ThemeManagerVtbl, custom), 13 * pointer);
         assert_eq!(
-            std::mem::offset_of!(ThemeManagerVtbl, update_custom),
-            26 * pointer
+            std::mem::offset_of!(ThemeManagerVtbl, add_and_select),
+            20 * pointer
         );
         assert_eq!(
-            std::mem::offset_of!(LegacyThemeManagerVtbl, apply),
-            4 * pointer
+            std::mem::offset_of!(ThemeManagerVtbl, update_custom),
+            26 * pointer
         );
     }
 }

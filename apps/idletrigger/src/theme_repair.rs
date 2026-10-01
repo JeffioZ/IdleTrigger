@@ -4,7 +4,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::{ERROR_SUCCESS, LPARAM, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, LPARAM, WPARAM,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RegCloseKey, RegOpenKeyExW,
     RegQueryValueExW, RegSetValueExW,
@@ -21,8 +23,8 @@ use crate::wide;
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {
     let session = crate::theme_com::Session::new()?;
-    let snapshot = match current_theme_snapshot() {
-        Ok(text) => text,
+    let (snapshot, encoding) = match current_theme_snapshot() {
+        Ok(parsed) => parsed,
         Err(error) => {
             // Auto Dark Mode's light path: without a theme file to patch,
             // a broadcast refresh still nudges DWM (its "Standard" level).
@@ -47,8 +49,16 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
     let original_dwm =
         read_registry_dword("Software\\Microsoft\\Windows\\DWM", "ColorizationColor");
     let patched = patch_theme_file(&snapshot, apps_light, system_light, accent);
-    let path = write_refresh_theme(&patched)?;
-    let applied = session.apply(&path.to_string_lossy());
+    let path = write_refresh_theme(&patched, encoding)?;
+    // Apply with every mutable section ignored, the way Auto Dark Mode's
+    // DwmRefreshHandler does: wallpaper, cursors, sounds and screensavers
+    // stay untouched — the legacy flag-less ApplyTheme would reset them to
+    // whatever the theme file happened to store.
+    let applied = session.add_and_select(
+        &path.to_string_lossy(),
+        crate::theme_com::IGNORE_MUTABLE_SECTIONS,
+        crate::theme_com::PACK_SILENT,
+    );
     if applied.is_ok() {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
@@ -82,10 +92,10 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
     } else {
         Err(io::Error::other(errors.join("; ")))
     };
-    // The helper theme was only the vehicle for the COM apply/restore round
-    // trip; remove it so it does not linger in the personalization list.
-    // Best effort: a locked file is overwritten by the next repair anyway.
-    let _ = std::fs::remove_file(&path);
+    // The helper theme file stays put: the apply registers it in the theme
+    // list, and deleting the file would leave a ghost entry (Auto Dark Mode
+    // keeps its DwmRefreshTheme for the same reason). The next repair
+    // overwrites it with a fresh ThemeId.
     result
 }
 
@@ -111,7 +121,7 @@ fn themes_dir() -> io::Result<PathBuf> {
     Ok(local.join("Microsoft\\Windows\\Themes"))
 }
 
-fn current_theme_snapshot() -> io::Result<String> {
+fn current_theme_snapshot() -> io::Result<(String, ThemeEncoding)> {
     let mut candidates = Vec::new();
     if let Some(path) = read_registry_string(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Themes",
@@ -126,11 +136,11 @@ fn current_theme_snapshot() -> io::Result<String> {
             .to_string(),
     );
     for path in &candidates {
-        if let Ok(text) = read_theme_snapshot(path)
+        if let Ok((text, encoding)) = read_theme_snapshot(path)
             && has_section(&text, "Theme")
             && has_section(&text, "VisualStyles")
         {
-            return Ok(text);
+            return Ok((text, encoding));
         }
     }
     Err(io::Error::other(
@@ -139,7 +149,43 @@ fn current_theme_snapshot() -> io::Result<String> {
     ))
 }
 
-fn read_theme_snapshot(path: &str) -> io::Result<String> {
+/// The .theme encodings we round-trip. Windows writes UTF-16LE; UTF-8/ANSI
+/// sources stay byte-compatible with the ASCII-only lines we patch in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ThemeEncoding {
+    Utf16,
+    Utf8,
+}
+
+/// Sharing (32) and lock (33) violations are the transient theme-file locks
+/// worth waiting out; consts because `matches!` patterns take no arithmetic.
+const SHARING_VIOLATION: i32 = ERROR_SHARING_VIOLATION.0 as i32;
+const LOCK_VIOLATION: i32 = ERROR_LOCK_VIOLATION.0 as i32;
+
+/// Reads a theme file, waiting out transient locks: themeui can hold the
+/// file briefly while applying themes (Auto Dark Mode reads with the same
+/// retry budget). Missing or malformed candidates fail fast instead.
+fn read_theme_snapshot(path: &str) -> io::Result<(String, ThemeEncoding)> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match read_theme_file(path) {
+            Ok(parsed) => return Ok(parsed),
+            Err(error) => {
+                let transient = matches!(
+                    error.raw_os_error(),
+                    Some(SHARING_VIOLATION | LOCK_VIOLATION)
+                );
+                if !transient || attempt >= 5 {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+    }
+}
+
+fn read_theme_file(path: &str) -> io::Result<(String, ThemeEncoding)> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -148,22 +194,27 @@ fn read_theme_snapshot(path: &str) -> io::Result<String> {
     if bytes.len() > 1 << 20 {
         return Err(io::Error::other("theme snapshot exceeds the size limit"));
     }
+    decode_theme_bytes(&bytes).ok_or_else(|| io::Error::other("unsupported theme file encoding"))
+}
+
+fn decode_theme_bytes(bytes: &[u8]) -> Option<(String, ThemeEncoding)> {
     if bytes.starts_with(&[0xff, 0xfe]) {
         if !bytes.len().is_multiple_of(2) {
-            return Err(io::Error::other("incomplete UTF-16 theme"));
+            return None;
         }
-        let text: Vec<u16> = bytes[2..]
+        let units: Vec<u16> = bytes[2..]
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|b| u16::from_le_bytes(*b))
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
-        String::from_utf16(&text).map_err(io::Error::other)
-    } else {
-        String::from_utf8(bytes)
-            .map(|s| s.trim_start_matches('\u{feff}').to_string())
-            .map_err(io::Error::other)
+        return Some((String::from_utf16(&units).ok()?, ThemeEncoding::Utf16));
     }
+    let text = String::from_utf8(bytes.to_vec())
+        .ok()?
+        .trim_start_matches('\u{feff}')
+        .to_string();
+    Some((text, ThemeEncoding::Utf8))
 }
 
 fn has_section(text: &str, section: &str) -> bool {
@@ -340,12 +391,26 @@ fn pseudo_guid_upper() -> String {
     )
 }
 
-fn write_refresh_theme(content: &str) -> io::Result<PathBuf> {
+fn write_refresh_theme(content: &str, encoding: ThemeEncoding) -> io::Result<PathBuf> {
     let dir = themes_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("IdleTriggerDwmRefresh.theme");
-    std::fs::write(&path, content)?;
+    std::fs::write(&path, theme_bytes_for(content, encoding))?;
     Ok(path)
+}
+
+/// Serializes in the source encoding: themeui re-reads this file, and a
+/// UTF-16LE theme must not come back as UTF-8 — non-ASCII paths (localized
+/// user names, wallpaper folders) would mangle when re-read as ANSI.
+fn theme_bytes_for(content: &str, encoding: ThemeEncoding) -> Vec<u8> {
+    match encoding {
+        ThemeEncoding::Utf16 => {
+            let mut bytes = vec![0xff, 0xfe];
+            bytes.extend(content.encode_utf16().flat_map(|unit| unit.to_le_bytes()));
+            bytes
+        }
+        ThemeEncoding::Utf8 => content.as_bytes().to_vec(),
+    }
 }
 
 /// Nudges `HKCU\...\DWM\ColorizationColor` by ±1: the signal that makes
@@ -454,5 +519,21 @@ mod tests {
         assert!(!visual.contains("DisplayName="));
         assert!(!theme_mode(&patched, "AppMode"));
         assert!(theme_mode(&patched, "SystemMode"));
+    }
+    #[test]
+    fn theme_bytes_round_trip_preserves_the_source_encoding() {
+        let content = "[Theme]\r\nDisplayName=壁纸 Wallpaper\r\n";
+        let utf16 = theme_bytes_for(content, ThemeEncoding::Utf16);
+        assert_eq!(&utf16[..2], &[0xff, 0xfe]);
+        assert_eq!(
+            decode_theme_bytes(&utf16),
+            Some((content.to_string(), ThemeEncoding::Utf16))
+        );
+        assert_eq!(
+            decode_theme_bytes(&theme_bytes_for(content, ThemeEncoding::Utf8)),
+            Some((content.to_string(), ThemeEncoding::Utf8))
+        );
+        // A UTF-16 body with an odd trailing byte is rejected, not guessed.
+        assert!(decode_theme_bytes(&[0xff, 0xfe, 0x41]).is_none());
     }
 }

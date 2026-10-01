@@ -376,8 +376,51 @@ fn apply_windows_theme(dark: bool) -> Result<(), String> {
                 }
             },
         );
+        if result.is_ok() && !dark {
+            // Light mode washes the taskbar accent away; forcing the stored
+            // ColorPrevalence off keeps the Personalization state in sync
+            // (Auto Dark Mode's SystemSwitch does the same). Best effort:
+            // a failure never rolls back the theme switch itself.
+            if let Err(error) = disable_taskbar_accent_in_light(hkey) {
+                crate::log_line(&format!("disable taskbar accent in light failed: {error}"));
+            }
+        }
         let _ = RegCloseKey(hkey);
         result
+    }
+}
+
+/// Clears `ColorPrevalence == 1` (accent color on Start/taskbar); any other
+/// value, including a missing one, stays untouched.
+fn disable_taskbar_accent_in_light(hkey: HKEY) -> Result<(), String> {
+    unsafe {
+        let name = wide("ColorPrevalence");
+        let mut value = 0u32;
+        let mut kind = REG_DWORD;
+        let mut size = 4;
+        let status = windows::Win32::System::Registry::RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut kind),
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        );
+        if status != ERROR_SUCCESS || kind != REG_DWORD || size != 4 || value != 1 {
+            return Ok(());
+        }
+        let status = RegSetValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            REG_DWORD,
+            Some(&0u32.to_le_bytes()),
+        );
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("write Personalize ColorPrevalence: {}", status.0))
+        }
     }
 }
 
@@ -555,7 +598,11 @@ pub fn spawn() {
                                 );
                             }
                         } else {
-                            notify_theme();
+                            // Manual switches need the same broadcast set the
+                            // scheduled path ends with: without WM_THEMECHANGED
+                            // the Win11 22H2+ taskbar can miss the change
+                            // (Auto Dark Mode issue #901).
+                            crate::theme_repair::notify_theme_changed();
                         }
                     }
                     tick();
