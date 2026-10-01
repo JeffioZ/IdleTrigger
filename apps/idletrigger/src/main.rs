@@ -40,14 +40,15 @@ use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, FindWindowW, GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
-    LoadIconW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    DispatchMessageW, FindWindowW, GetDlgCtrlID, GetDlgItem, GetMessageW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW, IDC_HAND,
+    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetCursor,
+    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -80,18 +81,16 @@ const IDC_THEME_SNOOZE_30M: usize = 156;
 const IDC_THEME_SNOOZE_1H: usize = 157;
 const IDC_THEME_SNOOZE_MORNING: usize = 158;
 const IDC_THEME_SNOOZE_CANCEL: usize = 159;
-/// "Off" segment of the power strategy segmented control.
-const IDC_POWER_NONE: usize = 160;
 const IDC_EXIT_BUTTON: usize = 140;
 const IDC_WARN_TEXT: usize = 130;
 const IDC_WARN_CANCEL: usize = 131;
 
 // Owner-drawn static ranges: 201-209 section headers, 211-219 subtitles,
-// 220 the footer hairline, 221-229 plain row labels.
+// 221-229 plain row labels, 230-239 section card backgrounds.
 const STATIC_SECTION_BASE: usize = 201;
 const STATIC_SUBTITLE_BASE: usize = 211;
-const IDC_FOOTER_RULE: usize = 220;
 const IDC_ROW_LABEL_BASE: usize = 221;
+const IDC_CARD_BASE: usize = 230;
 
 // Fonts retained for WM_DRAWITEM painting (Go keeps them on the panel).
 
@@ -122,19 +121,25 @@ fn panel_font_status() -> HFONT {
     make_font(12, 400)
 }
 
-// Layout tokens (96-DPI logical pixels). One row grammar per section: a
-// small group label, then rows that each hold exactly one control (segmented
-// control, right-aligned switch, or an equal-split chip strip), then a
-// status line whose right slot belongs to action links. Sections separate by
-// whitespace; only the footer gets a hairline.
+// Layout tokens (96-DPI logical pixels). One rounded card per feature
+// section: group label, single-control rows, and a status line on the card
+// face; section actions sit at the right end of the header row. A bare
+// button row closes the panel — the cards separate it, no hairline needed.
 const PANEL_CLIENT_WIDTH: i32 = 486;
-// Exact flow: pad18 + (18+6 + 36+6 + 28+6 + 20) + 18 + (18+6 + 36+6 + 20)
-// + 18 + (18+6 + 36+6 + 28+6 + 20) + 18 + (1+12 + 36) + pad18 = 465.
-const PANEL_CLIENT_HEIGHT: i32 = 465;
-const PAD: i32 = 18;
+// Exact flow: pad12 + (title 18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
+// + (18 + 4 + card(8 + 36+6 + 20 + 8)) + 10
+// + (18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10 + 36 + pad12 = 458.
+const PANEL_CLIENT_HEIGHT: i32 = 458;
+const PAD: i32 = 12;
 const GAP: i32 = 8;
-const SECTION_GAP: i32 = 18;
+/// Vertical space between section cards.
+const CARD_GAP: i32 = 10;
+/// Card face inset: rows sit this far inside the card's rounded border.
+const CARD_PAD_X: i32 = 12;
+const CARD_PAD_Y: i32 = 8;
 const LABEL_GAP: i32 = 6;
+/// Gap between the outside title row and the top of its card.
+const TITLE_GAP: i32 = 4;
 const SECTION_H: i32 = 18;
 const SUBTITLE_H: i32 = 20;
 const BUTTON_H: i32 = 36;
@@ -143,16 +148,9 @@ const BUTTON_H: i32 = 36;
 const CHIP_H: i32 = 28;
 /// Hit column reserved at a row's right edge for a pill switch.
 const SWITCH_HIT_W: i32 = 60;
-/// Fixed width of an action link slot on a section header row.
-const LINK_W: i32 = 64;
-/// Links paint inside the 18px header row but their hit area extends to a
-/// comfortable target height (the extra band only fills background).
-const LINK_HIT_H: i32 = 24;
-/// Segments sit closer than ordinary controls so the trio reads as one
-/// segmented group with groove dividers, not three buttons.
-const SEGMENT_GAP: i32 = 3;
-/// Gap between the footer hairline and the navigation buttons.
-const FOOTER_GAP: i32 = 12;
+/// Header action links wrap their text exactly — hit and display boxes
+/// coincide, so centering the box centers the text.
+const LINK_BOX_H: i32 = 20;
 
 // Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
@@ -379,7 +377,10 @@ fn refresh_language() {
         (STATIC_SECTION_BASE, "menu_power_management"),
         (STATIC_SECTION_BASE + 1, "menu_automation_section"),
         (STATIC_SECTION_BASE + 2, "menu_theme_switch"),
-        (IDC_POWER_NONE, "power_mode_off"),
+        (IDC_ROW_LABEL_BASE + 2, "power_nosleep"),
+        (IDC_ROW_LABEL_BASE + 3, "power_idle"),
+        // Switch controls carry the same text as their row labels for
+        // screen readers (their painter draws geometry only).
         (IDC_NOSLEEP, "power_nosleep"),
         (IDC_IDLE, "power_idle"),
         (IDC_NOSLEEP_TIMED_30M, "chip_timed_30m"),
@@ -408,6 +409,7 @@ fn refresh_language() {
     let theme_chip =
         unsafe { GetDlgItem(Some(panel), IDC_THEME_SWITCH as i32) }.unwrap_or_default();
     set_control_text(theme_chip, &theme_switch_chip_label());
+    layout_header_links(panel);
     // The tray menu is rebuilt at popup time, so language changes apply on
     // the next right click without any explicit rebuild here.
     settings_ui::refresh_language();
@@ -942,14 +944,11 @@ fn invalidate_control(id: usize) {
     }
 }
 
-/// Semantic on/off state for the owner-drawn toggles (Go p.toggles). The
-/// segmented "Off" control is active only when neither power strategy is
-/// enabled in the saved config.
+/// Semantic on/off state for the owner-drawn toggles (Go p.toggles).
 fn toggle_value(id: usize) -> bool {
     match id {
         IDC_NOSLEEP => cfg_map(|c| c.nosleep_enabled),
         IDC_IDLE => cfg_map(|c| c.idle_enabled),
-        IDC_POWER_NONE => cfg_map(|c| !c.nosleep_enabled && !c.idle_enabled),
         IDC_AUTOMATION => cfg_map(|c| c.automation_enabled),
         IDC_THEME_ENABLE => cfg_map(|c| c.theme_switch_enabled),
         _ => false,
@@ -979,32 +978,28 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             draw_section_static(dc, bounds, &label, p, scale);
         } else if (STATIC_SUBTITLE_BASE..STATIC_SUBTITLE_BASE + 9).contains(&id) {
             draw_subtitle_static(dc, bounds, &label, p);
-        } else if id == IDC_FOOTER_RULE {
-            paint::fill_rect(dc, bounds, p.subtle_border);
-        } else if (IDC_ROW_LABEL_BASE..IDC_ROW_LABEL_BASE + 9).contains(&id) {
-            paint::draw_row_label(dc, bounds, panel_font_body(), &label, p, p.window_bg);
-        } else if matches!(id, IDC_POWER_NONE | IDC_NOSLEEP | IDC_IDLE) {
-            // Power strategy segments: one etched group with a moving
-            // accent highlight (paint::draw_segment).
-            let mut state = nativeform::control_state(item.control, item.state);
-            state.active = toggle_value(id);
-            accessibility::check(item.control, state.active);
-            paint::draw_segment(
+        } else if (IDC_CARD_BASE..IDC_CARD_BASE + 9).contains(&id) {
+            // Section card face: the rounded surface that groups its rows.
+            paint::draw_surface(
                 dc,
                 bounds,
-                panel_font_body(),
-                &label,
-                p,
                 p.window_bg,
-                state,
+                p.surface,
+                p.subtle_border,
                 paint::control_radius(),
             );
-        } else if matches!(id, IDC_AUTOMATION | IDC_THEME_ENABLE) {
+        } else if (IDC_ROW_LABEL_BASE..IDC_ROW_LABEL_BASE + 9).contains(&id) {
+            paint::draw_row_label(dc, bounds, panel_font_body(), &label, p, p.surface);
+        } else if matches!(
+            id,
+            IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION | IDC_THEME_ENABLE
+        ) {
+            // Right-aligned pill switches for label-left rows.
             // Right-aligned pill switches for label-left rows.
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
             accessibility::check(item.control, state.active);
-            paint::draw_switch(dc, bounds, p, p.window_bg, state, scale);
+            paint::draw_switch(dc, bounds, p, p.surface, state, scale);
         } else if id == IDC_EXIT_BUTTON {
             draw_exit_button(item, dc, bounds, &label, p, scale);
         } else if is_chip_id(id) {
@@ -1018,7 +1013,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
                 panel_font_body(),
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 paint::control_radius(),
                 false,
@@ -1033,7 +1028,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
                 panel_font_body(),
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 paint::control_radius(),
                 true,
@@ -1133,7 +1128,7 @@ unsafe fn draw_section_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::Pa
 unsafe fn draw_subtitle_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::Palette) {
     use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Graphics::Gdi as gdi;
-    paint::fill_rect(dc, bounds, p.window_bg);
+    paint::fill_rect(dc, bounds, p.surface);
     if label.is_empty() {
         return;
     }
@@ -1230,21 +1225,41 @@ unsafe extern "system" fn panel_proc(
                 let _ = ShowWindow(hwnd_, SW_HIDE);
                 LRESULT(0)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR => {
+                // Link-styled controls advertise clickability with the hand
+                // cursor; children forward WM_SETCURSOR here.
+                let child = HWND(wparam.0 as *mut core::ffi::c_void);
+                let id = GetDlgCtrlID(child);
+                if id != 0
+                    && is_link_id(id.unsigned_abs() as usize)
+                    && let Ok(hand) = LoadCursorW(None, IDC_HAND)
+                {
+                    let _ = SetCursor(Some(hand));
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd_, msg, wparam, lparam)
+                }
+            }
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
                 if matches!(code, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
                     on_toggle(code);
-                    // Owner-drawn toggles need a repaint after the state flip.
+                    // Owner-drawn toggles need a repaint after the state
+                    // flip; the mutual-exclusion twin flips too.
                     invalidate_control(code);
-                    invalidate_control(IDC_POWER_NONE);
-                } else if code == IDC_POWER_NONE {
-                    on_power_none_segment();
+                    invalidate_control(if code == IDC_NOSLEEP {
+                        IDC_IDLE
+                    } else if code == IDC_IDLE {
+                        IDC_NOSLEEP
+                    } else {
+                        code
+                    });
                 } else if matches!(
                     code,
                     IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
                 ) {
                     // Clicking the armed preset again cancels the overlay —
-                    // the same affordance the status-line link offers.
+                    // the same affordance the header cancel link offers.
                     if TIMED_ARMED_CHIP.load(Ordering::SeqCst) == code {
                         clear_timed_nosleep();
                     } else {
@@ -1276,12 +1291,15 @@ unsafe extern "system" fn panel_proc(
                     theme_engine::manual_switch();
                 } else if code == IDC_THEME_REPAIR {
                     theme_engine::repair();
+                    // Surface the "repairing…" state right away: the DWM
+                    // round plus its broadcasts take seconds to finish.
+                    refresh_status();
                 } else if matches!(
                     code,
                     IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
                 ) {
                     // Clicking the armed snooze again cancels it, mirroring
-                    // the status-line link.
+                    // the header cancel link.
                     if SNOOZE_ARMED_CHIP.load(Ordering::SeqCst) == code {
                         theme_engine::snooze_cancel();
                     } else {
@@ -1593,14 +1611,33 @@ fn create_windows() {
         theme::apply_to_window(panel);
         set_window_icons(panel, instance);
 
-        // Vertical flow: one row grammar per section — a group label, then
-        // rows that each hold exactly one control, then a status line.
-        // Section actions sit at the right end of the header row; only the
-        // footer gets a hairline.
-        let row_width = PANEL_CLIENT_WIDTH - 2 * PAD; // 450
-        let seg_w = (row_width - 2 * SEGMENT_GAP) / 3; // 148
+        // Vertical flow: one rounded card per feature section (Win11
+        // settings grouping) with its title OUTSIDE the card — the title's
+        // left edge and the links' right edge ride the card's border axes.
+        // The card static is created before its rows so the rows stay above
+        // it; statics are click-transparent either way.
+        let card_w = PANEL_CLIENT_WIDTH - 2 * PAD; // 462
+        let row_x = PAD + CARD_PAD_X;
+        let row_width = card_w - 2 * CARD_PAD_X; // 438
         let mut y = PAD;
+        let card_height = |rows: i32| 2 * CARD_PAD_Y + rows;
+        let make_card = |id: usize, top: i32, height: i32| {
+            owner_static(
+                &ControlSpec {
+                    parent: panel,
+                    label: String::new(),
+                    x: scale(PAD),
+                    y: scale(top),
+                    width: scale(card_w),
+                    id,
+                    instance,
+                    font,
+                },
+                scale(height),
+            )
+        };
 
+        // ---- 电源管理 ----
         section_header(
             panel,
             &t("menu_power_management"),
@@ -1609,59 +1646,83 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
-        // Section actions live at the right end of the group-label row
-        // (the standard "header + action" pattern); the timed cancel link
-        // occupies a fixed slot that stays hidden until something is armed.
+        HEADER_LINK_ROWS[0].store(scale(y) as isize, Ordering::SeqCst);
+        // Section actions share the outside title line, right-aligned to
+        // the card's right border (the standard "header + action" pattern);
+        // the timed cancel link occupies a fixed slot that stays hidden
+        // until something is armed.
         let timed_cancel = owner_button(
             &ControlSpec {
                 parent: panel,
                 label: t("menu_nosleep_timed_cancel"),
-                x: scale(PAD + row_width - LINK_W),
-                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
-                width: scale(LINK_W),
+                x: 0,
+                y: 0,
+                width: scale(4),
                 id: IDC_NOSLEEP_TIMED_CANCEL,
                 instance,
                 font: subtitle_font,
             },
-            scale(LINK_HIT_H),
+            scale(LINK_BOX_H),
         );
         BTN_NOSLEEP_TIMED_CANCEL.store(timed_cancel.0 as isize, Ordering::SeqCst);
         if timed_nosleep_state().is_none() {
             let _ = ShowWindow(timed_cancel, SW_HIDE);
         }
-        y += SECTION_H + LABEL_GAP;
-        // Power strategy segmented control: Stay Awake and Idle Monitoring
-        // are mutually exclusive in the saved config (on_toggle forces the
-        // other off), so the segments make that radio semantics visible.
-        // Clicking the selected segment clears it, like the old checkbox.
-        for (index, (id, key)) in [
-            (IDC_POWER_NONE, "power_mode_off"),
-            (IDC_NOSLEEP, "power_nosleep"),
-            (IDC_IDLE, "power_idle"),
+        y += SECTION_H + TITLE_GAP;
+        make_card(
+            IDC_CARD_BASE,
+            y,
+            card_height(BUTTON_H + LABEL_GAP + CHIP_H + LABEL_GAP + SUBTITLE_H),
+        );
+        let mut row = y + CARD_PAD_Y;
+        // Two label+switch groups share the row: Stay Awake and Idle
+        // Monitoring are mutually exclusive in the saved config (on_toggle
+        // forces the other off), so enabling one visibly flips the other
+        // switch off — the same live-feedback pattern the status line
+        // explains.
+        let half_w = (row_width - GAP) / 2; // 215
+        let label_w = half_w - SWITCH_HIT_W - GAP; // 147
+        for (index, (label_id, switch_id, key)) in [
+            (IDC_ROW_LABEL_BASE + 2, IDC_NOSLEEP, "power_nosleep"),
+            (IDC_ROW_LABEL_BASE + 3, IDC_IDLE, "power_idle"),
         ]
         .into_iter()
         .enumerate()
         {
-            let segment = owner_button(
+            let group_x = row_x + index as i32 * (half_w + GAP);
+            owner_static(
                 &ControlSpec {
                     parent: panel,
                     label: t(key),
-                    x: scale(PAD + index as i32 * (seg_w + SEGMENT_GAP)),
-                    y: scale(y),
-                    width: scale(seg_w),
-                    id,
+                    x: scale(group_x),
+                    y: scale(row),
+                    width: scale(label_w),
+                    id: label_id,
                     instance,
                     font,
                 },
                 scale(BUTTON_H),
             );
-            match id {
-                IDC_NOSLEEP => CHK_NOSLEEP.store(segment.0 as isize, Ordering::SeqCst),
-                IDC_IDLE => CHK_IDLE.store(segment.0 as isize, Ordering::SeqCst),
-                _ => {}
+            // The switch's window text is its accessible name.
+            let switch = owner_button(
+                &ControlSpec {
+                    parent: panel,
+                    label: t(key),
+                    x: scale(group_x + label_w + GAP),
+                    y: scale(row),
+                    width: scale(SWITCH_HIT_W),
+                    id: switch_id,
+                    instance,
+                    font,
+                },
+                scale(BUTTON_H),
+            );
+            match switch_id {
+                IDC_NOSLEEP => CHK_NOSLEEP.store(switch.0 as isize, Ordering::SeqCst),
+                _ => CHK_IDLE.store(switch.0 as isize, Ordering::SeqCst),
             }
         }
-        y += BUTTON_H + LABEL_GAP;
+        row += BUTTON_H + LABEL_GAP;
         // Timed stay-awake preset chips: one click arms the runtime overlay
         // (set_timed_nosleep) without touching the saved switches. The strip
         // splits the full row so its right edge aligns with the segments
@@ -1679,8 +1740,8 @@ fn create_windows() {
                 &ControlSpec {
                     parent: panel,
                     label: t(key),
-                    x: scale(PAD + slot_x),
-                    y: scale(y),
+                    x: scale(row_x + slot_x),
+                    y: scale(row),
                     width: scale(slot_w),
                     id,
                     instance,
@@ -1689,23 +1750,24 @@ fn create_windows() {
                 scale(CHIP_H),
             );
         }
-        y += CHIP_H + LABEL_GAP;
+        row += CHIP_H + LABEL_GAP;
         let power_summary = owner_static(
             &ControlSpec {
                 parent: panel,
                 label: String::new(),
-                x: scale(PAD),
-                y: scale(y),
+                x: scale(row_x),
+                y: scale(row),
                 width: scale(row_width),
                 id: IDC_POWER_SUMMARY,
                 instance,
-                font: subtitle_font,
+                font: panel_font_status(),
             },
             scale(SUBTITLE_H),
         );
         LBL_POWER_SUMMARY.store(power_summary.0 as isize, Ordering::SeqCst);
-        y += SUBTITLE_H + SECTION_GAP;
+        y += card_height(BUTTON_H + LABEL_GAP + CHIP_H + LABEL_GAP + SUBTITLE_H) + CARD_GAP;
 
+        // ---- 自动任务 ----
         section_header(
             panel,
             &t("menu_automation_section"),
@@ -1714,27 +1776,34 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
+        HEADER_LINK_ROWS[1].store(scale(y) as isize, Ordering::SeqCst);
         owner_button(
             &ControlSpec {
                 parent: panel,
                 label: t("panel_manage_link"),
-                x: scale(PAD + row_width - LINK_W),
-                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
-                width: scale(LINK_W),
+                x: 0,
+                y: 0,
+                width: scale(4),
                 id: IDC_MANAGE_BUTTON,
                 instance,
                 font: subtitle_font,
             },
-            scale(LINK_HIT_H),
+            scale(LINK_BOX_H),
         );
-        y += SECTION_H + LABEL_GAP;
+        y += SECTION_H + TITLE_GAP;
+        make_card(
+            IDC_CARD_BASE + 1,
+            y,
+            card_height(BUTTON_H + LABEL_GAP + SUBTITLE_H),
+        );
+        let mut row = y + CARD_PAD_Y;
         // Label-left row with a right-aligned pill switch.
         owner_static(
             &ControlSpec {
                 parent: panel,
                 label: t("automation_master"),
-                x: scale(PAD),
-                y: scale(y),
+                x: scale(row_x),
+                y: scale(row),
                 width: scale(row_width - SWITCH_HIT_W - GAP),
                 id: IDC_ROW_LABEL_BASE,
                 instance,
@@ -1748,8 +1817,8 @@ fn create_windows() {
             &ControlSpec {
                 parent: panel,
                 label: t("automation_master"),
-                x: scale(PAD + row_width - SWITCH_HIT_W),
-                y: scale(y),
+                x: scale(row_x + row_width - SWITCH_HIT_W),
+                y: scale(row),
                 width: scale(SWITCH_HIT_W),
                 id: IDC_AUTOMATION,
                 instance,
@@ -1758,23 +1827,24 @@ fn create_windows() {
             scale(BUTTON_H),
         );
         CHK_AUTOMATION.store(chk_automation.0 as isize, Ordering::SeqCst);
-        y += BUTTON_H + LABEL_GAP;
+        row += BUTTON_H + LABEL_GAP;
         let automation_summary = owner_static(
             &ControlSpec {
                 parent: panel,
                 label: String::new(),
-                x: scale(PAD),
-                y: scale(y),
+                x: scale(row_x),
+                y: scale(row),
                 width: scale(row_width),
                 id: IDC_AUTOMATION_SUMMARY,
                 instance,
-                font: subtitle_font,
+                font: panel_font_status(),
             },
             scale(SUBTITLE_H),
         );
         LBL_AUTOMATION_SUMMARY.store(automation_summary.0 as isize, Ordering::SeqCst);
-        y += SUBTITLE_H + SECTION_GAP;
+        y += card_height(BUTTON_H + LABEL_GAP + SUBTITLE_H) + CARD_GAP;
 
+        // ---- 昼夜模式 ----
         section_header(
             panel,
             &t("menu_theme_switch"),
@@ -1783,18 +1853,19 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
+        HEADER_LINK_ROWS[2].store(scale(y) as isize, Ordering::SeqCst);
         let snooze_cancel = owner_button(
             &ControlSpec {
                 parent: panel,
                 label: t("menu_theme_snooze_cancel"),
-                x: scale(PAD + row_width - 2 * LINK_W - GAP),
-                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
-                width: scale(LINK_W),
+                x: 0,
+                y: 0,
+                width: scale(4),
                 id: IDC_THEME_SNOOZE_CANCEL,
                 instance,
                 font: subtitle_font,
             },
-            scale(LINK_HIT_H),
+            scale(LINK_BOX_H),
         );
         BTN_THEME_SNOOZE_CANCEL.store(snooze_cancel.0 as isize, Ordering::SeqCst);
         if theme_engine::snooze_deadline().is_none() {
@@ -1804,23 +1875,29 @@ fn create_windows() {
             &ControlSpec {
                 parent: panel,
                 label: t("panel_repair_link"),
-                x: scale(PAD + row_width - LINK_W),
-                y: scale(y) + (scale(SECTION_H) - scale(LINK_HIT_H)) / 2,
-                width: scale(LINK_W),
+                x: 0,
+                y: 0,
+                width: scale(4),
                 id: IDC_THEME_REPAIR,
                 instance,
                 font: subtitle_font,
             },
-            scale(LINK_HIT_H),
+            scale(LINK_BOX_H),
         );
-        y += SECTION_H + LABEL_GAP;
+        y += SECTION_H + TITLE_GAP;
+        make_card(
+            IDC_CARD_BASE + 2,
+            y,
+            card_height(BUTTON_H + LABEL_GAP + CHIP_H + LABEL_GAP + SUBTITLE_H),
+        );
+        let mut row = y + CARD_PAD_Y;
         // Label-left row with a right-aligned pill switch.
         owner_static(
             &ControlSpec {
                 parent: panel,
                 label: t("menu_theme_enable"),
-                x: scale(PAD),
-                y: scale(y),
+                x: scale(row_x),
+                y: scale(row),
                 width: scale(row_width - SWITCH_HIT_W - GAP),
                 id: IDC_ROW_LABEL_BASE + 1,
                 instance,
@@ -1832,8 +1909,8 @@ fn create_windows() {
             &ControlSpec {
                 parent: panel,
                 label: t("menu_theme_enable"),
-                x: scale(PAD + row_width - SWITCH_HIT_W),
-                y: scale(y),
+                x: scale(row_x + row_width - SWITCH_HIT_W),
+                y: scale(row),
                 width: scale(SWITCH_HIT_W),
                 id: IDC_THEME_ENABLE,
                 instance,
@@ -1841,7 +1918,7 @@ fn create_windows() {
             },
             scale(BUTTON_H),
         );
-        y += BUTTON_H + LABEL_GAP;
+        row += BUTTON_H + LABEL_GAP;
         // The instant switch-now action shares the snooze strip; its
         // link-colored ink sets "acts immediately" apart from the deferred
         // snoozes beside it.
@@ -1859,8 +1936,8 @@ fn create_windows() {
                 &ControlSpec {
                     parent: panel,
                     label,
-                    x: scale(PAD + slot_x),
-                    y: scale(y),
+                    x: scale(row_x + slot_x),
+                    y: scale(row),
                     width: scale(slot_w),
                     id,
                     instance,
@@ -1869,40 +1946,26 @@ fn create_windows() {
                 scale(CHIP_H),
             );
         }
-        y += CHIP_H + LABEL_GAP;
+        row += CHIP_H + LABEL_GAP;
         let theme_schedule = owner_static(
             &ControlSpec {
                 parent: panel,
                 label: String::new(),
-                x: scale(PAD),
-                y: scale(y),
+                x: scale(row_x),
+                y: scale(row),
                 width: scale(row_width),
                 id: IDC_THEME_SCHEDULE,
                 instance,
-                font: subtitle_font,
+                font: panel_font_status(),
             },
             scale(SUBTITLE_H),
         );
         LBL_THEME_SCHEDULE.store(theme_schedule.0 as isize, Ordering::SeqCst);
-        y += SUBTITLE_H + SECTION_GAP;
+        y += card_height(BUTTON_H + LABEL_GAP + CHIP_H + LABEL_GAP + SUBTITLE_H) + CARD_GAP;
 
-        // Footer hairline separates navigation from the feature sections.
-        owner_static(
-            &ControlSpec {
-                parent: panel,
-                label: String::new(),
-                x: scale(PAD),
-                y: scale(y),
-                width: scale(row_width),
-                id: IDC_FOOTER_RULE,
-                instance,
-                font,
-            },
-            scale(1),
-        );
-        y += 1 + FOOTER_GAP;
+        // ---- Footer navigation (outside the cards) ----
 
-        let (footer_x, footer_w) = row_slot(row_width, 3, 0);
+        let (footer_x, footer_w) = row_slot(card_w, 3, 0);
         let system_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
@@ -1923,7 +1986,7 @@ fn create_windows() {
         let system_label = t("menu_system_controls");
         set_control_text(system_btn, &system_label);
 
-        let (footer_x, footer_w) = row_slot(row_width, 3, 1);
+        let (footer_x, footer_w) = row_slot(card_w, 3, 1);
         let settings_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
@@ -1943,7 +2006,7 @@ fn create_windows() {
         nativeform::track(settings_btn);
         let settings_label = t("settings_open");
         set_control_text(settings_btn, &settings_label);
-        let (footer_x, footer_w) = row_slot(row_width, 3, 2);
+        let (footer_x, footer_w) = row_slot(card_w, 3, 2);
         let exit_btn = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
@@ -1963,6 +2026,9 @@ fn create_windows() {
         nativeform::track(exit_btn);
         let exit_label = t("menu_exit_panel");
         set_control_text(exit_btn, &exit_label);
+
+        // Header links get their exact-fit geometry from the labels.
+        layout_header_links(panel);
 
         // Tooltips for every panel control (Go tooltips.go parity).
         tooltips::create_for_panel(panel);
@@ -2212,6 +2278,94 @@ fn row_slot(row_width: i32, count: i32, index: i32) -> (i32, i32) {
     let width = base + i32::from(index < remainder);
     let x = index * (base + GAP) + index.min(remainder);
     (x, width)
+}
+
+/// Logical pixel width of a single-line label at the given font (Go
+/// GetTextExtent-based measuring).
+fn measured_text_width(parent: HWND, font: HFONT, label: &str) -> i32 {
+    unsafe {
+        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(parent));
+        if hdc.is_invalid() {
+            return 0;
+        }
+        let old = windows::Win32::Graphics::Gdi::SelectObject(
+            hdc,
+            windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
+        );
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        let mut bounds = RECT::default();
+        let height = windows::Win32::Graphics::Gdi::DrawTextW(
+            hdc,
+            &mut text,
+            &mut bounds,
+            windows::Win32::Graphics::Gdi::DT_LEFT
+                | windows::Win32::Graphics::Gdi::DT_SINGLELINE
+                | windows::Win32::Graphics::Gdi::DT_CALCRECT,
+        );
+        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
+        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(parent), hdc);
+        if height == 0 || bounds.right <= bounds.left {
+            return 0;
+        }
+        let dpi = scale(96).max(96);
+        (bounds.right - bounds.left) * 96 / dpi
+    }
+}
+
+/// Physical y of each section's outside title row, captured at creation so
+/// the header links can be re-fitted after language swaps move their text.
+static HEADER_LINK_ROWS: [AtomicIsize; 3] = [
+    AtomicIsize::new(0),
+    AtomicIsize::new(0),
+    AtomicIsize::new(0),
+];
+
+/// Header action links wrap their text exactly (hit box == display box) and
+/// center on the switch column of the card below; the theme's snooze cancel
+/// parks in a fixed slot left of the repair link.
+fn layout_header_links(panel: HWND) {
+    let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
+    let center = PAD + card_w - CARD_PAD_X - SWITCH_HIT_W / 2;
+    let place = |id: usize, section: usize, left_of: Option<usize>| {
+        let Ok(link) = (unsafe { GetDlgItem(Some(panel), id as i32) }) else {
+            return;
+        };
+        let text = window_text(link);
+        let width = scale(measured_text_width(panel, panel_font_subtitle(), &text).max(16));
+        let x = match left_of {
+            Some(other) => {
+                let Ok(anchor) = (unsafe { GetDlgItem(Some(panel), other as i32) }) else {
+                    return;
+                };
+                let mut rect = RECT::default();
+                let _ = unsafe { GetWindowRect(anchor, &mut rect) };
+                let mut pt = windows::Win32::Foundation::POINT {
+                    x: rect.left,
+                    y: rect.top,
+                };
+                let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(panel, &mut pt) };
+                pt.x - scale(GAP) - width
+            }
+            None => scale(center) - width / 2,
+        };
+        let row = HEADER_LINK_ROWS[section].load(Ordering::SeqCst) as i32;
+        let y = row + (scale(SECTION_H) - scale(LINK_BOX_H)) / 2;
+        let _ = unsafe {
+            SetWindowPos(
+                link,
+                None,
+                x,
+                y,
+                width,
+                scale(LINK_BOX_H),
+                SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+            )
+        };
+    };
+    place(IDC_NOSLEEP_TIMED_CANCEL, 0, None);
+    place(IDC_MANAGE_BUTTON, 1, None);
+    place(IDC_THEME_REPAIR, 2, None);
+    place(IDC_THEME_SNOOZE_CANCEL, 2, Some(IDC_THEME_REPAIR));
 }
 
 fn section_header(
@@ -2743,29 +2897,6 @@ fn on_toggle(code: usize) {
     refresh_status();
 }
 
-/// The segmented control's "Off" segment: clears both power strategies.
-/// A no-op when neither is enabled (avoids a pointless disk write), and
-/// otherwise goes through the same save path, so a Stay Awake on→off
-/// transition still drops the timed overlay inside commit_config.
-fn on_power_none_segment() {
-    if !cfg_map(|c| c.nosleep_enabled || c.idle_enabled) {
-        return;
-    }
-    if let Err(err) = edit_config(|c| {
-        c.nosleep_enabled = false;
-        c.idle_enabled = false;
-    }) {
-        warn_dialog("", &err);
-        return;
-    }
-    apply_stay_awake();
-    refresh_checkboxes();
-    refresh_status();
-    for id in [IDC_POWER_NONE, IDC_NOSLEEP, IDC_IDLE] {
-        invalidate_control(id);
-    }
-}
-
 /// Go dialog.Warn: simple warning box owned by the desktop (NULL parent),
 /// titled with the app name.
 fn warn_dialog(heading: &str, body: &str) {
@@ -2896,9 +3027,6 @@ fn refresh_checkboxes() {
         cfg_map(|c| c.theme_switch_enabled),
     );
     invalidate_control(IDC_THEME_ENABLE);
-    // The segmented "Off" control has no CHK_ slot of its own; its selection
-    // tracks "neither strategy enabled".
-    invalidate_control(IDC_POWER_NONE);
 }
 
 /// Single derivation of the effective power-management state, consumed by
@@ -3148,6 +3276,12 @@ fn set_text(slot: &AtomicIsize, text: &str) {
 /// the postponed state is unmistakable; otherwise the schedule shows with
 /// its location source.
 fn theme_schedule_text() -> String {
+    // A running repair owns the line: the operation takes seconds (theme
+    // apply plus two broadcast rounds), so an instantly visible state beats
+    // a short-lived completion notice.
+    if theme_engine::repair_running() {
+        return t("theme_repair_started");
+    }
     if let Some(notice) = theme_engine::active_notice() {
         return notice;
     }
@@ -3685,6 +3819,14 @@ unsafe fn enable_shutdown_privilege() -> Result<(), String> {
 
 /// Native popup menu anchored to the system-controls button; selections run
 /// immediately like the Go quick-actions popup.
+/// Devtools helper: opens the system quick-actions popup for capture.
+#[cfg(feature = "devtools")]
+pub fn devtools_open_quick_menu() {
+    unsafe {
+        show_system_controls_menu(hwnd(&PANEL));
+    }
+}
+
 unsafe fn show_system_controls_menu(owner: HWND) {
     // Go quick-actions: one owner-drawn choice popup above the button with
     // danger styling on shutdown/restart (menus.go openQuickMenu).

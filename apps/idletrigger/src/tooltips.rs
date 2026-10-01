@@ -68,7 +68,6 @@ pub fn create_for_panel(panel: HWND) {
         // segmented control, chip strips, and header action links. Status
         // statics are added after this loop with their live text.
         let tools = [
-            (crate::IDC_POWER_NONE, "tip_power_none"),
             (crate::IDC_NOSLEEP, "tip_nosleep"),
             (crate::IDC_IDLE, "tip_idle"),
             (crate::IDC_NOSLEEP_TIMED_30M, "tip_nosleep_timed_presets"),
@@ -196,9 +195,8 @@ pub fn refresh_all(panel: HWND) {
                 Some(LPARAM(width)),
             );
         }
-        const TOOL_COUNT: usize = 22;
+        const TOOL_COUNT: usize = 21;
         let tools: [(usize, TipText); TOOL_COUNT] = [
-            (crate::IDC_POWER_NONE, TipText::Key("tip_power_none")),
             (
                 crate::IDC_POWER_SUMMARY,
                 TipText::Text(crate::power_overview_verbose()),

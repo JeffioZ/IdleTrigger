@@ -292,7 +292,32 @@ pub fn handle_capture_timer() -> bool {
             );
         }
         15 => crate::automation_ui::devtools_open_trigger_choice(),
-        16 => {
+        16 => crate::choice::close(false),
+        20 => {
+            crate::choice::close(false);
+            crate::devtools_open_quick_menu();
+        }
+        21 => {
+            // A step apart: the popup paints its first frame on its own
+            // timer; shooting in the same tick grabs a blank surface.
+            let popup = crate::choice::open_popup();
+            shoot(
+                popup,
+                out_dir.join("IdleTrigger-quick-menu-capture.bmp"),
+                "system quick menu",
+            );
+            // Hover the shutdown row (4th of 5): client y ≈ 3*36+6 = 114.
+            crate::choice::devtools_hover_row(popup, 3);
+        }
+        22 => {
+            let popup = crate::choice::open_popup();
+            shoot(
+                popup,
+                out_dir.join("IdleTrigger-quick-menu-hover-capture.bmp"),
+                "system quick menu hover",
+            );
+        }
+        17 => {
             let popup = crate::choice::open_popup();
             shoot(
                 popup,
@@ -300,13 +325,13 @@ pub fn handle_capture_timer() -> bool {
                 "choice popup",
             );
         }
-        17 => {
+        18 => {
             // Close any open choice popup first (it captures mouse input
             // and would prevent the timer from firing).
             crate::choice::close(false);
             crate::automation_ui::devtools_show_picker();
         }
-        18 => {
+        19 => {
             let picker = crate::automation_ui::theme_hwnds()[2];
             shoot(
                 picker,

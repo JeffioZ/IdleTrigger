@@ -16,10 +16,11 @@ use windows::core::PCWSTR;
 use crate::paint;
 use crate::theme;
 
-// Go popup metrics: row 34, gap 1, inset 4, radius 6, max 6 visible rows.
+// Popup metrics aligned with the card panel: 34px rows with 2px gaps so
+// hover highlights never touch the neighbor row, 6px container inset.
 const ROW_H: i32 = 34;
-const ROW_GAP: i32 = 1;
-const INSET: i32 = 4;
+const ROW_GAP: i32 = 2;
+const INSET: i32 = 6;
 const MAX_VISIBLE: usize = 6;
 
 /// One popup row. Headers are non-selectable group labels (Go header items
@@ -549,6 +550,18 @@ fn detach_popup(popup: HWND) {
             let _ = InvalidateRect(Some(HWND(button as *mut _)), None, false);
         }
     }
+}
+
+/// Devtools probe: sets the popup hover to `index` and repaints.
+#[cfg(feature = "devtools")]
+pub fn devtools_hover_row(popup: HWND, index: i32) {
+    let button = OPEN_BUTTON.load(Ordering::SeqCst);
+    if let Some(map) = choices().as_mut()
+        && let Some(data) = map.get_mut(&button)
+    {
+        data.hover = index;
+    }
+    let _ = unsafe { InvalidateRect(Some(popup), None, false) };
 }
 
 /// The popup window currently open, if any.

@@ -47,8 +47,8 @@ pub fn set_visible_deferred(control: HWND, visible: bool) {
 
 #[derive(Clone, Copy, Default)]
 pub struct InteractionState {
-    hovered: bool,
-    focused: bool,
+    pub(crate) hovered: bool,
+    pub(crate) focused: bool,
 }
 
 struct Tracked {

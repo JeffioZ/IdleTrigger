@@ -98,6 +98,8 @@ fn from_colors(
         tooltip_bg: tip_bg,
         tooltip_text: tip_text,
         switch_track: frame,
+        switch_track_hover: selected,
+        switch_track_on_hover: selected,
     }
 }
 

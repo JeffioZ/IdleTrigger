@@ -1432,6 +1432,11 @@ pub fn finish_manual_switch() {
 static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
 static REPAIR_RESULT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
 
+/// Whether a manual repair thread is currently in flight.
+pub fn repair_running() -> bool {
+    REPAIR_RUNNING.load(Ordering::SeqCst)
+}
+
 pub fn repair() {
     if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
         return;

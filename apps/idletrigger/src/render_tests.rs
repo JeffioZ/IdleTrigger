@@ -287,19 +287,21 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
         } else {
             controls = Some(current);
         }
-        // Final rendered background of the actual checkbox and static text
+        // Final rendered background of the actual controls and static text
         // must use the new palette; sample a margin outside their glyphs.
-        for id in [IDC_NOSLEEP, STATIC_SECTION_BASE, STATIC_SUBTITLE_BASE] {
+        // Card rows sit on the section card face; the section title lives
+        // outside its card on the window background.
+        for (id, expected) in [
+            (IDC_NOSLEEP, theme::palette().surface),
+            (STATIC_SUBTITLE_BASE, theme::palette().surface),
+            (STATIC_SECTION_BASE, theme::bg_color()),
+        ] {
             let control = unsafe { GetDlgItem(Some(panel), id as i32) }.unwrap();
             unsafe {
                 let dc = GetDC(Some(control));
                 let pixel = GetPixel(dc, 0, 0);
                 let _ = ReleaseDC(Some(control), dc);
-                assert_eq!(
-                    pixel.0,
-                    theme::bg_color(),
-                    "control {id} has a stale background"
-                );
+                assert_eq!(pixel.0, expected, "control {id} has a stale background");
             }
         }
         for id in [STATIC_SECTION_BASE, STATIC_SUBTITLE_BASE] {
@@ -646,10 +648,86 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                     p.accent_text,
                     "off: thumb ink at {scale}/{dark}"
                 );
+                // No thumb ink outside the circle: a square pre-fill (or
+                // its corner dots poking past the pill track) leaves ink
+                // farther from the thumb center than its radius.
+                let track_top = (height - track_h) / 2;
+                let cx = track_left + inset + thumb_d / 2;
+                let cy = track_top + inset + thumb_d / 2;
+                let radius = thumb_d / 2;
+                for y in (track_top + inset - 1)..=(track_top + inset + thumb_d + 1) {
+                    for x in (track_left + inset - 1)..=(track_left + inset + thumb_d + 1) {
+                        let dx = x - cx;
+                        let dy = y - cy;
+                        assert!(
+                            !(px(x, y) == p.accent_text
+                                && dx * dx + dy * dy > (radius + 1) * (radius + 1)),
+                            "off: thumb ink outside the circle at ({x},{y}) {scale}/{dark}"
+                        );
+                    }
+                }
                 assert_eq!(
                     px(track_cx, center_y),
                     p.switch_track,
                     "off: track ink at {scale}/{dark}"
+                );
+                // Off-hover: the track tints toward the accent.
+                paint::draw_switch(
+                    dc,
+                    &bounds,
+                    p,
+                    p.surface,
+                    paint::ControlState {
+                        hovered: true,
+                        ..Default::default()
+                    },
+                    scale,
+                );
+                assert_eq!(
+                    px(track_cx, center_y),
+                    p.switch_track_hover,
+                    "off-hover: track ink at {scale}/{dark}"
+                );
+                paint::draw_switch(
+                    dc,
+                    &bounds,
+                    p,
+                    p.surface,
+                    paint::ControlState {
+                        active: true,
+                        ..Default::default()
+                    },
+                    scale,
+                );
+                assert_eq!(
+                    px(track_left + inset + thumb_d / 2, center_y),
+                    p.accent,
+                    "on: track ink again at {scale}/{dark}"
+                );
+                paint::draw_switch(
+                    dc,
+                    &bounds,
+                    p,
+                    p.surface,
+                    paint::ControlState {
+                        active: true,
+                        hovered: true,
+                        ..Default::default()
+                    },
+                    scale,
+                );
+                assert_eq!(
+                    px(track_left + inset + thumb_d / 2, center_y),
+                    p.switch_track_on_hover,
+                    "on-hover: track ink at {scale}/{dark}"
+                );
+                paint::draw_switch(
+                    dc,
+                    &bounds,
+                    p,
+                    p.surface,
+                    paint::ControlState::default(),
+                    scale,
                 );
                 // Anti-aliasing: the pill and thumb edges must pass through
                 // blended pixels — a hard-edged GDI fallback has none.
@@ -659,7 +737,11 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                 let known = |c: u32| c == p.window_bg || c == p.switch_track || c == p.accent_text;
                 let blends = |known: &dyn Fn(u32) -> bool| -> i32 {
                     let mut count = 0;
-                    for y in [center_y - 2, center_y, center_y + 2] {
+                    // A band deep into the corner arcs: the straight edges
+                    // may land on integer pixels and blend nothing even
+                    // while anti-aliasing is on, but the arcs always do.
+                    let band = (thumb_d / 4).max(2);
+                    for y in (center_y - band)..=(center_y + band) {
                         for x in (track_left - 2)..(track_left + track_w + 2) {
                             if !known(px(x, y)) {
                                 count += 1;
@@ -682,6 +764,23 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                     p.accent_text,
                     "on: thumb ink at {scale}/{dark}"
                 );
+                let track_top = (height - track_h) / 2;
+                let cx = track_left + track_w - inset - thumb_d / 2;
+                let cy = track_top + inset + thumb_d / 2;
+                let radius = thumb_d / 2;
+                for y in (track_top + inset - 1)..=(track_top + inset + thumb_d + 1) {
+                    for x in (track_left + track_w - inset - thumb_d - 1)
+                        ..=(track_left + track_w - inset + 1)
+                    {
+                        let dx = x - cx;
+                        let dy = y - cy;
+                        assert!(
+                            !(px(x, y) == p.accent_text
+                                && dx * dx + dy * dy > (radius + 1) * (radius + 1)),
+                            "on: thumb ink outside the circle at ({x},{y}) {scale}/{dark}"
+                        );
+                    }
+                }
                 assert_eq!(
                     px(track_left + inset + thumb_d / 2, center_y),
                     p.accent,
@@ -784,6 +883,17 @@ fn header_links_paint_in_the_first_visible_frame() {
             }
             let _ = ReleaseDC(Some(link), dc);
         }
+        // Link-styled controls show the hand cursor: forwarding a child's
+        // WM_SETCURSOR to the panel must install IDC_HAND.
+        let manage = GetDlgItem(Some(panel), IDC_MANAGE_BUTTON as i32).unwrap();
+        let hand = LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_HAND).unwrap();
+        let _ = SendMessageW(
+            panel,
+            windows::Win32::UI::WindowsAndMessaging::WM_SETCURSOR,
+            Some(WPARAM(manage.0 as usize)),
+            Some(LPARAM(0x0020_0001)), // HTCLIENT | WM_MOUSEMOVE
+        );
+        let cursor = windows::Win32::UI::WindowsAndMessaging::GetCursor();
         tray::remove();
         DestroyWindow(panel).unwrap();
         DestroyWindow(hwnd(&HIDDEN)).unwrap();
@@ -791,5 +901,231 @@ fn header_links_paint_in_the_first_visible_frame() {
             visible > 20,
             "header links not painted in the first frame (visible pixels: {visible})"
         );
+        assert_eq!(
+            cursor.0, hand.0,
+            "hovering a header link must set the hand cursor"
+        );
+    }
+}
+
+/// Regression: clicking the header repair link must surface visible
+/// feedback immediately. The repair itself (theme apply + two broadcast
+/// rounds) takes ~10s, and its completion notice lives for four seconds —
+/// without the instant "repairing" line the click looks dead.
+#[test]
+fn repair_link_click_surfaces_notice() {
+    const CHILD: &str = "IDLETRIGGER_TEST_REPAIR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::repair_link_click_surfaces_notice",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("repair child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "repair child failed: {status}");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(30);
+    unsafe {
+        let repair = GetDlgItem(Some(panel), IDC_THEME_REPAIR as i32).unwrap();
+        let _ = SendMessageW(repair, BM_CLICK, None, None);
+        pump(300);
+        let line = crate::status_line_text(IDC_THEME_SCHEDULE);
+        eprintln!("schedule right after click: {line:?}");
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+        assert!(
+            line.contains("正在修复") || line.contains("Repairing"),
+            "repair click gave no immediate feedback; schedule line: {line:?}"
+        );
+    }
+}
+
+/// Every interactive panel control must react visually to hover, press,
+/// disable, and keyboard focus. An unresponsive state is instantly visible
+/// to users, so each one is injected and the pixels are compared against
+/// the resting state — including the two cancel links, which are shown for
+/// the audit.
+#[test]
+fn interactive_controls_react_to_every_state() {
+    const CHILD: &str = "IDLETRIGGER_TEST_STATES_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::interactive_controls_react_to_every_state",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("states child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "states child failed: {status}");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(30);
+    unsafe {
+        // The armed-only cancel links join the audit.
+        for id in [IDC_NOSLEEP_TIMED_CANCEL, IDC_THEME_SNOOZE_CANCEL] {
+            let _ = ShowWindow(
+                GetDlgItem(Some(panel), id as i32).unwrap_or_default(),
+                SW_SHOW,
+            );
+        }
+        pump(10);
+    }
+    let ids = [
+        IDC_NOSLEEP,
+        IDC_IDLE,
+        IDC_NOSLEEP_TIMED_30M,
+        IDC_NOSLEEP_TIMED_1H,
+        IDC_NOSLEEP_TIMED_2H,
+        IDC_AUTOMATION,
+        IDC_MANAGE_BUTTON,
+        IDC_THEME_ENABLE,
+        IDC_THEME_SWITCH,
+        IDC_THEME_SNOOZE_30M,
+        IDC_THEME_SNOOZE_1H,
+        IDC_THEME_SNOOZE_MORNING,
+        IDC_THEME_REPAIR,
+        IDC_NOSLEEP_TIMED_CANCEL,
+        IDC_THEME_SNOOZE_CANCEL,
+        IDC_SYSTEM_BUTTON,
+        IDC_SETTINGS_BUTTON,
+        IDC_EXIT_BUTTON,
+    ];
+    unsafe {
+        // Hash a control's pixels (every other pixel keeps this fast).
+        let signature = |ctl: HWND| -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut rect = RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(ctl, &mut rect);
+            let dc = GetDC(Some(ctl));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut y = rect.top;
+            while y < rect.bottom {
+                let mut x = rect.left;
+                while x < rect.right {
+                    GetPixel(dc, x, y).0.hash(&mut hasher);
+                    x += 2;
+                }
+                y += 2;
+            }
+            let _ = ReleaseDC(Some(ctl), dc);
+            hasher.finish()
+        };
+        // UpdateWindow only: pumping after the hover message would deliver
+        // the mouseless TrackMouseEvent's immediate WM_MOUSELEAVE and clear
+        // the very state under audit.
+        let present = |ctl: HWND| {
+            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(ctl);
+        };
+        let mut failures: Vec<String> = Vec::new();
+        for id in ids {
+            let Ok(ctl) = GetDlgItem(Some(panel), id as i32) else {
+                failures.push(format!("{id}: missing"));
+                continue;
+            };
+            let rest = signature(ctl);
+            // Hover.
+            let _ = SendMessageW(
+                ctl,
+                windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE,
+                Some(WPARAM(0)),
+                Some(LPARAM(0x0014_0014)),
+            );
+            present(ctl);
+            let hover = signature(ctl);
+            let _ = SendMessageW(ctl, windows::Win32::UI::Controls::WM_MOUSELEAVE, None, None);
+            present(ctl);
+            // Pressed.
+            let _ = SendMessageW(
+                ctl,
+                windows::Win32::UI::WindowsAndMessaging::BM_SETSTATE,
+                Some(WPARAM(1)),
+                None,
+            );
+            present(ctl);
+            let pressed = signature(ctl);
+            let _ = SendMessageW(
+                ctl,
+                windows::Win32::UI::WindowsAndMessaging::BM_SETSTATE,
+                Some(WPARAM(0)),
+                None,
+            );
+            present(ctl);
+            // Disabled.
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(ctl, false);
+            present(ctl);
+            let disabled = signature(ctl);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(ctl, true);
+            present(ctl);
+            // Keyboard focus ring.
+            nativeform::keyboard_navigation();
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(ctl));
+            present(ctl);
+            let focused = signature(ctl);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(None);
+            nativeform::keyboard_navigation();
+            if rest == hover {
+                failures.push(format!("{id}: hover is a visual no-op"));
+            }
+            if rest == pressed || hover == pressed {
+                failures.push(format!("{id}: pressed does not read as its own state"));
+            }
+            if rest == disabled {
+                failures.push(format!("{id}: disabled is a visual no-op"));
+            }
+            if rest == focused {
+                failures.push(format!("{id}: keyboard focus is invisible"));
+            }
+        }
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+        assert!(failures.is_empty(), "state audit failures: {failures:?}");
     }
 }

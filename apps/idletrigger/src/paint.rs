@@ -14,7 +14,7 @@ use windows::Win32::Graphics::GdiPlus::Point as GpPoint;
 use windows::Win32::Graphics::GdiPlus::{
     FillModeWinding, GdipAddPathBezierI, GdipAddPathLineI, GdipClosePathFigure, GdipCreateFromHDC,
     GdipCreatePath, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-    GdipFillEllipseI, GdipFillPath, GdipFillPolygonI, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
+    GdipFillPath, GdipFillPolygonI, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
     GdipStartPathFigure, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
     GdiplusStartupOutput, GpBrush, GpGraphics, GpPath, GpSolidFill, PixelOffsetModeHalf,
     SmoothingMode,
@@ -307,59 +307,6 @@ pub fn fill_rounded_rect(
     }
 }
 
-/// Anti-aliased filled ellipse: fills the outer bounds with `border`, then
-/// the bounds inset by one physical pixel with `fill` — the same edge
-/// treatment as [`fill_rounded_rect`], so circles and rounded rects share
-/// one crispness across DPI scales.
-pub fn fill_ellipse(hdc: HDC, bounds: &RECT, fill: u32, border: u32) -> DrawResult {
-    if !ensure_started() || bounds.right - bounds.left <= 2 || bounds.bottom - bounds.top <= 2 {
-        return DrawResult::NotStarted;
-    }
-    let _guard = crate::runtime::lock(&DRAW_LOCK);
-    unsafe {
-        let Some(graphics) = GraphicsGuard::new(hdc) else {
-            return DrawResult::NotStarted;
-        };
-        let Some(border_brush) = BrushGuard::new(border) else {
-            return DrawResult::NotStarted;
-        };
-        let Some(fill_brush) = BrushGuard::new(fill) else {
-            return DrawResult::NotStarted;
-        };
-        let inner = RECT {
-            left: bounds.left + 1,
-            top: bounds.top + 1,
-            right: bounds.right - 1,
-            bottom: bounds.bottom - 1,
-        };
-        if GdipFillEllipseI(
-            graphics.0,
-            border_brush.0,
-            bounds.left,
-            bounds.top,
-            bounds.right - bounds.left,
-            bounds.bottom - bounds.top,
-        )
-        .0 != 0
-        {
-            return DrawResult::MayBeDirty;
-        }
-        if GdipFillEllipseI(
-            graphics.0,
-            fill_brush.0,
-            inner.left,
-            inner.top,
-            inner.right - inner.left,
-            inner.bottom - inner.top,
-        )
-        .0 != 0
-        {
-            return DrawResult::MayBeDirty;
-        }
-        DrawResult::Completed
-    }
-}
-
 /// Anti-aliased filled polygon (Go FillPolygon).
 pub fn fill_polygon(hdc: HDC, points: &[GpPoint], color: u32) -> DrawResult {
     if !ensure_started() || points.len() < 3 {
@@ -614,38 +561,67 @@ pub fn draw_switch(
         right: resting_center_x + (thumb_d + 1) / 2,
         bottom: center_y + (thumb_d + 1) / 2,
     };
-    // Track: solid pill in the state color; the off state hints at the
-    // action with an accent ring while hovered.
-    let (fill, ring) = if state.disabled {
-        (p.disabled_surface, p.subtle_border)
+    // Track: solid pill in the state color. Hover must read at a glance:
+    // the off track tints toward the accent, the on track steps to a
+    // pressed-depth accent (a lighter step would wash out the white
+    // thumb), and the off hover gains a 2px accent ring.
+    let (fill, ring, ring_w) = if state.disabled {
+        (p.disabled_surface, p.subtle_border, 1)
     } else if state.active {
         let color = if state.pressed {
             p.accent_pressed
         } else if state.hovered {
-            p.accent_hover
+            p.switch_track_on_hover
         } else {
             p.accent
         };
-        (color, color)
+        (color, color, 1)
     } else if state.pressed {
-        (p.accent_pressed, p.accent_pressed)
+        (p.accent_pressed, p.accent_pressed, 1)
     } else if state.hovered {
-        (p.switch_track, p.accent_hover)
+        (p.switch_track_hover, p.accent_hover, 2)
     } else {
-        (p.switch_track, p.switch_track)
+        (p.switch_track, p.switch_track, 1)
     };
-    // draw_surface carries the GDI+ path plus the plain-GDI fallback.
-    draw_surface(
-        hdc,
-        &track,
-        background,
-        fill,
-        ring,
-        (track_h / 2 - 1).max(1),
-    );
+    // Cards, buttons, chips, and segments share the 6px corner radius; the
+    // switch keeps its fully-round control identity instead — a pill track
+    // with a circular thumb (a rounded rect at half-size renders as a
+    // bezier circle). draw_surface carries the GDI+ path plus the plain-GDI
+    // fallback.
+    let track_radius = (track_h / 2 - 1).max(1);
+    draw_surface(hdc, &track, background, fill, ring, track_radius);
+    if ring_w > 1 {
+        // Second, inset fill draws the ring at 2 physical pixels.
+        let inner = RECT {
+            left: track.left + 1,
+            top: track.top + 1,
+            right: track.right - 1,
+            bottom: track.bottom - 1,
+        };
+        if inner.right > inner.left && inner.bottom > inner.top {
+            fill_rounded_rect(hdc, &inner, track_radius - 1, fill, fill);
+        }
+    }
     let ink = thumb_fill(p, state);
-    if fill_ellipse(hdc, &thumb, ink, ink) == DrawResult::NotStarted {
-        ellipse_fallback(hdc, &thumb, ink);
+    // The thumb never pre-fills its bounding square: the square's corners
+    // poke past the pill track's rounded ends and read as stray dots.
+    // fill_rounded_rect paints only the shape; on GDI+ trouble the track
+    // is redone and a GDI rounded shape takes over.
+    let thumb_radius = (thumb_d / 2).max(1);
+    match fill_rounded_rect(hdc, &thumb, thumb_radius, ink, ink) {
+        DrawResult::Completed => {}
+        DrawResult::MayBeDirty => {
+            draw_surface(
+                hdc,
+                &track,
+                background,
+                fill,
+                ring,
+                (track_h / 2 - 1).max(1),
+            );
+            rounded_shape_gdi_fallback(hdc, &thumb, ink, thumb_radius);
+        }
+        DrawResult::NotStarted => rounded_shape_gdi_fallback(hdc, &thumb, ink, thumb_radius),
     }
     if state.focused && !state.disabled {
         let grow = sp(2, scale);
@@ -659,6 +635,39 @@ pub fn draw_switch(
     }
 }
 
+/// GDI fallback that draws ONLY the rounded shape (no square pre-fill —
+/// its corners would poke past the pill track's rounded ends).
+fn rounded_shape_gdi_fallback(hdc: HDC, bounds: &RECT, color: u32, radius: i32) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(color));
+        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(color));
+        if brush.is_invalid() || pen.is_invalid() {
+            if !brush.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+            if !pen.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+            }
+            return;
+        }
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = RoundRect(
+            hdc,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom,
+            (radius * 2).max(2),
+            (radius * 2).max(2),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+}
+
 /// Thumb ink: light in both on/off states (Win11 style — the track color
 /// change alone communicates the state); disabled uses the muted ink.
 fn thumb_fill(p: &Palette, state: ControlState) -> u32 {
@@ -667,32 +676,6 @@ fn thumb_fill(p: &Palette, state: ControlState) -> u32 {
     } else {
         p.accent_text
     }
-}
-
-fn ellipse_fallback(hdc: HDC, bounds: &RECT, color: u32) {
-    let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
-    if brush.is_invalid() {
-        return;
-    }
-    let old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-    let old_pen = unsafe {
-        SelectObject(
-            hdc,
-            windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_PEN),
-        )
-    };
-    unsafe {
-        let _ = windows::Win32::Graphics::Gdi::Ellipse(
-            hdc,
-            bounds.left,
-            bounds.top,
-            bounds.right,
-            bounds.bottom,
-        );
-    }
-    unsafe { SelectObject(hdc, old_pen) };
-    unsafe { SelectObject(hdc, old) };
-    let _ = unsafe { DeleteObject(HGDIOBJ(brush.0)) };
 }
 
 /// Plain row label for label-left rows (grouped form list style): body font,
@@ -754,53 +737,6 @@ pub fn draw_button(
     radius: i32,
 ) {
     let (fill, border, text) = button_visual(p, state);
-    draw_surface(hdc, bounds, background, fill, border, radius);
-    draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
-}
-
-/// One segment of a mutually exclusive segmented control. The selected
-/// segment carries the accent fill; unselected segments sit "etched" into
-/// the window background (no raised surface), so the group reads as one
-/// control with a moving highlight rather than a row of buttons.
-pub fn draw_segment(
-    hdc: HDC,
-    bounds: &RECT,
-    font: HFONT,
-    label: &str,
-    p: &Palette,
-    background: u32,
-    state: ControlState,
-    radius: i32,
-) {
-    let (fill, border, text) = if state.disabled {
-        (p.disabled_surface, p.subtle_border, p.disabled_text)
-    } else if state.active {
-        let mut fill = p.accent;
-        if state.hovered {
-            fill = p.accent_hover;
-        }
-        if state.pressed {
-            fill = p.accent_pressed;
-        }
-        (fill, fill, p.accent_text)
-    } else {
-        let (mut fill, mut border, mut text) = (background, p.subtle_border, p.text2);
-        if state.hovered {
-            fill = p.hover_surface;
-            border = p.border;
-            text = p.text;
-        }
-        if state.pressed {
-            border = p.accent;
-            text = p.text;
-        }
-        (fill, border, text)
-    };
-    let border = if state.focused && !state.disabled {
-        p.focus
-    } else {
-        border
-    };
     draw_surface(hdc, bounds, background, fill, border, radius);
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
 }
@@ -1045,26 +981,31 @@ pub fn draw_menu_option(
     radius: i32,
     scale: i32,
 ) {
-    let (mut fill, mut border, mut text) = (p.surface, p.border, p.text);
-    if state.hovered {
-        fill = p.hover_surface;
-    }
+    // Danger rows keep a quiet resting look (danger ink on the neutral
+    // surface, like the panel's exit button) and commit to the filled
+    // danger style only on hover/press.
+    let (mut fill, mut border, mut text) = (p.surface, p.subtle_border, p.text);
     if danger {
-        fill = p.danger_bg;
-        border = p.danger_border;
-        text = p.danger_text;
-        if state.hovered {
-            fill = p.danger_hover;
-            border = p.danger_hover_border;
+        text = p.danger_surface_text;
+    }
+    if state.hovered {
+        if danger {
+            fill = p.danger_bg;
+            border = p.danger_bg;
+            text = p.danger_text;
+        } else {
+            fill = p.hover_surface;
+            border = p.border;
         }
     }
     if state.pressed {
-        fill = p.elevated;
-        border = p.accent_pressed;
         if danger {
             fill = p.danger_pressed;
-            border = p.danger_pressed_border;
+            border = p.danger_pressed;
             text = p.danger_text;
+        } else {
+            fill = p.hover_surface;
+            border = p.accent_pressed;
         }
     }
     if state.disabled {

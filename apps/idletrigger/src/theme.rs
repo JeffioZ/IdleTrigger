@@ -54,6 +54,11 @@ pub struct Palette {
     /// the switch reads clearly against the near-white window background,
     /// lighter on dark.
     pub switch_track: u32,
+    /// Off-state switch track while hovered: a strong step toward the
+    /// accent so the hover reads at a glance.
+    pub switch_track_hover: u32,
+    /// Accent track while hovered: a lighter step off the resting accent.
+    pub switch_track_on_hover: u32,
 }
 
 const LIGHT_PALETTE: Palette = Palette {
@@ -89,7 +94,9 @@ const LIGHT_PALETTE: Palette = Palette {
     danger_focus: 0x00E3E5FF,          // RGB(255,229,227)
     tooltip_bg: 0x00FFFDFB,            // RGB(251,253,255)
     tooltip_text: 0x00241E19,
-    switch_track: 0x006A625A, // RGB(90,98,106)
+    switch_track: 0x006A625A,          // RGB(90,98,106)
+    switch_track_hover: 0x00A58C6E,    // RGB(110,140,165) - gray tinted toward accent
+    switch_track_on_hover: 0x00845500, // RGB(0,85,132) - a pressed-depth accent step
 };
 
 const DARK_PALETTE: Palette = Palette {
@@ -125,7 +132,9 @@ const DARK_PALETTE: Palette = Palette {
     danger_focus: 0x00E3E5FF,          // RGB(255,229,227)
     tooltip_bg: 0x00433B34,            // RGB(52,59,67)
     tooltip_text: 0x00FAF7F4,
-    switch_track: 0x0092847A, // RGB(122,132,146)
+    switch_track: 0x0092847A,          // RGB(122,132,146)
+    switch_track_hover: 0x00966437,    // RGB(55,100,150) - accent-tinted, darker than rest
+    switch_track_on_hover: 0x00845500, // RGB(0,85,132) - a pressed-depth accent step
 };
 
 /// One (surface, disabled-surface) brush pair, shareable across threads.
@@ -371,8 +380,17 @@ fn apply_to_all_with_force(force: bool) {
         return;
     }
     crate::choice::close(false);
+    // The atomic cloak exists so a palette flip never presents a half-themed
+    // frame. Forced refreshes that only re-apply native styles on an
+    // UNCHANGED palette (theme-file repairs) repaint with identical colors,
+    // so they take a plain repaint instead — no cloak, no visible flash.
+    // Non-forced windows reached here precisely because their palette prop
+    // mismatched, so both paths reduce to the same fingerprint check.
     let frames: Vec<_> = windows
         .iter()
+        .filter(|w| unsafe {
+            GetPropW(**w, palette_prop) != palette_key || GetPropW(**w, dark_prop) != dark_key
+        })
         .filter_map(|w| crate::FrameTransition::begin(*w))
         .collect();
     set_process_menu_theme(is_dark());
@@ -630,14 +648,25 @@ mod visual_tests {
             // background and from the light thumb riding on it.
             assert!(contrast(p.switch_track, p.window_bg) >= 3.0);
             assert!(contrast(p.switch_track, p.accent_text) >= 3.0);
+            // Hover states must be clearly distinct from their resting
+            // colors and keep thumb readability.
+            assert!(contrast(p.switch_track, p.switch_track_hover) >= 1.6);
+            assert!(contrast(p.accent, p.switch_track_on_hover) >= 1.6);
+            assert!(contrast(p.switch_track_hover, p.accent_text) >= 3.0);
+            assert!(contrast(p.switch_track_on_hover, p.accent_text) >= 3.0);
             // Secondary inks (group labels, unselected segments, chip text)
             // and every hover surface must stay readable. Accent ink only
             // ever sits on the plain background (see draw_chip), so that is
-            // the pair locked here.
+            // the pair locked here. Section rows live on the card surface,
+            // so the card face pairs are locked as well.
             assert!(contrast(p.text2, p.window_bg) >= 4.5);
+            assert!(contrast(p.text2, p.surface) >= 4.5);
             assert!(contrast(p.text2, p.hover_surface) >= 4.5);
             assert!(contrast(p.text, p.hover_surface) >= 4.5);
             assert!(contrast(p.accent, p.window_bg) >= 3.0);
+            assert!(contrast(p.link, p.surface) >= 4.5);
+            assert!(contrast(p.muted, p.surface) >= 4.5);
+            assert!(contrast(p.switch_track, p.surface) >= 3.0);
         }
     }
 }
