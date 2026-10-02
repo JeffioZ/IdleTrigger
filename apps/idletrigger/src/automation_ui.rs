@@ -3258,7 +3258,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
         // Choice buttons render their closed state via the choice module.
         if crate::choice::is_choice(item.control) {
             let state = crate::nativeform::control_state(item.control, item.state);
-            crate::choice::draw_button(item.control, dc, bounds, state);
+            crate::choice::draw_button(item.control, dc, bounds, state, p.window_bg);
             return;
         }
 
@@ -3306,19 +3306,11 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
             ED_DAYS_SUN as i32,
         ];
         if item.control_id == ED_KEEP_SCREEN as i32 {
+            // The editor's one toggle rides the panel's switch-row grammar:
+            // label left, pill right, whole row is the hit target.
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = edit_is_checked(ED_KEEP_SCREEN);
-            crate::paint::draw_checkbox(
-                dc,
-                bounds,
-                font,
-                &label,
-                p,
-                p.window_bg,
-                state,
-                scale,
-                ED_CHECKBOX_SIZE,
-            );
+            crate::paint::draw_switch_row(dc, bounds, font, &label, p, p.window_bg, state, scale);
         } else if item.control_id == ED_PROC_INFO as i32 {
             // Round info glyph (Go draws it as a circle button).
             let state = crate::nativeform::control_state(item.control, item.state);

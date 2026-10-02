@@ -335,11 +335,14 @@ fn repaint(button: HWND) {
 }
 
 /// Draws a choice button's closed state (parent WM_DRAWITEM dispatch).
+/// `background` is the surface the button sits on — the card face when the
+/// owning form cards its rows, the window background otherwise.
 pub fn draw_button(
     button: HWND,
     dc: windows::Win32::Graphics::Gdi::HDC,
     bounds: &RECT,
     state: paint::ControlState,
+    background: u32,
 ) {
     let p = theme::palette();
     let label = choices()
@@ -357,7 +360,7 @@ pub fn draw_button(
         font,
         &label,
         p,
-        p.window_bg,
+        background,
         state,
         paint::control_radius(),
         scale(),

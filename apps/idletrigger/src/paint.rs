@@ -853,6 +853,43 @@ pub fn draw_button_danger(
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
 }
 
+/// Label-left row with a pill switch at the right edge — the panel's
+/// toggle-row grammar for forms: the whole row is one hit target and the
+/// pill carries the state. `background` is the surface the row sits on
+/// (card face or window background).
+pub fn draw_switch_row(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    scale: i32,
+) {
+    fill_rect(hdc, bounds, background);
+    let column = sp(crate::layout::SWITCH_HIT_W, scale);
+    let pill = RECT {
+        left: bounds.right - column,
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+    };
+    let text = RECT {
+        left: bounds.left,
+        top: bounds.top,
+        right: pill.left - sp(8, scale),
+        bottom: bounds.bottom,
+    };
+    let ink = if state.disabled {
+        p.disabled_text
+    } else {
+        p.text
+    };
+    draw_label(hdc, &text, font, label, ink, true, 0, 0);
+    draw_switch(hdc, &pill, p, background, state, scale, None);
+}
+
 /// Ghost chip for secondary quick actions (preset strips): transparent fill,
 /// hairline border, muted text at rest — one step below the primary buttons
 /// in weight at every state, with an accent outline while armed.
@@ -953,128 +990,6 @@ pub fn draw_choice(
         arrow,
         scale,
     );
-}
-
-/// Checkbox with label (Go DrawCheckbox). `state.active` = checked.
-pub fn draw_checkbox(
-    hdc: HDC,
-    bounds: &RECT,
-    font: HFONT,
-    label: &str,
-    p: &Palette,
-    background: u32,
-    state: ControlState,
-    scale: i32,
-    checkbox_size: i32,
-) {
-    fill_rect(hdc, bounds, background);
-    let size = sp(checkbox_size, scale);
-    let left = bounds.left + sp(2, scale);
-    let top = bounds.top + (bounds.bottom - bounds.top - size) / 2;
-    let box_rect = RECT {
-        left,
-        top,
-        right: left + size,
-        bottom: top + size,
-    };
-    draw_checkbox_box(hdc, &box_rect, p, background, state, scale);
-    if state.focused && !state.disabled {
-        let inset = sp(1, scale);
-        frame_rect(
-            hdc,
-            &RECT {
-                left: bounds.left + inset,
-                top: bounds.top + inset,
-                right: bounds.right - inset,
-                bottom: bounds.bottom - inset,
-            },
-            p.focus,
-        );
-    }
-    let mut text_bounds = *bounds;
-    text_bounds.left = box_rect.right + sp(8, scale);
-    let color = if state.disabled {
-        p.disabled_text
-    } else {
-        p.text
-    };
-    draw_label(hdc, &text_bounds, font, label, color, true, 0, 4);
-}
-
-fn draw_checkbox_box(
-    hdc: HDC,
-    box_rect: &RECT,
-    p: &Palette,
-    background: u32,
-    state: ControlState,
-    scale: i32,
-) {
-    let (mut fill, mut border) = (p.surface, p.border);
-    if state.active {
-        fill = p.accent;
-        border = p.accent;
-    }
-    if state.hovered {
-        border = p.accent_hover;
-        if state.active {
-            fill = p.accent_hover;
-        }
-    }
-    if state.pressed {
-        fill = p.accent_pressed;
-        border = p.accent_pressed;
-    }
-    if state.disabled {
-        fill = p.disabled_surface;
-        border = p.subtle_border;
-    }
-    draw_surface(hdc, box_rect, background, fill, border, sp(2, scale));
-    if state.active {
-        let mut check_color = p.accent_text;
-        if state.disabled {
-            check_color = p.muted;
-        }
-        if draw_check(
-            hdc,
-            box_rect.left,
-            box_rect.top,
-            box_rect.right,
-            box_rect.bottom,
-            check_color,
-            sp(2, scale).max(1),
-        ) != DrawResult::Completed
-        {
-            draw_check_fallback(hdc, box_rect, check_color, scale);
-        }
-    }
-}
-
-fn draw_check_fallback(hdc: HDC, box_rect: &RECT, color: u32, scale: i32) {
-    unsafe {
-        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), sp(2, scale).max(1), COLORREF(color));
-        if pen.is_invalid() {
-            return;
-        }
-        let old = SelectObject(hdc, HGDIOBJ(pen.0));
-        let _ = MoveToEx(
-            hdc,
-            box_rect.left + sp(4, scale),
-            box_rect.top + sp(9, scale),
-            None,
-        );
-        let _ = LineTo(
-            hdc,
-            box_rect.left + sp(8, scale),
-            box_rect.top + sp(13, scale),
-        );
-        let _ = LineTo(
-            hdc,
-            box_rect.left + sp(15, scale),
-            box_rect.top + sp(5, scale),
-        );
-        SelectObject(hdc, old);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-    }
 }
 
 /// Menu row for choice popups (Go DrawMenuOption).

@@ -298,6 +298,9 @@ pub fn devtools_select_page(page: i32) {
     }
     PAGE.store(page, Ordering::SeqCst);
     apply_dependent_states(hwnd);
+    unsafe {
+        apply_page_height(hwnd);
+    }
 }
 
 fn create() {
@@ -1040,6 +1043,115 @@ fn theme_flow() -> ThemeFlow {
         behavior_card_y,
         battery_y: behavior_card_y + CARD_PAD_Y,
         fullscreen_y: behavior_card_y + CARD_PAD_Y + CHECK_H + LABEL_GAP,
+    }
+}
+
+/// Whether a static sits inside a section card face: labels on cards must
+/// erase with the card color or their text background punches a
+/// window-colored patch into the card. Geometric detection keeps working
+/// as controls move between cards without an id list to maintain.
+unsafe fn sits_on_card(hwnd: HWND, child: HWND) -> bool {
+    unsafe {
+        let mut control = RECT::default();
+        if GetWindowRect(child, &mut control).is_err() {
+            return false;
+        }
+        for id in CARD_BASE..CARD_BASE + 9 {
+            let card = get(hwnd, id);
+            if card.is_invalid() {
+                continue;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(card, &mut rect).is_ok()
+                && control.left >= rect.left
+                && control.right <= rect.right
+                && control.top >= rect.top
+                && control.bottom <= rect.bottom
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Client height for the current page: the content column ends at the
+/// page's last card and the footer follows at a fixed offset, so the
+/// window grows and shrinks with the page instead of reserving the tallest
+/// page's height everywhere (the old flat 580 was sized for the power
+/// page alone).
+fn page_client_h() -> i32 {
+    let content_bottom = match PAGE.load(Ordering::SeqCst) {
+        0 => 458,
+        1 => {
+            let flow = theme_flow();
+            flow.behavior_card_y + 2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP
+        }
+        2 => 274,
+        3 => 428,
+        _ => 340,
+    };
+    // Breathing room, the two-line validation, a gap, buttons, bottom pad.
+    content_bottom + 12 + VALIDATION_H + 8 + BTN_H + 18
+}
+
+/// Resizes the settings window to the active page's height, keeping its
+/// horizontal position and visual center, and parks the footer rows at the
+/// new bottom edge.
+unsafe fn apply_page_height(hwnd: HWND) {
+    unsafe {
+        let target = s(page_client_h());
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        if client.bottom - client.top == target {
+            return;
+        }
+        let mut frame = RECT::default();
+        if GetWindowRect(hwnd, &mut frame).is_err() {
+            return;
+        }
+        let delta = target - (client.bottom - client.top);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            frame.left,
+            frame.top - delta / 2,
+            frame.right - frame.left,
+            (frame.bottom - frame.top) + delta,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let footer_y = target - s(18 + BTN_H);
+        let validation_y = footer_y - s(8 + VALIDATION_H);
+        for (id, y) in [
+            (ID_VALIDATION, validation_y),
+            (ID_CANCEL, footer_y),
+            (ID_SAVE, footer_y),
+        ] {
+            let control = get(hwnd, id);
+            if control.is_invalid() {
+                continue;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(control, &mut rect).is_err() {
+                continue;
+            }
+            let mut owner = RECT::default();
+            if GetWindowRect(hwnd, &mut owner).is_err() {
+                continue;
+            }
+            let _ = SetWindowPos(
+                control,
+                None,
+                rect.left - owner.left,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        crate::viewport::fit(hwnd);
     }
 }
 
@@ -2520,11 +2632,19 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         hdc,
                         windows::Win32::Foundation::COLORREF(text),
                     );
+                    let on_card = sits_on_card(hwnd, child_hwnd);
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let card_pair = if theme::is_dark() { dark } else { light };
+                    let (bk, brush) = if on_card {
+                        (palette.surface, card_pair.0.0)
+                    } else {
+                        (theme::bg_color(), theme::bg_brush().0)
+                    };
                     let _ = windows::Win32::Graphics::Gdi::SetBkColor(
                         hdc,
-                        windows::Win32::Foundation::COLORREF(theme::bg_color()),
+                        windows::Win32::Foundation::COLORREF(bk),
                     );
-                    return LRESULT(theme::bg_brush().0 as isize);
+                    return LRESULT(brush as isize);
                 }
                 let validation = get(hwnd, ID_VALIDATION);
                 let is_error = child_hwnd == validation
@@ -2540,11 +2660,19 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     hdc,
                     windows::Win32::Foundation::COLORREF(color),
                 );
+                let on_card = sits_on_card(hwnd, child_hwnd);
+                let (light, dark) = theme::surface_brush_pairs();
+                let card_pair = if theme::is_dark() { dark } else { light };
+                let (bk, brush) = if on_card {
+                    (theme::palette().surface, card_pair.0.0)
+                } else {
+                    (theme::bg_color(), theme::bg_brush().0)
+                };
                 let _ = windows::Win32::Graphics::Gdi::SetBkColor(
                     hdc,
-                    windows::Win32::Foundation::COLORREF(theme::bg_color()),
+                    windows::Win32::Foundation::COLORREF(bk),
                 );
-                LRESULT(theme::bg_brush().0 as isize)
+                LRESULT(brush as isize)
             }
             WM_DESTROY => {
                 SETTINGS_HWND.store(0, Ordering::SeqCst);
@@ -2623,7 +2751,7 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 dc,
                 bounds,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 crate::paint::control_radius(),
             );
@@ -2635,13 +2763,13 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 body_font(),
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 scale,
             );
         } else if crate::choice::is_choice(item.control) {
             let state = crate::nativeform::control_state(item.control, item.state);
-            crate::choice::draw_button(item.control, dc, bounds, state);
+            crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
         } else if matches!(
             id,
             ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
@@ -2677,7 +2805,7 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 body_font(),
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 crate::paint::control_radius(),
             );
@@ -2696,18 +2824,34 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 crate::paint::control_radius(),
             );
         } else if checks().as_ref().is_some_and(|m| m.contains_key(&id)) {
+            // Toggle rows use the panel's switch grammar: the whole row is
+            // the hit target, the pill on the right carries the state. The
+            // checked value stays a DRAFT until Save, exactly like before.
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = is_checked(hwnd, id);
-            crate::paint::draw_checkbox(
+            crate::paint::draw_switch_row(
                 dc,
                 bounds,
                 body_font(),
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 scale,
-                16,
+            );
+        } else if matches!(id, ID_RESTORE_PREV | ID_LOCK_PREVIEW) {
+            // Buttons that sit on a card face must erase with the card
+            // color, or their background punch-through shows window ink.
+            let state = crate::nativeform::control_state(item.control, item.state);
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                body_font(),
+                &label,
+                p,
+                p.surface,
+                state,
+                crate::paint::control_radius(),
             );
         } else {
             let state = crate::nativeform::control_state(item.control, item.state);
@@ -2738,6 +2882,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 };
                 PAGE.store(page, Ordering::SeqCst);
                 apply_dependent_states(hwnd);
+                apply_page_height(hwnd);
             }
             ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_PAUSE_ON_LOCK | ID_IDLE_ENHANCED
             | ID_THEME_BATTERY | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING
@@ -3034,6 +3179,7 @@ pub fn refresh_language() {
         }
     }
     unsafe {
+        apply_page_height(hwnd);
         create_tooltip(hwnd);
     }
     refresh_theme();
