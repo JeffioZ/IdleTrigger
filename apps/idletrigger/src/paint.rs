@@ -709,6 +709,64 @@ pub fn draw_row_label(
     draw_label(hdc, bounds, font, label, p.text, true, 0, 0);
 }
 
+/// Quiet navigation entry for page rails (settings nav): no button chrome.
+/// The active page carries a small accent bar and heavier ink; hover chips
+/// softly without gaining a border; focus draws the standard frame.
+pub fn draw_nav_item(
+    hdc: HDC,
+    bounds: &RECT,
+    font_active: HFONT,
+    font_rest: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    scale: i32,
+) {
+    fill_rect(hdc, bounds, background);
+    let ink = if state.disabled {
+        p.disabled_text
+    } else if state.active {
+        p.text
+    } else {
+        p.text2
+    };
+    if state.hovered || state.pressed {
+        let fill = p.hover_surface;
+        match fill_rounded_rect(hdc, bounds, control_radius(), fill, fill) {
+            DrawResult::Completed | DrawResult::MayBeDirty => {}
+            DrawResult::NotStarted => {
+                fill_rect(hdc, bounds, fill);
+            }
+        }
+    }
+    let bar_w = sp(3, scale);
+    if state.active {
+        let bar_h = sp(20, scale);
+        let bar = RECT {
+            left: bounds.left,
+            top: bounds.top + (bounds.bottom - bounds.top - bar_h) / 2,
+            right: bounds.left + bar_w,
+            bottom: bounds.top + (bounds.bottom - bounds.top + bar_h) / 2,
+        };
+        match fill_rounded_rect(hdc, &bar, bar_w.max(1), p.accent, p.accent) {
+            DrawResult::Completed | DrawResult::MayBeDirty => {}
+            DrawResult::NotStarted => fill_rect(hdc, &bar, p.accent),
+        }
+    }
+    let text = RECT {
+        left: bounds.left + sp(14, scale),
+        top: bounds.top,
+        right: bounds.right - sp(4, scale),
+        bottom: bounds.bottom,
+    };
+    let font = if state.active { font_active } else { font_rest };
+    draw_label(hdc, &text, font, label, ink, true, 0, 0);
+    if state.focused && !state.disabled {
+        draw_focus_frame(hdc, bounds, p.focus);
+    }
+}
+
 fn button_visual(p: &Palette, state: ControlState) -> (u32, u32, u32) {
     let (mut fill, mut border, mut text) = (p.surface, p.border, p.text);
     if state.hovered {

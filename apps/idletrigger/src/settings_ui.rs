@@ -15,6 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
+use crate::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, LABEL_GAP, TITLE_GAP, row_slot};
 use crate::{t_pub, theme};
 
 // Control ids — Go settingspanel.go numbering, extended in the Rust port.
@@ -114,16 +115,14 @@ static CURSOR_PREVIOUS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<i32, String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-// Layout tokens — Go controls.go build() constants.
+// Layout tokens — Go controls.go build() constants, now riding the shared
+// panel grammar from the layout module for card sections and row rhythm.
 const CLIENT_W: i32 = 700;
 const CLIENT_H: i32 = 580;
 const CONTENT_X: i32 = 208;
 const CONTENT_RIGHT: i32 = 676;
 const SECTION_TOP: i32 = 90;
 const SECTION_TITLE_H: i32 = 20;
-const SECTION_ITEM_GAP: i32 = 10;
-const FUNCTION_GAP: i32 = 8;
-const SECTION_GAP: i32 = 16;
 const CHECK_H: i32 = 28;
 const BTN_H: i32 = 36;
 // Two-line validation row above the footer buttons: the English conflict
@@ -132,6 +131,15 @@ const VALIDATION_H: i32 = 48;
 const FIELD_H: i32 = 34;
 const DIALOG_BTN_W: i32 = 104;
 const FOOTER_Y: i32 = CLIENT_H - 18 - BTN_H;
+// Panel card grammar: cards span the content column, rows sit one
+// CARD_PAD_X inside them, right-aligned controls end at ROW_RIGHT.
+const CARD_W: i32 = CONTENT_RIGHT - CONTENT_X; // 468
+const ROW_X: i32 = CONTENT_X + CARD_PAD_X; // 220
+const ROW_RIGHT: i32 = CONTENT_RIGHT - CARD_PAD_X; // 664
+const ROW_W: i32 = ROW_RIGHT - ROW_X; // 444
+// Owner-drawn section card surfaces (CARD_BASE..CARD_BASE + 9), one per
+// section across the five pages; drawn by the WM_DRAWITEM dispatch.
+const CARD_BASE: i32 = 620;
 
 const IDLE_ACTIONS: [&str; 6] = [
     "lock",
@@ -470,104 +478,121 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             (24, 266, 156, BTN_H),
         );
 
+        // Pages ride the panel card grammar: the section title sits outside
+        // above its card, rows live one CARD_PAD inside the card face, and
+        // cards separate by CARD_GAP instead of bare whitespace.
+
         // Power and idle page.
+        section_card(hwnd, CARD_BASE, font, (CONTENT_X, 114, CARD_W, 146));
         label(
             hwnd,
             ID_POWER_TITLE,
             &t_pub("settings_power_title"),
             section_font,
-            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_KEEP_SCREEN,
             &t_pub("settings_keep_screen"),
-            (CONTENT_X, 120, 468, CHECK_H),
+            (ROW_X, 122, ROW_W, CHECK_H),
         );
+        let (mut half_x, mut half_w) = row_slot(ROW_W, 2, 0);
         checkbox(
             hwnd,
             ID_BATTERY_ALLOWED,
             &t_pub("settings_battery_allowed"),
-            (CONTENT_X, 156, 224, CHECK_H),
+            (ROW_X + half_x, 156, half_w, CHECK_H),
         );
+        (half_x, half_w) = row_slot(ROW_W, 2, 1);
         checkbox(
             hwnd,
             ID_PAUSE_ON_LOCK,
             &t_pub("settings_pause_on_lock"),
-            (CONTENT_X + 240, 156, 228, CHECK_H),
+            (ROW_X + half_x, 156, half_w, CHECK_H),
         );
         label(
             hwnd,
             ID_BATTERY_LBL,
             &t_pub("settings_battery_threshold"),
             font,
-            (CONTENT_X, 198, 330, 22),
+            (ROW_X, 196, 308, 22),
             false,
         );
-        edit(hwnd, ID_BATTERY_THRESH, (548, 190, 128, FIELD_H), true);
+        edit(hwnd, ID_BATTERY_THRESH, (536, 190, 128, FIELD_H), true);
         label(
             hwnd,
             ID_POWER_HINT,
             &t_pub("settings_power_hint"),
             font,
-            (CONTENT_X, 232, 468, 22),
+            (ROW_X, 230, ROW_W, 22),
             false,
         );
+        section_card(hwnd, CARD_BASE + 1, font, (CONTENT_X, 294, CARD_W, 164));
         label(
             hwnd,
             ID_IDLE_TITLE,
             &t_pub("settings_idle_title"),
             section_font,
-            (CONTENT_X, 270, 468, SECTION_TITLE_H),
+            (CONTENT_X, 270, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_IDLE_ENHANCED,
             &t_pub("menu_idle_enhanced"),
-            (CONTENT_X, 300, 468, CHECK_H),
+            (ROW_X, 302, ROW_W, CHECK_H),
         );
         label(
             hwnd,
             ID_IDLE_TIMEOUT_LBL,
             &t_pub("settings_idle_timeout_minutes"),
             font,
-            (CONTENT_X, 344, 330, 22),
+            (ROW_X, 342, 308, 22),
             false,
         );
-        edit(hwnd, ID_IDLE_TIMEOUT, (548, 336, 128, FIELD_H), true);
+        edit(hwnd, ID_IDLE_TIMEOUT, (536, 336, 128, FIELD_H), true);
         label(
             hwnd,
             ID_WARNING_LBL,
             &t_pub("settings_idle_warning_seconds"),
             font,
-            (CONTENT_X, 386, 330, 22),
+            (ROW_X, 382, 308, 22),
             false,
         );
-        edit(hwnd, ID_WARNING_SECONDS, (548, 378, 128, FIELD_H), true);
+        edit(hwnd, ID_WARNING_SECONDS, (536, 376, 128, FIELD_H), true);
         label(
             hwnd,
             ID_IDLE_ACTION_LBL,
             &t_pub("settings_idle_action"),
             font,
-            (CONTENT_X, 428, 330, 22),
+            (ROW_X, 422, 308, 22),
             false,
         );
         combo(
             hwnd,
             ID_IDLE_ACTION,
-            (548, 420, 128, FIELD_H),
+            (536, 416, 128, FIELD_H),
             &idle_action_labels(),
         );
 
-        // Day/night page.
+        // Day/night page. The hint wraps to two lines in English, shifting
+        // the behavior section; the flow below is shared with the language
+        // refresh so the two sites cannot drift apart.
+        let flow = theme_flow();
+        section_card(
+            hwnd,
+            CARD_BASE + 2,
+            font,
+            (CONTENT_X, 114, CARD_W, flow.schedule_card_h),
+        );
         label(
             hwnd,
             ID_THEME_SCHEDULE_TITLE,
             &t_pub("settings_theme_schedule_group"),
             section_font,
-            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
             false,
         );
         label(
@@ -575,13 +600,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_THEME_MODE_LBL,
             &t_pub("settings_theme_mode"),
             font,
-            (CONTENT_X, 128, 220, 22),
+            (ROW_X, 128, 208, 22),
             false,
         );
         combo(
             hwnd,
             ID_THEME_MODE,
-            (456, 120, 220, FIELD_H),
+            (444, 122, 220, FIELD_H),
             &[
                 t_pub("settings_theme_fixed"),
                 t_pub("settings_theme_sunrise"),
@@ -592,31 +617,31 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_LIGHT_TIME_LBL,
             &t_pub("settings_light_time"),
             font,
-            (CONTENT_X, 170, 104, 22),
+            (ROW_X, 168, 104, 22),
             false,
         );
-        edit(hwnd, ID_LIGHT_TIME, (316, 162, 104, FIELD_H), false);
+        edit(hwnd, ID_LIGHT_TIME, (332, 162, 104, FIELD_H), false);
         label(
             hwnd,
             ID_DARK_TIME_LBL,
             &t_pub("settings_dark_time"),
             font,
-            (438, 170, 104, 22),
+            (452, 168, 104, 22),
             false,
         );
-        edit(hwnd, ID_DARK_TIME, (546, 162, 130, FIELD_H), false);
+        edit(hwnd, ID_DARK_TIME, (560, 162, 104, FIELD_H), false);
         label(
             hwnd,
             ID_LOCATION_LBL,
             &t_pub("settings_location_source"),
             font,
-            (CONTENT_X, 170, 220, 22),
+            (ROW_X, 168, 208, 22),
             false,
         );
         combo(
             hwnd,
             ID_LOCATION_SOURCE,
-            (456, 162, 220, FIELD_H),
+            (444, 162, 220, FIELD_H),
             &[
                 t_pub("settings_location_auto"),
                 t_pub("settings_location_ip"),
@@ -627,61 +652,66 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_THEME_LOCATION_STATUS,
             "",
             font,
-            (CONTENT_X, 204, 468, 22),
+            (ROW_X, 202, ROW_W, 22),
             false,
         );
-        let theme_hint_h = if is_chinese() { 22 } else { 40 };
         label(
             hwnd,
             ID_THEME_HINT,
             &t_pub("settings_theme_hint"),
             font,
-            (CONTENT_X, 234, 468, theme_hint_h),
+            (ROW_X, 230, ROW_W, flow.hint_h),
             false,
         );
-        let behavior_top = 234 + theme_hint_h + SECTION_GAP;
+        section_card(
+            hwnd,
+            CARD_BASE + 3,
+            font,
+            (
+                CONTENT_X,
+                flow.behavior_card_y,
+                CARD_W,
+                2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP,
+            ),
+        );
         label(
             hwnd,
             ID_THEME_BEHAVIOR_TITLE,
             &t_pub("settings_theme_behavior_group"),
             section_font,
-            (CONTENT_X, behavior_top, 468, SECTION_TITLE_H),
+            (CONTENT_X, flow.behavior_title_y, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_THEME_BATTERY,
             &t_pub("menu_theme_battery_dark"),
-            (
-                CONTENT_X,
-                behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP,
-                468,
-                CHECK_H,
-            ),
+            (ROW_X, flow.battery_y, ROW_W, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_THEME_FULLSCREEN,
             &t_pub("menu_theme_skip_fullscreen"),
-            (
-                CONTENT_X,
-                behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP + CHECK_H + FUNCTION_GAP,
-                468,
-                CHECK_H,
-            ),
+            (ROW_X, flow.fullscreen_y, ROW_W, CHECK_H),
         );
 
         // Appearance page (its own tab): paired light/dark columns for
-        // wallpaper and cursor schemes, over a shared wallpaper library.
-        // Layout grid: row labels 208..272, light column 280..470, dark
-        // column 478..668. The header pair above carries the intro, so the
-        // columns start straight at SECTION_TOP.
+        // wallpaper and cursor schemes inside one card, over a shared
+        // wallpaper library. Layout grid inside the card: row labels at
+        // ROW_X, light column 288..470, dark column 482..664. The header
+        // pair above carries the intro, so the card starts at SECTION_TOP.
+        section_card(
+            hwnd,
+            CARD_BASE + 4,
+            font,
+            (CONTENT_X, SECTION_TOP, CARD_W, 184),
+        );
         label(
             hwnd,
             ID_COL_LIGHT,
             &t_pub("settings_light_side"),
             section_font,
-            (280, SECTION_TOP, 190, 22),
+            (288, 98, 182, 22),
             false,
         );
         label(
@@ -689,7 +719,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_COL_DARK,
             &t_pub("settings_dark_side"),
             section_font,
-            (478, SECTION_TOP, 190, 22),
+            (482, 98, 182, 22),
             false,
         );
         // Wallpaper row: pick from the library per side.
@@ -698,16 +728,11 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_ROW_WALL_LBL,
             &t_pub("settings_row_wallpaper"),
             font,
-            (CONTENT_X, SECTION_TOP + 34, 64, 22),
+            (ROW_X, 132, 56, 22),
             false,
         );
-        for (id, x) in [(ID_LIGHT_WALL, 280), (ID_DARK_WALL, 478)] {
-            combo_items(
-                hwnd,
-                id,
-                (x, SECTION_TOP + 26, 190, FIELD_H),
-                &wallpaper_pick_items(""),
-            );
+        for (id, x) in [(ID_LIGHT_WALL, 288), (ID_DARK_WALL, 482)] {
+            combo_items(hwnd, id, (x, 126, 182, FIELD_H), &wallpaper_pick_items(""));
         }
         // Cursor row: installed schemes per side, with the .inf installer
         // as a footer action in each dropdown (wallpaper Browse parity).
@@ -716,30 +741,27 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_ROW_CURSOR_LBL,
             &t_pub("settings_row_cursor"),
             font,
-            (CONTENT_X, SECTION_TOP + 80, 64, 22),
+            (ROW_X, 172, 56, 22),
             false,
         );
-        for (id, x) in [(ID_LIGHT_CURSOR, 280), (ID_DARK_CURSOR, 478)] {
-            combo_items(
-                hwnd,
-                id,
-                (x, SECTION_TOP + 72, 190, FIELD_H),
-                &cursor_choice_rows(),
-            );
+        for (id, x) in [(ID_LIGHT_CURSOR, 288), (ID_DARK_CURSOR, 482)] {
+            combo_items(hwnd, id, (x, 166, 182, FIELD_H), &cursor_choice_rows());
         }
         // Restore pair: back to the state captured before the first
         // day/night application, or to system factory defaults.
+        let (mut slot_x, mut slot_w) = row_slot(ROW_W, 2, 0);
         push_button(
             hwnd,
             ID_RESTORE_PREV,
             &t_pub("settings_restore_prev"),
-            (CONTENT_X, SECTION_TOP + 126, 224, FIELD_H),
+            (ROW_X + slot_x, 206, slot_w, FIELD_H),
         );
+        (slot_x, slot_w) = row_slot(ROW_W, 2, 1);
         push_button(
             hwnd,
             ID_RESTORE_DEFAULT,
             &t_pub("settings_restore_default"),
-            (CONTENT_X + 244, SECTION_TOP + 126, 224, FIELD_H),
+            (ROW_X + slot_x, 206, slot_w, FIELD_H),
         );
         // Muted caption under the disabled restore button: explains when a
         // pre-change snapshot appears (tooltips cannot fire on disabled
@@ -749,17 +771,18 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_RESTORE_HINT,
             &t_pub("settings_restore_hint"),
             font,
-            (CONTENT_X, SECTION_TOP + 164, 468, 22),
+            (ROW_X, 244, ROW_W, 22),
             false,
         );
 
         // Application page.
+        section_card(hwnd, CARD_BASE + 7, font, (CONTENT_X, 114, CARD_W, 152));
         label(
             hwnd,
             ID_APP_GENERAL_TITLE,
             &t_pub("settings_app_general_group"),
             section_font,
-            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
             false,
         );
         label(
@@ -767,13 +790,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_LANGUAGE_LBL,
             &t_pub("settings_language"),
             font,
-            (CONTENT_X, 128, 220, 22),
+            (ROW_X, 128, 208, 22),
             false,
         );
         combo(
             hwnd,
             ID_LANGUAGE,
-            (456, 120, 220, FIELD_H),
+            (444, 122, 220, FIELD_H),
             &[
                 t_pub("menu_lang_auto"),
                 t_pub("menu_lang_en"),
@@ -784,32 +807,33 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_HOTKEYS,
             &t_pub("menu_hotkeys"),
-            (CONTENT_X, 162, 468, CHECK_H),
+            (ROW_X, 162, ROW_W, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_AUTOSTART,
             &t_pub("menu_autostart"),
-            (CONTENT_X, 198, 468, CHECK_H),
+            (ROW_X, 196, ROW_W, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_LOGGING,
             &t_pub("menu_logging"),
-            (CONTENT_X, 234, 468, CHECK_H),
+            (ROW_X, 230, ROW_W, CHECK_H),
         );
+        section_card(hwnd, CARD_BASE + 8, font, (CONTENT_X, 300, CARD_W, 40));
         label(
             hwnd,
             ID_APP_ABOUT_TITLE,
             &t_pub("settings_app_about_group"),
             section_font,
-            (CONTENT_X, 278, 468, SECTION_TITLE_H),
+            (CONTENT_X, 276, CARD_W, SECTION_TITLE_H),
             false,
         );
         let project_label = t_pub("settings_project_home_label");
         let label_w = logical_text_width(hwnd, font, &project_label, 96) + 2;
         let url_w = logical_text_width(hwnd, font, PROJECT_URL, 376) + 2;
-        let mut link_x = CONTENT_X + label_w + FUNCTION_GAP;
+        let mut link_x = ROW_X + label_w + LABEL_GAP;
         if is_chinese() {
             // CJK advance boxes carry extra trailing space (Go optical fix).
             link_x -= 10;
@@ -819,7 +843,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_PROJECT_HOME_LBL,
             &project_label,
             font,
-            (CONTENT_X, 310, label_w, 24),
+            (ROW_X, 308, label_w, 24),
             false,
         );
         // Go renders the URL as an underlined accent-colored text link with
@@ -828,69 +852,71 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_PROJECT_HOME,
             PROJECT_URL,
-            (link_x, 308, url_w.min(CONTENT_RIGHT - link_x), 24),
+            (link_x, 308, url_w.min(ROW_RIGHT - link_x), 24),
         );
 
         // Screen notifications page.
+        section_card(hwnd, CARD_BASE + 5, font, (CONTENT_X, 114, CARD_W, 146));
         label(
             hwnd,
             ID_NOTIFICATIONS_TITLE,
             &t_pub("settings_lock_keys"),
             section_font,
-            (CONTENT_X, SECTION_TOP, 468, SECTION_TITLE_H),
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_LOCK_KEYS,
             &t_pub("settings_lock_keys_enable"),
-            (CONTENT_X, 120, 468, CHECK_H),
+            (ROW_X, 122, ROW_W, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_LOCK_CAPS,
             "Caps Lock",
-            (CONTENT_X + 24, 156, 444, CHECK_H),
+            (ROW_X + 24, 156, ROW_W - 24, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_LOCK_NUM,
             "Num Lock",
-            (CONTENT_X + 24, 192, 444, CHECK_H),
+            (ROW_X + 24, 190, ROW_W - 24, CHECK_H),
         );
         checkbox(
             hwnd,
             ID_LOCK_SCROLL,
             "Scroll Lock",
-            (CONTENT_X + 24, 228, 444, CHECK_H),
+            (ROW_X + 24, 224, ROW_W - 24, CHECK_H),
         );
+        section_card(hwnd, CARD_BASE + 6, font, (CONTENT_X, 294, CARD_W, 134));
         label(
             hwnd,
             ID_NOTIFICATIONS_BEHAVIOR,
             &t_pub("settings_notification_behavior"),
             section_font,
-            (CONTENT_X, 278, 468, SECTION_TITLE_H),
+            (CONTENT_X, 270, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_LOCK_FULLSCREEN,
             &t_pub("settings_notification_fullscreen"),
-            (CONTENT_X, 308, 468, CHECK_H),
+            (ROW_X, 302, ROW_W, CHECK_H),
         );
         label(
             hwnd,
             ID_NOTIFICATIONS_HINT,
             &t_pub("settings_notification_hint"),
             font,
-            (CONTENT_X, 348, 468, 42),
+            (ROW_X, 336, ROW_W, 42),
             false,
         );
         push_button(
             hwnd,
             ID_LOCK_PREVIEW,
             &t_pub("settings_notification_preview"),
-            (CONTENT_X, 406, 160, BTN_H),
+            (ROW_X, 384, 160, BTN_H),
         );
 
         // Footer: full-width two-line validation above the buttons (Go kept
@@ -966,6 +992,54 @@ unsafe fn child(
             );
         }
         hwnd
+    }
+}
+
+/// Owner-drawn section card surface behind a section's rows (panel card
+/// grammar): rounded face with the family hairline, painted by the parent's
+/// WM_DRAWITEM dispatch. Created before the section's controls so it stays
+/// beneath them in z-order; never interactive, so it gets no hover track.
+unsafe fn section_card(parent: HWND, id: i32, font: HFONT, b: (i32, i32, i32, i32)) {
+    unsafe {
+        child(
+            parent,
+            windows::core::w!("STATIC"),
+            "",
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 13), // SS_OWNERDRAW
+            id,
+            font,
+            b,
+        );
+    }
+}
+
+/// The theme page's language-dependent vertical flow: the schedule hint is
+/// one line in Chinese and two in English, which moves the behavior
+/// section. Shared by control creation and the language refresh so the two
+/// sites cannot drift apart.
+struct ThemeFlow {
+    hint_h: i32,
+    schedule_card_h: i32,
+    behavior_title_y: i32,
+    behavior_card_y: i32,
+    battery_y: i32,
+    fullscreen_y: i32,
+}
+
+fn theme_flow() -> ThemeFlow {
+    let hint_h = if is_chinese() { 22 } else { 40 };
+    // Schedule card: top 114, last row (the hint) spans 230..230+hint_h,
+    // then the bottom card pad closes the face.
+    let schedule_card_h = 230 + hint_h + CARD_PAD_Y - 114;
+    let behavior_title_y = 114 + schedule_card_h + CARD_GAP;
+    let behavior_card_y = behavior_title_y + SECTION_TITLE_H + TITLE_GAP;
+    ThemeFlow {
+        hint_h,
+        schedule_card_h,
+        behavior_title_y,
+        behavior_card_y,
+        battery_y: behavior_card_y + CARD_PAD_Y,
+        fullscreen_y: behavior_card_y + CARD_PAD_Y + CHECK_H + LABEL_GAP,
     }
 }
 
@@ -1606,6 +1680,8 @@ fn page_ids(page: i32) -> &'static [i32] {
         0 => &[
             ID_PAGE_TITLE_POWER,
             ID_PAGE_SUB_POWER,
+            CARD_BASE,
+            CARD_BASE + 1,
             ID_POWER_TITLE,
             ID_KEEP_SCREEN,
             ID_BATTERY_ALLOWED,
@@ -1625,6 +1701,8 @@ fn page_ids(page: i32) -> &'static [i32] {
         1 => &[
             ID_PAGE_TITLE_THEME,
             ID_PAGE_SUB_THEME,
+            CARD_BASE + 2,
+            CARD_BASE + 3,
             ID_THEME_SCHEDULE_TITLE,
             ID_THEME_BEHAVIOR_TITLE,
             ID_THEME_MODE_LBL,
@@ -1644,6 +1722,7 @@ fn page_ids(page: i32) -> &'static [i32] {
         2 => &[
             ID_PAGE_TITLE_APPEARANCE,
             ID_PAGE_SUB_APPEARANCE,
+            CARD_BASE + 4,
             ID_COL_LIGHT,
             ID_COL_DARK,
             ID_ROW_WALL_LBL,
@@ -1659,6 +1738,8 @@ fn page_ids(page: i32) -> &'static [i32] {
         4 => &[
             ID_PAGE_TITLE_APP,
             ID_PAGE_SUB_APP,
+            CARD_BASE + 7,
+            CARD_BASE + 8,
             ID_APP_GENERAL_TITLE,
             ID_APP_ABOUT_TITLE,
             ID_LANGUAGE_LBL,
@@ -1672,6 +1753,8 @@ fn page_ids(page: i32) -> &'static [i32] {
         _ => &[
             ID_PAGE_TITLE_NOTIFICATIONS,
             ID_PAGE_SUB_NOTIFICATIONS,
+            CARD_BASE + 5,
+            CARD_BASE + 6,
             ID_NOTIFICATIONS_TITLE,
             ID_LOCK_KEYS,
             ID_LOCK_CAPS,
@@ -2519,7 +2602,18 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
         }
     };
     unsafe {
-        if id >= FIELD_SURFACE_BASE {
+        if (CARD_BASE..CARD_BASE + 9).contains(&id) {
+            // Section card face: rounded surface with the family hairline,
+            // same grammar as the panel's cards.
+            crate::paint::draw_surface(
+                dc,
+                bounds,
+                p.window_bg,
+                p.surface,
+                p.border,
+                crate::paint::control_radius(),
+            );
+        } else if id >= FIELD_SURFACE_BASE {
             // Edit field surface: focus/hover border via draw_field.
             let edit = get(hwnd, id - FIELD_SURFACE_BASE);
             let mut state = crate::nativeform::control_state(item.control, item.state);
@@ -2562,15 +2656,16 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                     ID_TAB_NOTIFICATIONS,
                     ID_TAB_APP,
                 ][page as usize];
-            crate::paint::draw_button(
+            crate::paint::draw_nav_item(
                 dc,
                 bounds,
+                crate::automation_ui::section_font_cached(),
                 body_font(),
                 &label,
                 p,
                 p.window_bg,
                 state,
-                crate::paint::control_radius(),
+                scale,
             );
         } else if id == ID_SAVE {
             // Save is the form's default action: accent fill (Go state.Active).
@@ -2851,32 +2946,34 @@ pub fn refresh_language() {
     );
     // Language-dependent geometry must follow the new text: the theme hint
     // is two lines in English but one in Chinese, which shifts the behavior
-    // group, and the project-home row is measured from the label. Like the
-    // panel's own refresh_language, this only moves windows — drafts live in
-    // control state, not geometry.
-    let theme_hint_h = if is_chinese() { 22 } else { 40 };
-    let behavior_top = 234 + theme_hint_h + SECTION_GAP;
+    // section (and its card), and the project-home row is measured from the
+    // label. Like the panel's own refresh_language, this only moves
+    // windows — drafts live in control state, not geometry. Positions come
+    // from the same theme_flow used at creation, so the sites cannot drift.
+    let flow = theme_flow();
     for (id, x, y, w, h) in [
-        (ID_THEME_HINT, CONTENT_X, 234, 468, theme_hint_h),
+        (ID_THEME_HINT, ROW_X, 230, ROW_W, flow.hint_h),
+        (CARD_BASE + 2, CONTENT_X, 114, CARD_W, flow.schedule_card_h),
         (
             ID_THEME_BEHAVIOR_TITLE,
             CONTENT_X,
-            behavior_top,
-            468,
+            flow.behavior_title_y,
+            CARD_W,
             SECTION_TITLE_H,
         ),
         (
-            ID_THEME_BATTERY,
+            CARD_BASE + 3,
             CONTENT_X,
-            behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP,
-            468,
-            CHECK_H,
+            flow.behavior_card_y,
+            CARD_W,
+            2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP,
         ),
+        (ID_THEME_BATTERY, ROW_X, flow.battery_y, ROW_W, CHECK_H),
         (
             ID_THEME_FULLSCREEN,
-            CONTENT_X,
-            behavior_top + SECTION_TITLE_H + SECTION_ITEM_GAP + CHECK_H + FUNCTION_GAP,
-            468,
+            ROW_X,
+            flow.fullscreen_y,
+            ROW_W,
             CHECK_H,
         ),
     ] {
@@ -2895,18 +2992,18 @@ pub fn refresh_language() {
     let project_label = t_pub("settings_project_home_label");
     let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
     let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
-    let mut link_x = CONTENT_X + label_w + FUNCTION_GAP;
+    let mut link_x = ROW_X + label_w + LABEL_GAP;
     if is_chinese() {
         // CJK advance boxes carry extra trailing space (Go optical fix).
         link_x -= 10;
     }
     for (control, x, y, w, h) in [
-        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 310, label_w, 24),
+        (get(hwnd, ID_PROJECT_HOME_LBL), ROW_X, 308, label_w, 24),
         (
             get(hwnd, ID_PROJECT_HOME),
             link_x,
             308,
-            url_w.min(CONTENT_RIGHT - link_x),
+            url_w.min(ROW_RIGHT - link_x),
             24,
         ),
     ] {
