@@ -15,7 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
-use crate::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, LABEL_GAP, TITLE_GAP, row_slot};
+use crate::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, GAP, LABEL_GAP, TITLE_GAP, row_slot};
 use crate::{t_pub, theme};
 
 // Control ids — Go settingspanel.go numbering, extended in the Rust port.
@@ -29,7 +29,6 @@ const ID_BATTERY_LBL: i32 = 113;
 const ID_BATTERY_THRESH: i32 = 114;
 const ID_WARNING_LBL: i32 = 115;
 const ID_WARNING_SECONDS: i32 = 116;
-const ID_POWER_HINT: i32 = 117;
 const ID_IDLE_TIMEOUT_LBL: i32 = 118;
 const ID_IDLE_TIMEOUT: i32 = 119;
 const ID_IDLE_ACTION_LBL: i32 = 120;
@@ -117,27 +116,30 @@ static CURSOR_PREVIOUS: std::sync::LazyLock<
 
 // Layout tokens — Go controls.go build() constants, now riding the shared
 // panel grammar from the layout module for card sections and row rhythm.
-const CLIENT_W: i32 = 700;
-const CLIENT_H: i32 = 580;
-const CONTENT_X: i32 = 208;
-const CONTENT_RIGHT: i32 = 676;
+const CLIENT_W: i32 = 676;
+const CLIENT_H: i32 = 510;
+const CONTENT_X: i32 = 184;
+const CONTENT_RIGHT: i32 = CLIENT_W - 24;
 const SECTION_TOP: i32 = 90;
 const SECTION_TITLE_H: i32 = 20;
 const CHECK_H: i32 = 28;
 const BTN_H: i32 = 36;
 // Two-line validation row above the footer buttons: the English conflict
 // message measures ~491px and Go's inline 236px label clipped it mid-sentence.
-const VALIDATION_H: i32 = 48;
+const VALIDATION_H: i32 = 26;
 const FIELD_H: i32 = 34;
+// Unified numeric field width: half the old 128 column - the values are
+// short numbers, and one width across the page reads as a system.
+const FIELD_W: i32 = 64;
 const DIALOG_BTN_W: i32 = 104;
-const FOOTER_Y: i32 = CLIENT_H - 18 - BTN_H;
+const FOOTER_Y: i32 = CLIENT_H - 12 - BTN_H;
 // Panel card grammar: cards span the content column, rows sit one
 // CARD_PAD_X inside them, right-aligned controls end at ROW_RIGHT.
 const CARD_W: i32 = CONTENT_RIGHT - CONTENT_X; // 468
 const ROW_X: i32 = CONTENT_X + CARD_PAD_X; // 220
 const ROW_RIGHT: i32 = CONTENT_RIGHT - CARD_PAD_X; // 664
 const ROW_W: i32 = ROW_RIGHT - ROW_X; // 444
-// Owner-drawn section card surfaces (CARD_BASE..CARD_BASE + 9), one per
+// Owner-drawn section card surfaces (CARD_BASE..=CARD_BASE + 7), one per
 // section across the five pages; drawn by the WM_DRAWITEM dispatch.
 const CARD_BASE: i32 = 620;
 
@@ -151,9 +153,6 @@ const IDLE_ACTIONS: [&str; 6] = [
 ];
 const LANG_VALUES: [&str; 3] = ["auto", "en", "zh-CN"];
 const PROJECT_URL: &str = "https://github.com/JeffioZ/IdleTrigger";
-
-// Edit surfaces use the Go idFieldSurfaceBase offset from the inner edit id.
-const FIELD_SURFACE_BASE: i32 = 500;
 
 // Owner-drawn checkbox states (BM_SETCHECK is inert on owner-draw buttons).
 static CHECKS: std::sync::Mutex<Option<std::collections::HashMap<i32, bool>>> =
@@ -269,13 +268,26 @@ pub fn show() {
         }
         request_location_preview(hwnd);
         let _ = EnableWindow(crate::hwnd(&crate::PANEL), false);
-        crate::FirstFrameGate::begin(hwnd).reveal();
+        // The radical fix for the invisible field wells: DWM's first
+        // composition of this window's stacked owner-draw statics clips
+        // the field surfaces, and no amount of invalidation repaints them.
+        // Dragging the window off-screen and back rebuilds the redirection
+        // surface - so do exactly that cycle programmatically, CLOAKED, so
+        // the user never sees either state: show, present, hide, show,
+        // present, then uncloak.
+        let gate = crate::FirstFrameGate::begin(hwnd);
         let _ = SetForegroundWindow(hwnd);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        crate::present_frame(hwnd);
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        crate::present_frame(hwnd);
+        gate.reveal();
     }
 }
 
-/// Devtools capture support: the settings window handle.
-#[cfg(feature = "devtools")]
+/// Devtools capture and regression-test support: the settings window.
+#[cfg(any(feature = "devtools", test))]
 pub fn devtools_capture_hwnd() -> HWND {
     current()
 }
@@ -298,9 +310,6 @@ pub fn devtools_select_page(page: i32) {
     }
     PAGE.store(page, Ordering::SeqCst);
     apply_dependent_states(hwnd);
-    unsafe {
-        apply_page_height(hwnd);
-    }
 }
 
 fn create() {
@@ -313,7 +322,8 @@ fn create() {
         register_class(instance);
 
         let style = WINDOW_STYLE(
-            WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0,
+            (WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0)
+                | WS_CLIPCHILDREN.0,
         );
         let mut frame = RECT {
             left: 0,
@@ -350,13 +360,24 @@ fn create() {
         populate(hwnd);
         PAGE.store(0, Ordering::SeqCst);
         apply_dependent_states(hwnd);
-        if std::env::var_os("IT_BISECT1").is_none() {
-            theme::retheme_children(hwnd);
-        }
-        if std::env::var_os("IT_BISECT2").is_none() {
-            create_tooltip(hwnd);
-        }
+        theme::retheme_children(hwnd);
+        create_tooltip(hwnd);
         retheme_tooltip();
+        // The power page is the tall one: size to it before the first
+        // show, then force one full repaint - owner-draw statics stack
+        // badly on the initial DWM frame (fields and card bottoms clip
+        // until a full invalidate, which is what moving the window
+        // off-screen and back used to fix by hand).
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                | windows::Win32::Graphics::Gdi::RDW_ERASE
+                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN
+                | windows::Win32::Graphics::Gdi::RDW_FRAME,
+        );
+        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
         crate::viewport::fit(hwnd);
     }
 }
@@ -440,7 +461,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 sub_id,
                 &t_pub(sub_key),
                 font,
-                (24, 42, 652, 20),
+                (24, 42, 608, 20),
                 false,
             );
         }
@@ -449,40 +470,40 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_VERSION,
             &t_pub("settings_version").replace("%s", crate::APP_VERSION),
             font,
-            (508, 18, 168, 22),
+            (484, 18, 168, 22),
             true,
         );
 
-        // Left navigation tabs (Go: 156×36 at x=24, 44px pitch).
+        // Left navigation tabs: ink-only column, 128×36 at x=20, 44px pitch.
         tab_button(
             hwnd,
             ID_TAB_POWER,
             &t_pub("settings_tab_power"),
-            (24, 90, 156, BTN_H),
+            (20, 90, 128, BTN_H),
         );
         tab_button(
             hwnd,
             ID_TAB_THEME,
             &t_pub("settings_tab_theme"),
-            (24, 134, 156, BTN_H),
+            (20, 134, 128, BTN_H),
         );
         tab_button(
             hwnd,
             ID_TAB_APPEARANCE,
             &t_pub("settings_tab_appearance"),
-            (24, 178, 156, BTN_H),
+            (20, 178, 128, BTN_H),
         );
         tab_button(
             hwnd,
             ID_TAB_NOTIFICATIONS,
             &t_pub("settings_tab_notifications"),
-            (24, 222, 156, BTN_H),
+            (20, 222, 128, BTN_H),
         );
         tab_button(
             hwnd,
             ID_TAB_APP,
             &t_pub("settings_tab_app"),
-            (24, 266, 156, BTN_H),
+            (20, 266, 128, BTN_H),
         );
 
         // Pages ride the panel card grammar: the section title sits outside
@@ -490,7 +511,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         // cards separate by CARD_GAP instead of bare whitespace.
 
         // Power and idle page.
-        section_card(hwnd, CARD_BASE, font, (CONTENT_X, 114, CARD_W, 180));
+        section_card(hwnd, CARD_BASE, font, (CONTENT_X, 114, CARD_W, 152));
         label(
             hwnd,
             ID_POWER_TITLE,
@@ -505,16 +526,18 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             &t_pub("settings_keep_screen"),
             (ROW_X, 122, ROW_W, CHECK_H),
         );
-        checkbox(
-            hwnd,
-            ID_BATTERY_ALLOWED,
-            &t_pub("settings_battery_allowed"),
-            (ROW_X, 156, ROW_W, CHECK_H),
-        );
+        // Row order: screen-lock pause rides directly under Keep awake;
+        // the battery pair keeps its label+field closest together.
         checkbox(
             hwnd,
             ID_PAUSE_ON_LOCK,
             &t_pub("settings_pause_on_lock"),
+            (ROW_X, 156, ROW_W, CHECK_H),
+        );
+        checkbox(
+            hwnd,
+            ID_BATTERY_ALLOWED,
+            &t_pub("settings_battery_allowed"),
             (ROW_X, 190, ROW_W, CHECK_H),
         );
         label(
@@ -522,63 +545,85 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_BATTERY_LBL,
             &t_pub("settings_battery_threshold"),
             font,
-            (ROW_X, 230, 308, 22),
+            (ROW_X, 230, 640 - 64 - 8 - ROW_X, 22),
             false,
         );
-        edit(hwnd, ID_BATTERY_THRESH, (536, 224, 128, FIELD_H), true);
-        label(
+        edit(
             hwnd,
-            ID_POWER_HINT,
-            &t_pub("settings_power_hint"),
-            font,
-            (ROW_X, 264, ROW_W, 22),
-            false,
+            ID_BATTERY_THRESH,
+            (640 - 64, 224, FIELD_W, FIELD_H),
+            true,
         );
-        section_card(hwnd, CARD_BASE + 1, font, (CONTENT_X, 328, CARD_W, 164));
+        section_card(hwnd, CARD_BASE + 1, font, (CONTENT_X, 300, CARD_W, 124));
         label(
             hwnd,
             ID_IDLE_TITLE,
             &t_pub("settings_idle_title"),
             section_font,
-            (CONTENT_X, 304, CARD_W, SECTION_TITLE_H),
+            (CONTENT_X, 276, CARD_W, SECTION_TITLE_H),
             false,
         );
         checkbox(
             hwnd,
             ID_IDLE_ENHANCED,
             &t_pub("menu_idle_enhanced"),
-            (ROW_X, 336, ROW_W, CHECK_H),
+            (ROW_X, 308, ROW_W, CHECK_H),
         );
-        label(
-            hwnd,
-            ID_IDLE_TIMEOUT_LBL,
-            &t_pub("settings_idle_timeout_minutes"),
-            font,
-            (ROW_X, 376, 308, 22),
-            false,
-        );
-        edit(hwnd, ID_IDLE_TIMEOUT, (536, 370, 128, FIELD_H), true);
-        label(
-            hwnd,
-            ID_WARNING_LBL,
-            &t_pub("settings_idle_warning_seconds"),
-            font,
-            (ROW_X, 416, 308, 22),
-            false,
-        );
-        edit(hwnd, ID_WARNING_SECONDS, (536, 410, 128, FIELD_H), true);
+        // The two timing numbers share a row (half-width label+field
+        // pairs, the same split the power card's switches use); the action
+        // dropdown keeps its own row.
+        for (index, (label_id, edit_id, key)) in [
+            (
+                ID_IDLE_TIMEOUT_LBL,
+                ID_IDLE_TIMEOUT,
+                "settings_idle_timeout_minutes",
+            ),
+            (
+                ID_WARNING_LBL,
+                ID_WARNING_SECONDS,
+                "settings_idle_warning_seconds",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (slot_x, slot_w) = row_slot(ROW_W, 2, index as i32);
+            let x = ROW_X + slot_x;
+            label(
+                hwnd,
+                label_id,
+                &t_pub(key),
+                font,
+                (x, 348, slot_w - FIELD_W - 8, 22),
+                false,
+            );
+            // SS_NOTIFY makes the static hit-testable so its hover tooltip
+            // can fire (plain statics are mouse-transparent).
+            let pair_label = get(hwnd, label_id);
+            let _ = SetWindowLongPtrW(
+                pair_label,
+                GWL_STYLE,
+                (GetWindowLongPtrW(pair_label, GWL_STYLE) | 0x00000100) as _, // SS_NOTIFY
+            );
+            edit(
+                hwnd,
+                edit_id,
+                (x + slot_w - FIELD_W, 342, FIELD_W, FIELD_H),
+                true,
+            );
+        }
         label(
             hwnd,
             ID_IDLE_ACTION_LBL,
             &t_pub("settings_idle_action"),
             font,
-            (ROW_X, 456, 308, 22),
+            (ROW_X, 388, 308, 22),
             false,
         );
         combo(
             hwnd,
             ID_IDLE_ACTION,
-            (536, 450, 128, FIELD_H),
+            (512, 382, 128, FIELD_H),
             &idle_action_labels(),
         );
 
@@ -611,7 +656,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         combo(
             hwnd,
             ID_THEME_MODE,
-            (444, 122, 220, FIELD_H),
+            (420, 122, 220, FIELD_H),
             &[
                 t_pub("settings_theme_fixed"),
                 t_pub("settings_theme_sunrise"),
@@ -625,16 +670,16 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             (ROW_X, 168, 104, 22),
             false,
         );
-        edit(hwnd, ID_LIGHT_TIME, (332, 162, 104, FIELD_H), false);
+        edit(hwnd, ID_LIGHT_TIME, (308, 162, 104, FIELD_H), false);
         label(
             hwnd,
             ID_DARK_TIME_LBL,
             &t_pub("settings_dark_time"),
             font,
-            (452, 168, 104, 22),
+            (428, 168, 104, 22),
             false,
         );
-        edit(hwnd, ID_DARK_TIME, (560, 162, 104, FIELD_H), false);
+        edit(hwnd, ID_DARK_TIME, (536, 162, 104, FIELD_H), false);
         label(
             hwnd,
             ID_LOCATION_LBL,
@@ -646,7 +691,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         combo(
             hwnd,
             ID_LOCATION_SOURCE,
-            (444, 162, 220, FIELD_H),
+            (420, 162, 220, FIELD_H),
             &[
                 t_pub("settings_location_auto"),
                 t_pub("settings_location_ip"),
@@ -703,7 +748,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         // Appearance page (its own tab): paired light/dark columns for
         // wallpaper and cursor schemes inside one card, over a shared
         // wallpaper library. Layout grid inside the card: row labels at
-        // ROW_X, light column 288..470, dark column 482..664. The header
+        // ROW_X, light and dark columns ride row_slot halves. The header
         // pair above carries the intro, so the card starts at SECTION_TOP.
         section_card(
             hwnd,
@@ -716,7 +761,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_COL_LIGHT,
             &t_pub("settings_light_side"),
             section_font,
-            (288, 98, 182, 22),
+            (264, 98, 182, 22),
             false,
         );
         label(
@@ -724,7 +769,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_COL_DARK,
             &t_pub("settings_dark_side"),
             section_font,
-            (482, 98, 182, 22),
+            (458, 98, 182, 22),
             false,
         );
         // Wallpaper row: pick from the library per side.
@@ -736,7 +781,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             (ROW_X, 132, 56, 22),
             false,
         );
-        for (id, x) in [(ID_LIGHT_WALL, 288), (ID_DARK_WALL, 482)] {
+        for (id, x) in [(ID_LIGHT_WALL, 264), (ID_DARK_WALL, 458)] {
             combo_items(hwnd, id, (x, 126, 182, FIELD_H), &wallpaper_pick_items(""));
         }
         // Cursor row: installed schemes per side, with the .inf installer
@@ -749,7 +794,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             (ROW_X, 172, 56, 22),
             false,
         );
-        for (id, x) in [(ID_LIGHT_CURSOR, 288), (ID_DARK_CURSOR, 482)] {
+        for (id, x) in [(ID_LIGHT_CURSOR, 264), (ID_DARK_CURSOR, 458)] {
             combo_items(hwnd, id, (x, 166, 182, FIELD_H), &cursor_choice_rows());
         }
         // Restore pair: back to the state captured before the first
@@ -801,7 +846,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         combo(
             hwnd,
             ID_LANGUAGE,
-            (444, 122, 220, FIELD_H),
+            (420, 122, 220, FIELD_H),
             &[
                 t_pub("menu_lang_auto"),
                 t_pub("menu_lang_en"),
@@ -839,7 +884,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         let project_label = t_pub("settings_project_home_label");
         let label_w = logical_text_width(hwnd, font, &project_label, 96) + 2;
         let url_w = logical_text_width(hwnd, font, PROJECT_URL, 376) + 2;
-        let mut link_x = ROW_X + label_w + LABEL_GAP;
+        let mut link_x = CONTENT_X + label_w + GAP;
         if is_chinese() {
             // CJK advance boxes carry extra trailing space (Go optical fix).
             link_x -= 10;
@@ -849,7 +894,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_PROJECT_HOME_LBL,
             &project_label,
             font,
-            (ROW_X, 308, label_w, 24),
+            (CONTENT_X, 308, label_w, 22),
             false,
         );
         // Go renders the URL as an underlined accent-colored text link with
@@ -858,7 +903,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_PROJECT_HOME,
             PROJECT_URL,
-            (link_x, 308, url_w.min(ROW_RIGHT - link_x), 24),
+            (link_x, 308, url_w.min(CONTENT_RIGHT - link_x), 22),
         );
 
         // Screen notifications page.
@@ -895,7 +940,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             "Scroll Lock",
             (ROW_X + 24, 224, ROW_W - 24, CHECK_H),
         );
-        section_card(hwnd, CARD_BASE + 6, font, (CONTENT_X, 294, CARD_W, 134));
+        let notif_hint_h = if is_chinese() { 22 } else { 42 };
+        section_card(
+            hwnd,
+            CARD_BASE + 6,
+            font,
+            (CONTENT_X, 294, CARD_W, 92 + notif_hint_h),
+        );
         label(
             hwnd,
             ID_NOTIFICATIONS_BEHAVIOR,
@@ -915,26 +966,38 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_NOTIFICATIONS_HINT,
             &t_pub("settings_notification_hint"),
             font,
-            (ROW_X, 336, ROW_W, 42),
+            (ROW_X, 336, ROW_W, notif_hint_h),
             false,
         );
+        // The preview button follows the hint: the one-line Chinese hint
+        // sits higher than the two-line English one.
         push_button(
             hwnd,
             ID_LOCK_PREVIEW,
             &t_pub("settings_notification_preview"),
-            (ROW_X, 384, 160, BTN_H),
+            (ROW_X, 336 + notif_hint_h + 6, 160, BTN_H),
         );
 
-        // Footer: full-width two-line validation above the buttons (Go kept
-        // it inline next to them and truncated long bilingual messages).
+        // Footer: single-line validation above the buttons; long bilingual
+        // messages ellipsize rather than claiming a second line.
         label(
             hwnd,
             ID_VALIDATION,
             "",
             font,
-            (CONTENT_X, FOOTER_Y - VALIDATION_H - 8, 468, VALIDATION_H),
+            (CONTENT_X, FOOTER_Y - VALIDATION_H - 6, 468, VALIDATION_H),
             false,
         );
+        // Single-line now: long bilingual messages ellipsize instead of
+        // needing a second line.
+        {
+            let control = get(hwnd, ID_VALIDATION);
+            let _ = SetWindowLongPtrW(
+                control,
+                GWL_STYLE,
+                (GetWindowLongPtrW(control, GWL_STYLE) | 0x00004000) as _, // SS_ENDELLIPSIS
+            );
+        }
         push_button(
             hwnd,
             ID_SAVE,
@@ -1011,7 +1074,11 @@ unsafe fn section_card(parent: HWND, id: i32, font: HFONT, b: (i32, i32, i32, i3
             parent,
             windows::core::w!("STATIC"),
             "",
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 13), // SS_OWNERDRAW
+            // WS_CLIPSIBLINGS: the card repaints the field wells it hosts;
+            // without it the card's DC does not exclude the edit sitting
+            // above, and a well repaint paints OVER the edit's pixels -
+            // toggling an unrelated switch made the field read as cleared.
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
             id,
             font,
             b,
@@ -1073,7 +1140,7 @@ unsafe fn sits_on_card(hwnd: HWND, child: HWND) -> bool {
         if GetWindowRect(child, &mut control).is_err() {
             return false;
         }
-        for id in CARD_BASE..CARD_BASE + 8 {
+        for id in CARD_BASE..=CARD_BASE + 7 {
             let card = get(hwnd, id);
             if card.is_invalid() {
                 continue;
@@ -1098,85 +1165,50 @@ unsafe fn sits_on_card(hwnd: HWND, child: HWND) -> bool {
     }
 }
 
-/// Client height for the current page: the content column ends at the
-/// page's last card and the footer follows at a fixed offset, so the
-/// window grows and shrinks with the page instead of reserving the tallest
-/// page's height everywhere (the old flat 580 was sized for the power
-/// page alone).
-fn page_client_h() -> i32 {
-    // Two sizes only: every page but power fits the normal height; the
-    // power page's stacked battery rows need the tall one. Per-page jitter
-    // read as restlessness - one common size with one deliberate exception
-    // reads intentional.
-    const NORMAL: i32 = 428 + 12 + VALIDATION_H + 8 + BTN_H + 18; // 550
-    const TALL: i32 = 492 + 12 + VALIDATION_H + 8 + BTN_H + 18; // 614
-    match PAGE.load(Ordering::SeqCst) {
-        0 => TALL,
-        _ => NORMAL,
+/// Invalidates one field's well on its hosting card. Scoped, never the
+/// whole card: a full-card repaint paints over the shared window surface
+/// and erases the pixels of every sibling sitting on the card.
+unsafe fn invalidate_well(hwnd: HWND, edit_id: i32) {
+    unsafe {
+        let card = match edit_id {
+            ID_BATTERY_THRESH => CARD_BASE,
+            ID_IDLE_TIMEOUT | ID_WARNING_SECONDS => CARD_BASE + 1,
+            ID_LIGHT_TIME | ID_DARK_TIME => CARD_BASE + 2,
+            _ => return,
+        };
+        let card = get(hwnd, card);
+        let edit = get(hwnd, edit_id);
+        if card.is_invalid() || edit.is_invalid() {
+            return;
+        }
+        let mut edit_rect = RECT::default();
+        let mut card_rect = RECT::default();
+        if GetWindowRect(edit, &mut edit_rect).is_err()
+            || GetWindowRect(card, &mut card_rect).is_err()
+        {
+            return;
+        }
+        let (side, vertical) = (s(3), s(7));
+        let well = RECT {
+            left: edit_rect.left - card_rect.left - side,
+            top: edit_rect.top - card_rect.top - vertical,
+            right: edit_rect.right - card_rect.left + side,
+            bottom: edit_rect.bottom - card_rect.top + vertical,
+        };
+        if well.right > well.left && well.bottom > well.top {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(card), Some(&well), false);
+        }
     }
 }
 
-/// Resizes the settings window to the active page's height, keeping its
-/// horizontal position and visual center, and parks the footer rows at the
-/// new bottom edge.
-unsafe fn apply_page_height(hwnd: HWND) {
-    unsafe {
-        let target = s(page_client_h());
-        let mut client = RECT::default();
-        if GetClientRect(hwnd, &mut client).is_err() {
-            return;
-        }
-        if client.bottom - client.top == target {
-            return;
-        }
-        let mut frame = RECT::default();
-        if GetWindowRect(hwnd, &mut frame).is_err() {
-            return;
-        }
-        let delta = target - (client.bottom - client.top);
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            frame.left,
-            frame.top - delta / 2,
-            frame.right - frame.left,
-            (frame.bottom - frame.top) + delta,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        let footer_y = target - s(18 + BTN_H);
-        let validation_y = footer_y - s(8 + VALIDATION_H);
-        for (id, y) in [
-            (ID_VALIDATION, validation_y),
-            (ID_CANCEL, footer_y),
-            (ID_SAVE, footer_y),
-        ] {
-            let control = get(hwnd, id);
-            if control.is_invalid() {
-                continue;
-            }
-            let mut rect = RECT::default();
-            if GetWindowRect(control, &mut rect).is_err() {
-                continue;
-            }
-            // ScreenToClient, NOT window-frame subtraction: the frame
-            // carries the title bar and borders, and re-adding that offset
-            // on every page switch made the footer march off to the right.
-            let mut anchor = windows::Win32::Foundation::POINT {
-                x: rect.left,
-                y: rect.top,
-            };
-            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut anchor);
-            let _ = SetWindowPos(
-                control,
-                None,
-                anchor.x,
-                y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-        crate::viewport::fit(hwnd);
+/// Edits hosted on each section card (by card control id): the card paints
+/// their wells.
+fn card_field_ids(card_id: i32) -> &'static [i32] {
+    match card_id - CARD_BASE {
+        0 => &[ID_BATTERY_THRESH],
+        1 => &[ID_IDLE_TIMEOUT, ID_WARNING_SECONDS],
+        2 => &[ID_LIGHT_TIME, ID_DARK_TIME],
+        _ => &[],
     }
 }
 
@@ -1225,8 +1257,8 @@ unsafe fn tab_button(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32))
     unsafe { push_button(parent, id, text, b) };
 }
 
-/// Owner-drawn checkbox: check state lives in CHECKS (BM_SETCHECK has no
-/// effect on owner-draw buttons), painted via paint::draw_checkbox.
+/// Owner-drawn switch row: on/off state lives in CHECKS (BM_SETCHECK has no
+/// effect on owner-draw buttons), painted via paint::draw_switch_row.
 unsafe fn checkbox(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
     unsafe {
         let hwnd = child(
@@ -1239,6 +1271,8 @@ unsafe fn checkbox(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
             b,
         );
         crate::nativeform::track(hwnd);
+        // Toggle rows hover on the pill column alone (panel parity).
+        crate::nativeform::set_hover_column(hwnd, s(crate::layout::SWITCH_HIT_W));
     }
 }
 
@@ -1259,35 +1293,17 @@ unsafe fn link(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
     }
 }
 
-/// Edit field: an owner-drawn STATIC surface paints the rounded border
-/// (paint::draw_field), with a borderless EDIT inset inside it (Go
-/// editWithStyle + ControlSurface parity).
-unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool) {
+/// Edit field: a borderless EDIT inset in the card face, with the
+/// surrounding well and hairline painted by the hosting card (see the
+/// CARD arm of the draw dispatch), so nothing stacks against the card
+/// (Go editWithStyle + ControlSurface parity).
+unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool) -> HWND {
     unsafe {
         let (x, y, w, _) = b;
-        // Surface static owns the field visuals; id mirrors Go's
-        // idFieldSurfaceBase scheme.
-        child(
-            parent,
-            windows::core::w!("STATIC"),
-            "",
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            FIELD_SURFACE_BASE + id,
-            body_font(),
-            (x, y, w, FIELD_H),
-        );
-        // Raise the pair above the section card: sibling reorders during
-        // page visibility churn park cards above their rows, which clips
-        // the surfaces' owner-draw DCs to nothing.
-        let _ = SetWindowPos(
-            get(parent, FIELD_SURFACE_BASE + id),
-            Some(windows::Win32::Foundation::HWND(std::ptr::null_mut())), // HWND_TOP
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        // The edit is the inner area; the surrounding well/ring paints on
+        // the hosting card's face (see the CARD arm in the draw dispatch),
+        // so the field is card pixels + one inset child - no stacking, no
+        // non-client tricks.
         let extra = if numeric { ES_NUMBER as u32 } else { 0 };
         let edit = child(
             parent,
@@ -1296,24 +1312,11 @@ unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool) {
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | extra),
             id,
             body_font(),
-            (x + 2, y + 7, w - 4, 20),
-        );
-        let _ = SetWindowPos(
-            edit,
-            Some(windows::Win32::Foundation::HWND(std::ptr::null_mut())), // HWND_TOP
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            (x + 3, y + 7, w - 6, FIELD_H - 14),
         );
         // Cap input length: 5 digits for numbers, 5 chars for HH:MM.
-        let _ = SendMessageW(
-            get(parent, id),
-            EM_SETLIMITTEXT,
-            Some(WPARAM(5)),
-            Some(LPARAM(0)),
-        );
+        let _ = SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(5)), Some(LPARAM(0)));
+        edit
     }
 }
 
@@ -1846,7 +1849,6 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_PAUSE_ON_LOCK,
             ID_BATTERY_LBL,
             ID_BATTERY_THRESH,
-            ID_POWER_HINT,
             ID_IDLE_TITLE,
             ID_IDLE_TIMEOUT_LBL,
             ID_IDLE_TIMEOUT,
@@ -1936,17 +1938,13 @@ fn apply_dependent_states(hwnd: HWND) {
         for p in 0..5 {
             for id in page_ids(p) {
                 show(*id, p == page);
-                // Edit surfaces hide/show together with their inner edit.
-                if field_surface_of(*id).is_some() {
-                    show(FIELD_SURFACE_BASE + *id, p == page);
-                }
             }
         }
-        if page == 0 {
-            let battery = is_checked(hwnd, ID_BATTERY_ALLOWED);
-            let _ = EnableWindow(get(hwnd, ID_BATTERY_THRESH), battery);
-            let _ = EnableWindow(get(hwnd, FIELD_SURFACE_BASE + ID_BATTERY_THRESH), battery);
-        }
+        // Page 0 note: the battery threshold field has NO disabled state -
+        // it always reads as editable and simply only takes effect while
+        // the battery-allowance switch is on. Enable/disable transitions
+        // were a persistent repaint hazard (erase-less EnableWindow
+        // repaints plus enable-state well repaints) for no real benefit.
         if page == 2 {
             // The pre-change restore needs a captured snapshot; the muted
             // caption under it explains when one appears.
@@ -1963,10 +1961,6 @@ fn apply_dependent_states(hwnd: HWND) {
                 ID_DARK_TIME,
             ] {
                 show(id, !sunrise);
-                // Field surfaces hide together with their inner edits.
-                if id == ID_LIGHT_TIME || id == ID_DARK_TIME {
-                    show(FIELD_SURFACE_BASE + id, !sunrise);
-                }
             }
             for id in [ID_LOCATION_LBL, ID_LOCATION_SOURCE, ID_THEME_HINT] {
                 show(id, sunrise);
@@ -1996,22 +1990,6 @@ fn apply_dependent_states(hwnd: HWND) {
             ID_LOCK_FULLSCREEN,
         ] {
             let _ = EnableWindow(get(hwnd, id), lock_keys);
-        }
-        // Repaint the tab buttons so the selected one shows the Active fill.
-        for id in [
-            ID_TAB_POWER,
-            ID_TAB_THEME,
-            ID_TAB_APP,
-            ID_TAB_NOTIFICATIONS,
-            ID_TAB_APPEARANCE,
-        ] {
-            let control = get(hwnd, id);
-            if !control.is_invalid() {
-                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, false);
-            }
-        }
-        if IsWindowVisible(hwnd).as_bool() {
-            crate::present_layout(hwnd);
         }
     }
 }
@@ -2495,19 +2473,10 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         set_text(hwnd, ID_VALIDATION, "");
                         LRESULT(0)
                     }
-                    // Repaint the field surface so the border follows focus
-                    // (Go ControlSurface focus tracking).
+                    // The well follows focus: repaint just that well, not
+                    // the whole card (full-card paints erase siblings).
                     EN_SETFOCUS | EN_KILLFOCUS => {
-                        if let Some(surface) = field_surface_of(idc) {
-                            let control = get(hwnd, surface);
-                            if !control.is_invalid() {
-                                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
-                                    Some(control),
-                                    None,
-                                    false,
-                                );
-                            }
-                        }
+                        invalidate_well(hwnd, idc);
                         LRESULT(0)
                     }
                     CBN_SELCHANGE if idc == ID_THEME_MODE || idc == ID_LOCATION_SOURCE => {
@@ -2582,11 +2551,17 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
                 let child = HWND(lparam.0 as *mut _);
                 let disabled = !IsWindowEnabled(child).as_bool();
-                let (fill, color) = if disabled {
-                    (p.disabled_surface, p.disabled_text)
+                // The erase BRUSH must match the card-face field wells
+                // (draw_field inset): the brush does the actual erasing,
+                // a surface brush here painted a white band over the well.
+                let (fill, color, brush) = if disabled {
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let pair = if theme::is_dark() { dark } else { light };
+                    (p.disabled_surface, p.disabled_text, pair.1)
                 } else {
-                    // Match the card-face field wells (draw_field inset).
-                    (p.window_bg, p.text)
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let pair = if theme::is_dark() { dark } else { light };
+                    (p.surface, p.text, pair.0)
                 };
                 let _ = windows::Win32::Graphics::Gdi::SetTextColor(
                     hdc,
@@ -2596,9 +2571,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     hdc,
                     windows::Win32::Foundation::COLORREF(fill),
                 );
-                let (light, dark) = theme::surface_brush_pairs();
-                let pair = if theme::is_dark() { dark } else { light };
-                let brush = if disabled { pair.1 } else { pair.0 };
                 LRESULT(brush.0 as isize)
             }
             WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => {
@@ -2644,7 +2616,6 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             | ID_PAGE_SUB_NOTIFICATIONS
                             | ID_PAGE_SUB_APP
                             | ID_VERSION
-                            | ID_POWER_HINT
                             | ID_THEME_HINT
                             | ID_THEME_LOCATION_STATUS
                             | ID_VALIDATION
@@ -2713,6 +2684,15 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 );
                 LRESULT(brush as isize)
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                // Shared blank drag (see nativeform::blank_drag_hit): a
+                // HTCLIENT point no interactive child claims drags the
+                // window. Never WindowFromPoint here - its probe re-enters
+                // this handler once transparent children sit above and
+                // recurses (the switch-row blank crash).
+                crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
             WM_DESTROY => {
                 SETTINGS_HWND.store(0, Ordering::SeqCst);
                 TOOLTIP_HWND.store(0, Ordering::SeqCst);
@@ -2729,35 +2709,53 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
     })
 }
 
-/// Surface static id for an edit id, when one exists.
-fn field_surface_of(edit_id: i32) -> Option<i32> {
-    if matches!(
-        edit_id,
-        ID_BATTERY_THRESH | ID_IDLE_TIMEOUT | ID_WARNING_SECONDS | ID_LIGHT_TIME | ID_DARK_TIME
-    ) {
-        Some(FIELD_SURFACE_BASE + edit_id)
-    } else {
-        None
-    }
-}
-
 /// WM_DRAWITEM dispatcher (Go settingspanel window.go drawItem).
 fn draw_settings_item(hwnd: HWND, item: &crate::nativeform::DrawItem) {
     // Buffered blit first (Go drawItemBuffered); fall back to direct paint.
     unsafe {
-        let skip_buffer = item.control_id >= FIELD_SURFACE_BASE;
-        if !skip_buffer
-            && crate::nativeform::draw_buffered(item.dc, &item.bounds, |dc, bounds| {
-                draw_settings_item_impl(hwnd, item, dc, bounds);
-            })
-        {
+        // Card repaints end in ONE SRCCOPY of the whole card rect back
+        // onto the target DC - an unclipped blit that overwrites the
+        // pixels of every edit hosted on the card (their text survives
+        // only if they happen to repaint afterwards). Cut the hosted
+        // edits' rects out of the TARGET DC first; BitBlt honors the DC
+        // clip, so neither the blit nor the direct fallback can touch
+        // the edits, no matter who invalidated the card or how widely.
+        if (CARD_BASE..=CARD_BASE + 7).contains(&item.control_id) {
+            let mut card_rect = RECT::default();
+            if GetWindowRect(item.control, &mut card_rect).is_ok() {
+                for edit_id in card_field_ids(item.control_id) {
+                    let edit = get(hwnd, *edit_id);
+                    if edit.is_invalid() || !IsWindowVisible(edit).as_bool() {
+                        continue;
+                    }
+                    let mut edit_rect = RECT::default();
+                    if GetWindowRect(edit, &mut edit_rect).is_ok() {
+                        let _ = windows::Win32::Graphics::Gdi::ExcludeClipRect(
+                            item.dc,
+                            edit_rect.left - card_rect.left,
+                            edit_rect.top - card_rect.top,
+                            edit_rect.right - card_rect.left,
+                            edit_rect.bottom - card_rect.top,
+                        );
+                    }
+                }
+            }
+        }
+        if crate::nativeform::draw_buffered(item.dc, &item.bounds, |dc, bounds| {
+            draw_settings_item_impl(hwnd, item, dc, bounds);
+        }) {
             return;
         }
         draw_settings_item_impl(hwnd, item, item.dc, &item.bounds);
     }
 }
 
-fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: HDC, bounds: &RECT) {
+unsafe fn draw_settings_item_impl(
+    hwnd: HWND,
+    item: &crate::nativeform::DrawItem,
+    dc: HDC,
+    bounds: &RECT,
+) {
     let p = theme::palette();
     let scale = crate::scale_pub(96);
     let id = item.control_id;
@@ -2771,146 +2769,176 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
             String::from_utf16_lossy(&buf[..copied.max(0) as usize])
         }
     };
-    unsafe {
-        if (CARD_BASE..CARD_BASE + 8).contains(&id) {
-            // Section card face: rounded surface with the family hairline,
-            // same grammar as the panel's cards.
-            crate::paint::draw_surface(
-                dc,
-                bounds,
-                p.window_bg,
-                p.surface,
-                p.border,
-                crate::paint::control_radius(),
-            );
-        } else if id >= FIELD_SURFACE_BASE {
-            // Edit field surface: focus/hover border via draw_field.
-            let edit = get(hwnd, id - FIELD_SURFACE_BASE);
-            let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.focused = GetFocus() == edit;
-            state.disabled = !IsWindowEnabled(edit).as_bool();
-            crate::paint::draw_field(
-                dc,
-                bounds,
-                p,
-                p.surface,
-                // Inset well on the card face (see draw_field): a
-                // same-color fill read as a missing field.
-                p.window_bg,
-                state,
-                crate::paint::control_radius(),
-            );
-        } else if id == ID_PROJECT_HOME {
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_text_link(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.surface,
-                state,
-                scale,
-            );
-        } else if crate::choice::is_choice(item.control) {
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
-        } else if matches!(
-            id,
-            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
-        ) {
-            let mut state = crate::nativeform::control_state(item.control, item.state);
-            let page = PAGE.load(Ordering::SeqCst);
-            state.active = id
-                == [
-                    ID_TAB_POWER,
-                    ID_TAB_THEME,
-                    ID_TAB_APPEARANCE,
-                    ID_TAB_NOTIFICATIONS,
-                    ID_TAB_APP,
-                ][page as usize];
-            crate::paint::draw_nav_item(
-                dc,
-                bounds,
-                crate::automation_ui::section_font_cached(),
-                body_font(),
-                &label,
-                p,
-                p.window_bg,
-                state,
-                scale,
-            );
-        } else if id == ID_RESTORE_DEFAULT {
-            // Factory reset is the form's one destructive action: quiet
-            // danger ink at rest, the filled danger style on approach.
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_button_danger(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.surface,
-                state,
-                crate::paint::control_radius(),
-            );
-        } else if id == ID_SAVE {
-            // Save is the form's default action: accent fill (Go state.Active).
-            let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.active = true;
-            crate::paint::draw_button(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.window_bg,
-                state,
-                crate::paint::control_radius(),
-            );
-        } else if checks().as_ref().is_some_and(|m| m.contains_key(&id)) {
-            // Toggle rows use the panel's switch grammar: the whole row is
-            // the hit target, the pill on the right carries the state. The
-            // checked value stays a DRAFT until Save, exactly like before.
-            let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.active = is_checked(hwnd, id);
-            crate::paint::draw_switch_row(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.surface,
-                state,
-                scale,
-            );
-        } else if matches!(id, ID_RESTORE_PREV | ID_LOCK_PREVIEW) {
-            // Buttons that sit on a card face must erase with the card
-            // color, or their background punch-through shows window ink.
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_button(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.surface,
-                state,
-                crate::paint::control_radius(),
-            );
-        } else {
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::paint::draw_button(
-                dc,
-                bounds,
-                body_font(),
-                &label,
-                p,
-                p.window_bg,
-                state,
-                crate::paint::control_radius(),
-            );
+    if (CARD_BASE..=CARD_BASE + 7).contains(&id) {
+        // Section card face: rounded surface with the family hairline,
+        // same grammar as the panel's cards.
+        crate::paint::draw_surface(
+            dc,
+            bounds,
+            p.window_bg,
+            p.surface,
+            p.border,
+            crate::paint::control_radius(),
+        );
+        // Field wells ride the card face: each hosted edit is inset, and
+        // the well + hairline around it are card pixels. The card never
+        // paints INSIDE an edit: draw_settings_item clips the edits out
+        // of the target DC (buffered-blit protection), and draw_field
+        // excludes them on the GDI+ side here.
+        for edit_id in card_field_ids(id) {
+            let edit = get(hwnd, *edit_id);
+            if edit.is_invalid() || !unsafe { IsWindowVisible(edit).as_bool() } {
+                // Hidden fields (fixed/sunrise mode swap) paint no well: a
+                // blank box where an inactive field would sit reads as a
+                // ghost control.
+                continue;
+            }
+            unsafe {
+                let mut edit_rect = RECT::default();
+                if GetWindowRect(edit, &mut edit_rect).is_err() {
+                    continue;
+                }
+                let mut card_rect = RECT::default();
+                if GetWindowRect(item.control, &mut card_rect).is_err() {
+                    continue;
+                }
+                let (side, vertical) = (s(3), s(7));
+                let well = RECT {
+                    left: edit_rect.left - card_rect.left - side,
+                    top: edit_rect.top - card_rect.top - vertical,
+                    right: edit_rect.right - card_rect.left + side,
+                    bottom: edit_rect.bottom - card_rect.top + vertical,
+                };
+                if well.right <= well.left || well.bottom <= well.top {
+                    continue;
+                }
+                // The owner-draw item DC carries NO sibling clipping
+                // (WS_CLIPSIBLINGS does not reach it), so an unclipped
+                // well fill lands on the edit's own pixels and blanks its
+                // text until the edit happens to repaint. Cut the edit's
+                // rect out on both the GDI and GDI+ sides: the card can
+                // then only ever paint the ring and margin around it.
+                let edit_area = RECT {
+                    left: edit_rect.left - card_rect.left,
+                    top: edit_rect.top - card_rect.top,
+                    right: edit_rect.right - card_rect.left,
+                    bottom: edit_rect.bottom - card_rect.top,
+                };
+                let state = crate::paint::ControlState {
+                    focused: GetFocus() == edit,
+                    disabled: !IsWindowEnabled(edit).as_bool(),
+                    ..Default::default()
+                };
+                crate::paint::draw_field(
+                    dc,
+                    &well,
+                    p,
+                    p.surface,
+                    p.surface,
+                    state,
+                    crate::paint::control_radius(),
+                    Some(&edit_area),
+                );
+            }
         }
+    } else if id == ID_PROJECT_HOME {
+        let state = crate::nativeform::control_state(item.control, item.state);
+        crate::paint::draw_text_link(
+            dc,
+            bounds,
+            body_font(),
+            &label,
+            p,
+            p.window_bg,
+            state,
+            scale,
+        );
+    } else if crate::choice::is_choice(item.control) {
+        let state = crate::nativeform::control_state(item.control, item.state);
+        crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
+    } else if matches!(
+        id,
+        ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
+    ) {
+        let mut state = crate::nativeform::control_state(item.control, item.state);
+        let page = PAGE.load(Ordering::SeqCst);
+        state.active = id
+            == [
+                ID_TAB_POWER,
+                ID_TAB_THEME,
+                ID_TAB_APPEARANCE,
+                ID_TAB_NOTIFICATIONS,
+                ID_TAB_APP,
+            ][page as usize];
+        crate::paint::draw_nav_item(
+            dc,
+            bounds,
+            crate::automation_ui::section_font_cached(),
+            body_font(),
+            &label,
+            p,
+            p.window_bg,
+            state,
+            scale,
+        );
+    } else if id == ID_SAVE {
+        // Save is the form's default action: accent fill (Go state.Active).
+        let mut state = crate::nativeform::control_state(item.control, item.state);
+        state.active = true;
+        crate::paint::draw_button(
+            dc,
+            bounds,
+            body_font(),
+            &label,
+            p,
+            p.window_bg,
+            state,
+            crate::paint::control_radius(),
+        );
+    } else if checks().as_ref().is_some_and(|m| m.contains_key(&id)) {
+        // Toggle rows use the panel's switch grammar: the whole row is
+        // the hit target, the pill on the right carries the state. The
+        // checked value stays a DRAFT until Save, exactly like before.
+        let mut state = crate::nativeform::control_state(item.control, item.state);
+        state.active = is_checked(hwnd, id);
+        let progress = crate::switch_animation_progress(item.control);
+        crate::paint::draw_switch_row(
+            dc,
+            bounds,
+            body_font(),
+            &label,
+            p,
+            p.surface,
+            state,
+            scale,
+            progress,
+        );
+    } else if matches!(id, ID_RESTORE_PREV | ID_LOCK_PREVIEW) {
+        // Buttons that sit on a card face must erase with the card
+        // color, or their background punch-through shows window ink.
+        let state = crate::nativeform::control_state(item.control, item.state);
+        crate::paint::draw_button(
+            dc,
+            bounds,
+            body_font(),
+            &label,
+            p,
+            p.surface,
+            state,
+            crate::paint::control_radius(),
+        );
+    } else {
+        let state = crate::nativeform::control_state(item.control, item.state);
+        crate::paint::draw_button(
+            dc,
+            bounds,
+            body_font(),
+            &label,
+            p,
+            p.window_bg,
+            state,
+            crate::paint::control_radius(),
+        );
     }
 }
 
@@ -2927,13 +2955,41 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 };
                 PAGE.store(page, Ordering::SeqCst);
                 apply_dependent_states(hwnd);
-                apply_page_height(hwnd);
+                // Page-change visuals live here, NOT in
+                // apply_dependent_states: that also runs on every checkbox
+                // toggle, and a tab sweep plus a full layout present per
+                // toggle made the rest of the page flash.
+                for id in [
+                    ID_TAB_POWER,
+                    ID_TAB_THEME,
+                    ID_TAB_APP,
+                    ID_TAB_NOTIFICATIONS,
+                    ID_TAB_APPEARANCE,
+                ] {
+                    let control = get(hwnd, id);
+                    if !control.is_invalid() {
+                        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                            Some(control),
+                            None,
+                            false,
+                        );
+                    }
+                }
+                if IsWindowVisible(hwnd).as_bool() {
+                    crate::present_layout(hwnd);
+                }
             }
             ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_PAUSE_ON_LOCK | ID_IDLE_ENHANCED
             | ID_THEME_BATTERY | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING
             | ID_LOCK_KEYS | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL | ID_LOCK_FULLSCREEN => {
-                // Owner-drawn checkboxes keep state in CHECKS.
+                // Owner-drawn checkboxes keep state in CHECKS. The flight
+                // animates the flip with the same glide the panel uses.
+                let before = is_checked(hwnd, idc);
                 toggle_checked(hwnd, idc);
+                let control = get(hwnd, idc);
+                if !control.is_invalid() {
+                    crate::start_switch_animation(control, before, is_checked(hwnd, idc));
+                }
                 apply_dependent_states(hwnd);
                 set_text(hwnd, ID_VALIDATION, "");
             }
@@ -3058,7 +3114,6 @@ pub fn refresh_language() {
         (ID_BATTERY_ALLOWED, "settings_battery_allowed"),
         (ID_PAUSE_ON_LOCK, "settings_pause_on_lock"),
         (ID_BATTERY_LBL, "settings_battery_threshold"),
-        (ID_POWER_HINT, "settings_power_hint"),
         (ID_IDLE_TITLE, "settings_idle_title"),
         (ID_IDLE_ENHANCED, "menu_idle_enhanced"),
         (ID_IDLE_TIMEOUT_LBL, "settings_idle_timeout_minutes"),
@@ -3196,19 +3251,19 @@ pub fn refresh_language() {
     let project_label = t_pub("settings_project_home_label");
     let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
     let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
-    let mut link_x = ROW_X + label_w + LABEL_GAP;
+    let mut link_x = CONTENT_X + label_w + GAP;
     if is_chinese() {
         // CJK advance boxes carry extra trailing space (Go optical fix).
         link_x -= 10;
     }
     for (control, x, y, w, h) in [
-        (get(hwnd, ID_PROJECT_HOME_LBL), ROW_X, 308, label_w, 24),
+        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 308, label_w, 22),
         (
             get(hwnd, ID_PROJECT_HOME),
             link_x,
             308,
-            url_w.min(ROW_RIGHT - link_x),
-            24,
+            url_w.min(CONTENT_RIGHT - link_x),
+            22,
         ),
     ] {
         unsafe {
@@ -3224,7 +3279,6 @@ pub fn refresh_language() {
         }
     }
     unsafe {
-        apply_page_height(hwnd);
         create_tooltip(hwnd);
     }
     refresh_theme();
@@ -3264,13 +3318,11 @@ mod locale_tests {
             |id| unsafe { GetWindowLongW(get(window, id), GWL_STYLE) as u32 & WS_VISIBLE.0 != 0 };
         assert!(visible(ID_LOCATION_SOURCE));
         assert!(!visible(ID_LIGHT_TIME));
-        assert!(!visible(FIELD_SURFACE_BASE + ID_LIGHT_TIME));
         assert!(!visible(ID_IDLE_TIMEOUT));
         crate::choice::select_index(get(window, ID_THEME_MODE), 0);
         apply_dependent_states(window);
         assert!(!visible(ID_LOCATION_SOURCE));
         assert!(visible(ID_LIGHT_TIME));
-        assert!(visible(FIELD_SURFACE_BASE + ID_LIGHT_TIME));
         assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
         unsafe {
             DestroyWindow(window).unwrap();

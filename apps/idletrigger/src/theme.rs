@@ -86,7 +86,7 @@ const LIGHT_PALETTE: Palette = Palette {
     danger_bg: 0x003934AE,             // RGB(174,52,57)
     danger_hover: 0x004446C8,          // RGB(200,68,68)
     danger_pressed: 0x002D2784,        // RGB(132,39,45)
-    danger_border: 0x008084EF,         // RGB(239,132,128)
+    danger_border: 0x005E60D8,         // RGB(216,96,94) >=3:1 on window/surface/hover
     danger_hover_border: 0x00AFB4FF,   // RGB(255,180,175)
     danger_pressed_border: 0x006A69D5, // RGB(213,105,106)
     danger_text: 0x00FBFAFF,           // RGB(255,250,251)
@@ -645,6 +645,12 @@ mod visual_tests {
             assert!(contrast(p.danger_text, p.danger_pressed) >= 4.5);
             for background in [p.danger_hover, p.danger_pressed] {
                 assert!(contrast(p.danger_focus, background) >= 3.0);
+            }
+            // The quiet-danger resting outline is the component's
+            // identifying boundary: >=3:1 against every backdrop a danger
+            // button sits on (window, card, hover fill).
+            for background in [p.window_bg, p.surface, p.hover_surface] {
+                assert!(contrast(p.danger_border, background) >= 3.0);
             }
             for ink in [p.link, p.link_hover, p.link_pressed] {
                 assert!(contrast(ink, p.window_bg) >= 4.5);

@@ -703,7 +703,10 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
         let pixels = bits as *mut u8;
         let count = (sw * sh * 4) as usize;
         // Opaque face fill; alpha is composed after the GDI text pass.
-        let face = p.window_bg;
+        // Family card grammar: cards are SURFACE with the hairline rim,
+        // never the window background (the darker face read as a foreign
+        // element next to the panel's cards).
+        let face = p.surface;
         let (fb, fg, fr) = ((face >> 16) as u8, (face >> 8) as u8, face as u8);
         let slice = std::slice::from_raw_parts_mut(pixels, count);
         for px in slice.chunks_exact_mut(4) {
@@ -713,9 +716,13 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
             px[3] = 255;
         }
         SetBkMode(dc, TRANSPARENT);
-        let mut ink = p.text2;
+        // Two ink tiers like the rest of the family: the glyph carries the
+        // state (accent when on, muted when off), the caption stays primary.
+        // Accent in BOTH themes - the darker focus ink lost contrast on the
+        // dark surface.
+        let mut ink = p.muted;
         if on {
-            ink = if dark { p.focus } else { p.accent };
+            ink = p.accent;
         }
         let mut top = pad + (height - content_h) / 2 - scale(1);
         for (i, (font, line, color)) in [(title_font, symbol, ink), (label_font, text, p.text)]
@@ -742,7 +749,9 @@ fn render_surface(dpi: u32, dark: bool, on: bool, symbol: &str, text: &str) -> O
         let scale_f = dpi as f64 / 96.0;
         let (half_w, half_h) = (sw as f64 / 2.0, sh as f64 / 2.0);
         let (card_hw, card_hh) = (half_w - pad as f64, half_h - pad as f64);
-        let (radius, sigma) = (9.0 * scale_f, 3.0 * scale_f);
+        // Family corner: control_radius() is dpi::scale(6) - one radius
+        // across cards, wells, chips and this toast.
+        let (radius, sigma) = (6.0 * scale_f, 3.0 * scale_f);
         let strength = if dark { 0.12 } else { 0.06 };
         let border = p.subtle_border;
         let (bb, bg_, br_) = ((border >> 16) as u8, (border >> 8) as u8, border as u8);

@@ -268,8 +268,26 @@ struct SwitchFlight {
     /// Whether the flight heads toward the switch's on position.
     to_now: bool,
     started: std::time::Instant,
+    /// The control being flown: flights drive any window's switch rows
+    /// (panel, settings, editor), invalidating the control directly. HWNDs
+    /// are only ever touched on the UI thread; the wrapper keeps the
+    /// static Mutex happy.
+    control: SendHwnd,
 }
-static SWITCH_FLIGHTS: Mutex<Vec<(usize, SwitchFlight)>> = Mutex::new(Vec::new());
+
+/// HWND that asserts UI-thread confinement for cross-window flight driving.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SendHwnd(usize);
+
+impl SendHwnd {
+    fn get(self) -> HWND {
+        HWND(self.0 as *mut _)
+    }
+}
+
+unsafe impl Send for SendHwnd {}
+
+static SWITCH_FLIGHTS: Mutex<Vec<SwitchFlight>> = Mutex::new(Vec::new());
 /// Switch thumb flight duration (ms). The paint eases the progress, so
 /// USER32's coarse timer granularity still reads as a smooth glide.
 const SWITCH_ANIM_MS: u64 = 180;
@@ -947,9 +965,9 @@ fn invalidate_control(id: usize) {
 }
 
 /// Progress (0..=1) of a running switch animation, if any.
-fn switch_animation_progress(id: usize) -> Option<f32> {
+pub(crate) fn switch_animation_progress(control: HWND) -> Option<f32> {
     let flights = crate::runtime::lock(&SWITCH_FLIGHTS);
-    let flight = &flights.iter().find(|(i, _)| *i == id)?.1;
+    let flight = flights.iter().find(|f| f.control.get() == control)?;
     let elapsed = flight.started.elapsed().as_millis() as f32;
     let t = (elapsed / SWITCH_ANIM_MS as f32).clamp(0.0, 1.0);
     // Ease-out: fast start, soft landing. Few frames with a coarse system
@@ -964,20 +982,19 @@ fn switch_animation_progress(id: usize) -> Option<f32> {
 }
 
 /// Arms a thumb flight for the control (no-op when animations are off or
-/// the state did not change). The panel timer advances and retires runs.
-fn start_switch_animation(id: usize, from: bool, to: bool) {
+/// the state did not change). The panel timer advances and retires runs
+/// for every window's switches.
+pub(crate) fn start_switch_animation(control: HWND, from: bool, to: bool) {
     if from == to || !popups::client_area_animations() {
         return;
     }
     let mut flights = crate::runtime::lock(&SWITCH_FLIGHTS);
-    flights.retain(|(i, _)| *i != id);
-    flights.push((
-        id,
-        SwitchFlight {
-            to_now: to,
-            started: std::time::Instant::now(),
-        },
-    ));
+    flights.retain(|f| f.control.get() != control);
+    flights.push(SwitchFlight {
+        to_now: to,
+        started: std::time::Instant::now(),
+        control: SendHwnd(control.0 as usize),
+    });
     unsafe {
         let _ = SetTimer(
             Some(hwnd(&PANEL)),
@@ -993,7 +1010,10 @@ fn start_switch_animation(id: usize, from: bool, to: bool) {
 /// suppression cannot outlive the click handler.
 fn arm_switch_flights(flights: &[(usize, bool)]) {
     for &(id, from) in flights {
-        start_switch_animation(id, from, toggle_value(id));
+        let control = unsafe { GetDlgItem(Some(hwnd(&PANEL)), id as i32) }.unwrap_or_default();
+        if !control.is_invalid() {
+            start_switch_animation(control, from, toggle_value(id));
+        }
     }
     if crate::runtime::lock(&SWITCH_FLIGHTS).is_empty() {
         crate::tooltips::set_suppressed(false);
@@ -1010,10 +1030,16 @@ fn tick_switch_animations() -> bool {
         crate::tooltips::set_suppressed(true);
     }
     let mut flights = crate::runtime::lock(&SWITCH_FLIGHTS);
-    flights.retain(|(id, flight)| {
+    flights.retain(|flight| {
         let done = flight.started.elapsed().as_millis() >= SWITCH_ANIM_MS as u128;
         if !done {
-            invalidate_control(*id);
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                    Some(flight.control.get()),
+                    None,
+                    false,
+                );
+            }
         }
         !done
     });
@@ -1079,7 +1105,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
             accessibility::check(item.control, state.active);
-            let progress = switch_animation_progress(id);
+            let progress = switch_animation_progress(item.control);
             paint::draw_switch(dc, bounds, p, p.surface, state, scale, progress);
         } else if id == IDC_EXIT_BUTTON {
             draw_exit_button(item, dc, bounds, &label, p, scale);
@@ -1482,25 +1508,12 @@ unsafe extern "system" fn panel_proc(
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
                 // Blank client areas drag the window (HTCAPTION gives the
-                // system's move + snap for free). Blank means WindowFromPoint
-                // resolves to the panel itself: statics (section titles,
-                // status lines, row labels, card surfaces) return
-                // HTTRANSPARENT and fall through, so their whole-row blanks
-                // drag like the background, while interactive controls
-                // (switches, chips, buttons, links) keep native hit-testing.
-                let hit = DefWindowProcW(hwnd_, msg, wparam, lparam);
-                let blank = hit.0 as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT && {
-                    let screen = windows::Win32::Foundation::POINT {
-                        x: (lparam.0 & 0xFFFF) as i16 as i32,
-                        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
-                    };
-                    windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(screen) == hwnd_
-                };
-                if blank {
-                    LRESULT(windows::Win32::UI::WindowsAndMessaging::HTCAPTION as isize)
-                } else {
-                    hit
-                }
+                // system's move + snap for free). Latched probe (see
+                // nativeform::blank_drag_hit): statics and switch-row
+                // blanks fall through and drag, interactive controls keep
+                // native hit-testing, and the internal WindowFromPoint
+                // probe cannot recurse into this handler.
+                crate::nativeform::blank_drag_hit(hwnd_, msg, wparam, lparam)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => {
                 // The panel carries WS_SYSMENU, so a right-click on a blank
@@ -2584,7 +2597,7 @@ unsafe fn create_control(spec: &ControlSpec, class: PCWSTR, extra_style: u32, he
 }
 
 /// Owner-drawn toggle/command button (Go: bsOwnerDraw BUTTON). Visuals come
-/// from paint::draw_button / draw_checkbox in the parent's WM_DRAWITEM.
+/// from paint::draw_button / paint::draw_switch_row in the parent's WM_DRAWITEM.
 fn owner_button(spec: &ControlSpec, height: i32) -> HWND {
     unsafe {
         let hwnd_ = create_control(

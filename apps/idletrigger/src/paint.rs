@@ -6,18 +6,18 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DeleteObject, DrawTextW, FillRect, FrameRect,
-    GetTextExtentPoint32W, HDC, HFONT, HGDIOBJ, LineTo, MoveToEx, PEN_STYLE, PS_SOLID, RoundRect,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DeleteObject, DrawTextW, ExcludeClipRect,
+    FillRect, FrameRect, GetTextExtentPoint32W, HDC, HFONT, HGDIOBJ, LineTo, MoveToEx, PEN_STYLE,
+    PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::Graphics::GdiPlus::Point as GpPoint;
 use windows::Win32::Graphics::GdiPlus::{
-    FillModeWinding, GdipAddPathBezierI, GdipAddPathLineI, GdipClosePathFigure, GdipCreateFromHDC,
-    GdipCreatePath, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-    GdipFillPath, GdipFillPolygonI, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
-    GdipStartPathFigure, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
-    GdiplusStartupOutput, GpBrush, GpGraphics, GpPath, GpSolidFill, PixelOffsetModeHalf,
-    SmoothingMode,
+    CombineModeExclude, FillModeWinding, GdipAddPathBezierI, GdipAddPathLineI, GdipClosePathFigure,
+    GdipCreateFromHDC, GdipCreatePath, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
+    GdipDeletePath, GdipFillPath, GdipFillPolygonI, GdipSetClipRectI, GdipSetPixelOffsetMode,
+    GdipSetSmoothingMode, GdipStartPathFigure, GdiplusShutdown, GdiplusStartup,
+    GdiplusStartupInput, GdiplusStartupOutput, GpBrush, GpGraphics, GpPath, GpSolidFill,
+    PixelOffsetModeHalf, SmoothingMode,
 };
 use windows::core::BOOL;
 
@@ -269,6 +269,21 @@ pub fn fill_rounded_rect(
     fill: u32,
     border: u32,
 ) -> DrawResult {
+    fill_rounded_rect_impl(hdc, bounds, radius, fill, border, None)
+}
+
+/// `fill_rounded_rect` with an optional clipped-out hole (card wells: the
+/// hosted edit's rect). The owner-draw item DC carries no sibling clipping
+/// and GDI+ ignores GDI clip regions, so wells exclude their edits on the
+/// GDI+ side to keep a card repaint off the edit's pixels.
+fn fill_rounded_rect_impl(
+    hdc: HDC,
+    bounds: &RECT,
+    radius: i32,
+    fill: u32,
+    border: u32,
+    exclude: Option<&RECT>,
+) -> DrawResult {
     if !ensure_started() || bounds.right - bounds.left <= 2 || bounds.bottom - bounds.top <= 2 {
         return DrawResult::NotStarted;
     }
@@ -277,6 +292,19 @@ pub fn fill_rounded_rect(
         let Some(graphics) = GraphicsGuard::new(hdc) else {
             return DrawResult::NotStarted;
         };
+        if let Some(ex) = exclude
+            && GdipSetClipRectI(
+                graphics.0,
+                ex.left,
+                ex.top,
+                ex.right - ex.left,
+                ex.bottom - ex.top,
+                CombineModeExclude,
+            )
+            .0 != 0
+        {
+            return DrawResult::NotStarted;
+        }
         let Some(border_brush) = BrushGuard::new(border) else {
             return DrawResult::NotStarted;
         };
@@ -495,6 +523,7 @@ pub fn draw_field(
     fill: u32,
     state: ControlState,
     radius: i32,
+    exclude: Option<&RECT>,
 ) {
     let (mut fill, mut border) = (fill, p.border);
     if state.disabled {
@@ -505,7 +534,52 @@ pub fn draw_field(
     } else if state.hovered {
         border = p.accent;
     }
-    draw_surface(hdc, bounds, background, fill, border, radius);
+    // GDI side of the exclusion: fill_rect and the GDI fallback honor the
+    // DC clip; the GDI+ rounded path gets its own SetClip below.
+    if let Some(ex) = exclude {
+        unsafe {
+            let _ = ExcludeClipRect(hdc, ex.left, ex.top, ex.right, ex.bottom);
+        }
+    }
+    fill_rect(hdc, bounds, background);
+    let fallback = || unsafe {
+        let brush = CreateSolidBrush(COLORREF(fill));
+        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(border));
+        if brush.is_invalid() || pen.is_invalid() {
+            if !brush.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+            if !pen.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+            }
+            return;
+        }
+        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = RoundRect(
+            hdc,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom,
+            (radius * 2).max(2),
+            (radius * 2).max(2),
+        );
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    };
+    match fill_rounded_rect_impl(hdc, bounds, radius, fill, border, exclude) {
+        DrawResult::Completed => {}
+        // Mid-fill failure may have written partial pixels: clear them, then
+        // still draw the GDI fallback like Go instead of leaving a hole.
+        DrawResult::MayBeDirty => {
+            fill_rect(hdc, bounds, background);
+            fallback();
+        }
+        DrawResult::NotStarted => fallback(),
+    }
 }
 
 /// Shared form corner radius in the same DPI/text scale as the controls.
@@ -732,18 +806,14 @@ pub fn draw_nav_item(
         p.disabled_text
     } else if state.active {
         p.text
+    } else if state.hovered || state.pressed {
+        p.link
     } else {
         p.text2
     };
-    if state.hovered || state.pressed {
-        let fill = p.hover_surface;
-        match fill_rounded_rect(hdc, bounds, control_radius(), fill, fill) {
-            DrawResult::Completed | DrawResult::MayBeDirty => {}
-            DrawResult::NotStarted => {
-                fill_rect(hdc, bounds, fill);
-            }
-        }
-    }
+    // No hover chip: hover is a text-color change alone (link ink for
+    // inactive entries), which sidesteps width measuring entirely.
+
     let bar_w = sp(3, scale);
     if state.active {
         let bar_h = sp(20, scale);
@@ -870,6 +940,7 @@ pub fn draw_switch_row(
     background: u32,
     state: ControlState,
     scale: i32,
+    progress: SwitchProgress,
 ) {
     fill_rect(hdc, bounds, background);
     let column = sp(crate::layout::SWITCH_HIT_W, scale);
@@ -893,7 +964,7 @@ pub fn draw_switch_row(
     unsafe {
         draw_row_text(hdc, &text, font, label, ink);
     }
-    draw_switch(hdc, &pill, p, background, state, scale, None);
+    draw_switch(hdc, &pill, p, background, state, scale, progress);
 }
 
 /// Single-line, vertically centered, end-ellipsis label for compact rows:
@@ -1040,6 +1111,7 @@ pub fn draw_menu_option(
     let (mut fill, mut border, mut text) = (p.surface, p.subtle_border, p.text);
     if danger {
         text = p.danger_surface_text;
+        border = p.danger_border;
     }
     if state.hovered {
         if danger {
@@ -1070,24 +1142,32 @@ pub fn draw_menu_option(
         border = if danger { p.danger_focus } else { p.focus };
     }
     draw_surface(hdc, bounds, background, fill, border, radius);
-    if selected {
-        // Go: marker.Left += MenuSurfaceInset(4) * scale, width 3 * scale.
-        let inset = sp(4, scale);
-        let marker = RECT {
-            left: bounds.left + inset,
-            right: bounds.left + inset + sp(3, scale),
-            top: bounds.top + sp(6, scale),
-            bottom: bounds.bottom - sp(6, scale),
-        };
-        if marker.left < marker.right && marker.top < marker.bottom {
-            fill_rect(hdc, &marker, p.accent);
-        }
-    }
     let use_font = if selected && !selected_font.is_invalid() {
         selected_font
     } else {
         font
     };
+    if selected {
+        // Nav-rail selected grammar (paint::draw_nav_item): a slim
+        // rounded accent bar, vertically centered - one selection
+        // language across flyouts and the settings navigation. The bar
+        // backs off the row's border by the nav's bar-to-text rhythm:
+        // flyout rows carry card chrome the rail does not, so a bar on
+        // the border line reads cramped.
+        let bar_w = sp(3, scale);
+        let bar_h = sp(20, scale);
+        let bar_x = bounds.left + sp(4, scale);
+        let marker = RECT {
+            left: bar_x,
+            top: bounds.top + (bounds.bottom - bounds.top - bar_h) / 2,
+            right: bar_x + bar_w,
+            bottom: bounds.top + (bounds.bottom - bounds.top + bar_h) / 2,
+        };
+        match fill_rounded_rect(hdc, &marker, bar_w.max(1), p.accent, p.accent) {
+            DrawResult::Completed | DrawResult::MayBeDirty => {}
+            DrawResult::NotStarted => fill_rect(hdc, &marker, p.accent),
+        }
+    }
     draw_label(
         hdc,
         bounds,
@@ -1095,8 +1175,8 @@ pub fn draw_menu_option(
         label,
         text,
         true,
-        sp(10, scale),
-        sp(8, scale),
+        sp(18, scale),
+        sp(4, scale),
     );
 }
 
@@ -1136,7 +1216,11 @@ pub fn draw_text_link(
         );
         let chars: Vec<u16> = label.encode_utf16().collect();
         let mut size = SIZE::default();
-        if GetTextExtentPoint32W(hdc, &chars, &mut size).as_bool() {
+        // The underline appears only on approach: at rest the link reads
+        // as colored text (Fluent link grammar).
+        if (state.hovered || state.pressed)
+            && GetTextExtentPoint32W(hdc, &chars, &mut size).as_bool()
+        {
             let underline_y = bounds.top + (bounds.bottom - bounds.top + size.cy) / 2;
             let pen = CreatePen(PEN_STYLE(PS_SOLID.0), sp(1, scale).max(1), COLORREF(color));
             if !pen.is_invalid() {

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use idletrigger_core::automation as auto;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -29,6 +29,9 @@ const MGR_NEW: usize = 301;
 const MGR_EDIT: usize = 302;
 const MGR_DELETE: usize = 303;
 const MGR_TOGGLE: usize = 304;
+/// Posted by the New-button flyout commit: opens the editor with the
+/// chosen template outside the popup teardown chain.
+const WM_MGR_TEMPLATE_OPEN: u32 = 0x800B;
 const MGR_LIST_SURFACE: usize = 310;
 const MGR_TITLE: usize = 311;
 const MGR_NEXT: usize = 312;
@@ -807,27 +810,22 @@ pub fn ensure_created() {
         // Button row: Go 116/116/116/192 grid (the wide one toggles).
         // MGR_TOGGLE's caption is state-managed (enable/disable wording);
         // the registry covers the static captions.
-        for (id, label_key, x, w) in [
-            (MGR_NEW, caption_key(MANAGER_TEXTS, MGR_NEW), MGR_PAD, 116),
-            (
-                MGR_EDIT,
-                caption_key(MANAGER_TEXTS, MGR_EDIT),
-                MGR_PAD + 116 + 8,
-                116,
-            ),
-            (
-                MGR_DELETE,
-                caption_key(MANAGER_TEXTS, MGR_DELETE),
-                MGR_PAD + 2 * (116 + 8),
-                116,
-            ),
-            (
-                MGR_TOGGLE,
-                "automation_toggle",
-                MGR_PAD + 3 * (116 + 8),
-                192,
-            ),
-        ] {
+        // Button row spans the content width exactly (3 x 130 + 230 + 3 x
+        // 8 = 644): no dead strip to the right of the actions.
+        for (index, (id, label_key)) in [
+            (MGR_NEW, caption_key(MANAGER_TEXTS, MGR_NEW)),
+            (MGR_EDIT, caption_key(MANAGER_TEXTS, MGR_EDIT)),
+            (MGR_DELETE, caption_key(MANAGER_TEXTS, MGR_DELETE)),
+            (MGR_TOGGLE, "automation_toggle"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (x, w) = if id == MGR_TOGGLE {
+                (MGR_PAD + 3 * (130 + 8), 230)
+            } else {
+                (MGR_PAD + index as i32 * (130 + 8), 130)
+            };
             let btn = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 windows::core::w!("BUTTON"),
@@ -1255,6 +1253,14 @@ unsafe extern "system" fn mgr_proc(
         lparam,
         move || unsafe {
             match msg {
+                WM_MGR_TEMPLATE_OPEN => {
+                    // Posted by the New flyout commit: opens the editor
+                    // outside the popup teardown chain.
+                    *crate::runtime::lock(&PENDING_TEMPLATE) = wparam.0;
+                    begin_edit(-1, Vec::new());
+                    show_editor();
+                    LRESULT(0)
+                }
                 WM_COMMAND => {
                     let code = wparam.0 & 0xFFFF;
                     let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
@@ -1262,6 +1268,20 @@ unsafe extern "system" fn mgr_proc(
                         MGR_NEW if hi == BN_CLICKED => {
                             crate::log_line("automation: new rule menu");
                             show_new_menu(hwnd);
+                        }
+                        // The template flyout commits through the choice
+                        // protocol; open the editor from a posted message so
+                        // it never runs inside the popup's teardown chain.
+                        MGR_NEW if hi == CBN_SELCHANGE => {
+                            let button = get_dlg_item(hwnd, MGR_NEW);
+                            if let Ok(index) = crate::choice::value(button).parse::<usize>() {
+                                let _ = PostMessageW(
+                                    Some(hwnd),
+                                    WM_MGR_TEMPLATE_OPEN,
+                                    WPARAM(index),
+                                    LPARAM(0),
+                                );
+                            }
                         }
                         MGR_EDIT if hi == BN_CLICKED => edit_selected(),
                         MGR_DELETE if hi == BN_CLICKED => delete_selected(hwnd),
@@ -1276,6 +1296,14 @@ unsafe extern "system" fn mgr_proc(
                     }
                     LRESULT(0)
                 }
+                windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                    // Shared blank drag (nativeform::blank_drag_hit): a
+                    // HTCLIENT point no interactive child claims drags the
+                    // window; never WindowFromPoint from inside a hit-test
+                    // (its probe re-enters the caller and recurses).
+                    crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
                 WM_CLOSE => {
                     // Esc targets the root window; with a draft open it must
                     // cancel the pane, not close the whole manager.
@@ -1300,21 +1328,17 @@ unsafe extern "system" fn mgr_proc(
                     LRESULT(1)
                 }
                 WM_CTLCOLORSTATIC => {
-                    // Secondary labels (Go isSecondaryLabel) get SecondaryText;
-                    // section titles keep PrimaryText. The empty-state overlay
+                    // Two ink tiers (settings parity): titles primary, status
+                    // and empty-state prose muted. The empty-state overlay
                     // paints on the Surface card.
                     let palette = theme::palette();
                     let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
-                    let secondary = matches!(id, MGR_EMPTY_BODY | MGR_NEXT);
+                    let muted = matches!(id, MGR_EMPTY_BODY | MGR_NEXT);
                     let on_surface = matches!(id, MGR_EMPTY_TITLE | MGR_EMPTY_BODY);
                     let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
                     let _ = windows::Win32::Graphics::Gdi::SetTextColor(
                         hdc,
-                        COLORREF(if secondary {
-                            palette.text2
-                        } else {
-                            palette.text
-                        }),
+                        COLORREF(if muted { palette.muted } else { palette.text }),
                     );
                     let _ = windows::Win32::Graphics::Gdi::SetBkColor(
                         hdc,
@@ -1404,6 +1428,11 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             p.border,
             crate::paint::control_radius(),
         );
+    } else if crate::choice::is_choice(item.control) {
+        // The New button hosts the template flyout and renders its closed
+        // state like every other dropdown.
+        let state = crate::nativeform::control_state(item.control, item.state);
+        crate::choice::draw_button(item.control, dc, bounds, state, p.window_bg);
     } else {
         let label = window_text(item.control);
         let state = crate::nativeform::control_state(item.control, item.state);
@@ -1642,48 +1671,28 @@ fn template_rule(index: usize) -> auto::Rule {
     rule
 }
 
-/// The New button opens a themed template menu instead of a blank editor.
+/// The New button opens the template list in the same choice flyout the
+/// dropdowns and quick menu use (panel grammar, no native menu chrome).
 fn show_new_menu(owner: HWND) {
-    unsafe {
-        let menu = CreatePopupMenu().unwrap_or_default();
-        if menu.is_invalid() {
-            // Fall back to the blank editor if menu creation failed.
+    {
+        let button = get_dlg_item(owner, MGR_NEW);
+        if button.is_invalid() {
             *crate::runtime::lock(&PENDING_TEMPLATE) = TEMPLATE_BLANK;
             begin_edit(-1, Vec::new());
             show_editor();
             return;
         }
-        for (index, key) in TEMPLATE_KEYS.iter().enumerate() {
-            if index == TEMPLATE_BLANK {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            }
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                index + 1,
-                PCWSTR(wide(&t_pub(key)).as_ptr()),
-            );
-        }
-        theme::prepare_popup_menu(owner, theme::is_dark());
-        let mut point = POINT::default();
-        let _ = GetCursorPos(&mut point);
-        // TPM_RETURNCMD: the BOOL payload carries the chosen command id.
-        let choice = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-            point.x,
-            point.y,
-            None,
-            owner,
-            None,
-        )
-        .0;
-        let _ = DestroyMenu(menu);
-        if choice > 0 {
-            *crate::runtime::lock(&PENDING_TEMPLATE) = choice as usize - 1;
-            begin_edit(-1, Vec::new());
-            show_editor();
-        }
+        let items: Vec<(String, String, bool)> = TEMPLATE_KEYS
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (index.to_string(), t_pub(key), false))
+            .collect();
+        // Atomic menu registration: caption kept, caret suppressed, no
+        // intermediate repaint with the dropdown look.
+        crate::choice::set_menu_items(button, &items);
+        crate::choice::set_prefer_above(button, true);
+        crate::choice::select_index(button, -1);
+        crate::choice::toggle(button, owner, MGR_NEW as i32);
     }
 }
 
@@ -2111,11 +2120,13 @@ fn create_editor() {
             &t_pub(caption_key(EDITOR_TEXTS, ED_DAYS_EVERYDAY)),
             24,
         );
-        mk_button(
+        let keep_screen = mk_button(
             ED_KEEP_SCREEN,
             &t_pub(caption_key(EDITOR_TEXTS, ED_KEEP_SCREEN)),
             ED_CHECK_H,
         );
+        // Toggle rows hover on the pill column alone (panel parity).
+        crate::nativeform::set_hover_column(keep_screen, s(crate::layout::SWITCH_HIT_W));
         mk_button(
             ED_PROC_INFO,
             &t_pub(caption_key(EDITOR_TEXTS, ED_PROC_INFO)),
@@ -2825,31 +2836,8 @@ fn layout_weekdays(
     mut y: i32,
     content_w: i32,
 ) -> i32 {
-    const QUICK_W: i32 = 88;
     const QUICK_H: i32 = 24;
     let gap = ED_GAP;
-    place(
-        ED_DAYS_LBL,
-        ED_PAD,
-        y + (QUICK_H - ED_LABEL_H) / 2,
-        content_w - 2 * (QUICK_W + gap),
-        ED_LABEL_H,
-    );
-    place(
-        ED_DAYS_WORKDAYS,
-        ED_PAD + content_w - 2 * QUICK_W - gap,
-        y,
-        QUICK_W,
-        QUICK_H,
-    );
-    place(
-        ED_DAYS_EVERYDAY,
-        ED_PAD + content_w - QUICK_W,
-        y,
-        QUICK_W,
-        QUICK_H,
-    );
-    y += QUICK_H + ED_RELATED_GAP;
     let days = [
         ED_DAYS_MON,
         ED_DAYS_TUE,
@@ -2860,6 +2848,20 @@ fn layout_weekdays(
         ED_DAYS_SUN,
     ];
     let button_w = (content_w - gap * (days.len() as i32 - 1)) / days.len() as i32;
+    // The quick pair rides the SAT/SUN columns of the day row below: same
+    // width, same x, so the two rows read as one grid.
+    let quick_sat_x = ED_PAD + 5 * (button_w + gap);
+    let quick_sun_x = ED_PAD + 6 * (button_w + gap);
+    place(
+        ED_DAYS_LBL,
+        ED_PAD,
+        y + (QUICK_H - ED_LABEL_H) / 2,
+        quick_sat_x - gap - ED_PAD,
+        ED_LABEL_H,
+    );
+    place(ED_DAYS_WORKDAYS, quick_sat_x, y, button_w, QUICK_H);
+    place(ED_DAYS_EVERYDAY, quick_sun_x, y, button_w, QUICK_H);
+    y += QUICK_H + ED_RELATED_GAP;
     for (index, id) in days.iter().enumerate() {
         place(
             *id,
@@ -2970,6 +2972,15 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         lparam,
         move || unsafe {
             match msg {
+                windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                    // The editor pane is a full-client CHILD of the manager:
+                    // its own blank surface must not claim the mouse (the
+                    // manager's blank drag would die while a draft is open),
+                    // while its controls keep answering for themselves.
+                    // Latched probe (nativeform::pane_blank_transparent):
+                    // no re-entrant recursion.
+                    crate::nativeform::pane_blank_transparent(hwnd, msg, wparam, lparam)
+                }
                 WM_COMMAND => {
                     let code = wparam.0 & 0xFFFF;
                     let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
@@ -2980,7 +2991,16 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
                         // Checkbox toggles (owner-draw; state in EDIT_CHECKS).
                         ED_KEEP_SCREEN if hi == BN_CLICKED => {
+                            let before = edit_is_checked(ED_KEEP_SCREEN);
                             edit_toggle(hwnd, ED_KEEP_SCREEN);
+                            let control = get_dlg_item(hwnd, ED_KEEP_SCREEN);
+                            if !control.is_invalid() {
+                                crate::start_switch_animation(
+                                    control,
+                                    before,
+                                    edit_is_checked(ED_KEEP_SCREEN),
+                                );
+                            }
                             clear_editor_error(hwnd);
                         }
                         ED_DAYS_MON | ED_DAYS_TUE | ED_DAYS_WED | ED_DAYS_THU | ED_DAYS_FRI
@@ -3078,22 +3098,6 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // titles PrimaryText, validation muted or danger-on-error.
                     let palette = theme::palette();
                     let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
-                    let secondary = matches!(
-                        id,
-                        ED_NAME_LBL
-                            | ED_ACTION_LBL
-                            | ED_TRIGGER_LBL
-                            | ED_DATE_LBL
-                            | ED_TIME_LBL
-                            | ED_END_LBL
-                            | ED_DAYS_LBL
-                            | ED_LOGIC_LBL
-                            | ED_IDLE_LBL
-                            | ED_WARN_LBL
-                            | ED_BLOCKED_LBL
-                            | ED_MAX_LBL
-                            | ED_PROC_SUMMARY
-                    );
                     let muted = matches!(id, ED_NAME_HINT | ED_NO_OPTIONS);
                     let color = if id == ED_VALIDATION {
                         if EDIT_ERROR.load(Ordering::SeqCst) {
@@ -3105,11 +3109,12 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         } else {
                             palette.muted
                         }
-                    } else if secondary {
-                        palette.text2
                     } else if muted {
                         palette.muted
                     } else {
+                        // Two ink tiers everywhere (settings parity): titles
+                        // AND field labels share the primary ink; muted is
+                        // reserved for real secondary prose.
                         palette.text
                     };
                     let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
@@ -3256,6 +3261,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 p.surface,
                 state,
                 crate::paint::control_radius(),
+                None,
             );
             return;
         }
@@ -3272,10 +3278,22 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
         ];
         if item.control_id == ED_KEEP_SCREEN as i32 {
             // The editor's one toggle rides the panel's switch-row grammar:
-            // label left, pill right, whole row is the hit target.
+            // label left, pill right, whole row is the hit target. Hover
+            // belongs to the pill column alone (panel parity).
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = edit_is_checked(ED_KEEP_SCREEN);
-            crate::paint::draw_switch_row(dc, bounds, font, &label, p, p.window_bg, state, scale);
+            let progress = crate::switch_animation_progress(item.control);
+            crate::paint::draw_switch_row(
+                dc,
+                bounds,
+                font,
+                &label,
+                p,
+                p.window_bg,
+                state,
+                scale,
+                progress,
+            );
         } else if item.control_id == ED_PROC_INFO as i32 {
             // Round info glyph (Go draws it as a circle button).
             let state = crate::nativeform::control_state(item.control, item.state);
@@ -3302,8 +3320,32 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 state,
                 crate::paint::control_radius(),
             );
-        } else {
+        } else if matches!(
+            item.control_id as usize,
+            ED_DAYS_WORKDAYS | ED_DAYS_EVERYDAY
+        ) {
+            // The weekday quick pair uses the panel's instant-action chip
+            // grammar (same as the timed keep-awake presets): a quiet verb
+            // chip, not a button.
             let state = crate::nativeform::control_state(item.control, item.state);
+            crate::paint::draw_chip(
+                dc,
+                bounds,
+                font,
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+                false,
+            );
+        } else {
+            let mut state = crate::nativeform::control_state(item.control, item.state);
+            // Footer parity with the settings form: Save (and the picker's
+            // Confirm) carry the accent fill of a default action.
+            if matches!(item.control_id as usize, ED_SAVE | PK_CONFIRM) {
+                state.active = true;
+            }
             crate::paint::draw_button(
                 dc,
                 bounds,
@@ -4758,6 +4800,14 @@ unsafe extern "system" fn picker_proc(
         lparam,
         move || unsafe {
             match msg {
+                windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                    // Shared blank drag (nativeform::blank_drag_hit): a
+                    // HTCLIENT point no interactive child claims drags the
+                    // window; never WindowFromPoint from inside a hit-test
+                    // (its probe re-enters the caller and recurses).
+                    crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
                 WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
                     if !PK_LOADING.load(Ordering::SeqCst)
                         && !PK_ENRICHING.load(Ordering::SeqCst)

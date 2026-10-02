@@ -54,6 +54,11 @@ pub struct InteractionState {
 struct Tracked {
     old_proc: isize,
     state: InteractionState,
+    /// Right-edge hover column in physical px (0 = the whole control
+    /// hovers). Switch rows set this to their pill column so hover lives
+    /// on the pill alone - panel parity, where the label is a separate
+    /// static that never hovers.
+    hover_column: i32,
 }
 
 static CONTROLS: Mutex<Option<HashMap<isize, Tracked>>> = Mutex::new(None);
@@ -168,6 +173,54 @@ fn with_map<R>(f: impl FnOnce(&mut HashMap<isize, Tracked>) -> R) -> R {
     f(guard.get_or_insert_with(HashMap::new))
 }
 
+/// Restricts a tracked control's hover state to its right-edge column of
+/// `physical_width` px (switch rows: the pill). Call after `track`.
+pub fn set_hover_column(control: HWND, physical_width: i32) {
+    with_map(|m| {
+        if let Some(t) = m.get_mut(&(control.0 as isize)) {
+            t.hover_column = physical_width;
+        }
+    });
+}
+
+/// Shared blank-drag hit-test for the panel-family top-level windows: a
+/// HTCLIENT point that resolves to the window itself becomes HTCAPTION,
+/// so true blanks drag with the system's move (and snap) while controls
+/// keep native hit-testing - including for direct WM_NCHITTEST queries
+/// from automation and tests. NOTE: tracked controls must never answer
+/// HTTRANSPARENT to make this probe fall through to them - that
+/// re-enters the caller's in-flight hit-test and recurses infinitely
+/// (the switch-row blank crash); column-limited clicks are swallowed in
+/// WM_LBUTTONDOWN instead.
+pub fn blank_drag_hit(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe {
+        let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
+        if hit.0 as u32 != windows::Win32::UI::WindowsAndMessaging::HTCLIENT {
+            return hit;
+        }
+        let screen = windows::Win32::Foundation::POINT {
+            x: (lparam.0 & 0xFFFF) as i16 as i32,
+            y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+        };
+        if windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(screen) == hwnd {
+            LRESULT(windows::Win32::UI::WindowsAndMessaging::HTCAPTION as isize)
+        } else {
+            hit
+        }
+    }
+}
+
+/// Overlay-pane variant (the rule editor inside the manager): the pane's
+/// own surface is always hit-transparent, so blank clicks fall through to
+/// the manager's blank drag while the pane's controls keep claiming their
+/// areas (the system asks them first). Unconditional is safe: the pane
+/// hosts no interactive surface of its own, and no tracked control on it
+/// ever routes through here.
+pub fn pane_blank_transparent(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let _ = (hwnd, msg, wparam, lparam);
+    LRESULT(windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize)
+}
+
 /// Subclasses `control` to observe hover/press/focus for owner drawing.
 pub fn track(control: HWND) {
     if control.is_invalid() {
@@ -195,6 +248,7 @@ pub fn track(control: HWND) {
                 key,
                 Tracked {
                     old_proc: old,
+                    hover_column: 0,
                     state: InteractionState::default(),
                 },
             );
@@ -321,11 +375,26 @@ unsafe extern "system" fn tracked_proc(
                 if FOCUS_VISIBLE.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     invalidate(hwnd);
                 }
+                // Column-tracked controls (switch rows) hover only inside
+                // their right-edge pill column; crossing out of it clears
+                // hover, so the pill never keeps a stale hover ring.
+                let in_column = with_map(|m| {
+                    match m.get(&key) {
+                        Some(t) if t.hover_column > 0 => {
+                            // WM_MOUSEMOVE carries client coordinates.
+                            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                            let mut rect = RECT::default();
+                            GetClientRect(hwnd, &mut rect).is_ok()
+                                && x >= rect.right - t.hover_column
+                        }
+                        _ => true,
+                    }
+                });
                 let changed = with_map(|m| {
                     if let Some(t) = m.get_mut(&key)
-                        && !t.state.hovered
+                        && t.state.hovered != in_column
                     {
-                        t.state.hovered = true;
+                        t.state.hovered = in_column;
                         return true;
                     }
                     false
@@ -335,7 +404,52 @@ unsafe extern "system" fn tracked_proc(
                     invalidate(hwnd);
                 }
             }
-            WM_LBUTTONDOWN => {
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                // Switch rows click as their pill column alone (hover
+                // parity). The label/blank half behaves like every other
+                // blank in the app: the press is forwarded to the parent
+                // as a caption drag, so the row-wide control geometry
+                // creates no dead zone - behaviorally the control is only
+                // as wide as its pill. No HTTRANSPARENT routing here (that
+                // re-entered the parent hit-test chain and crashed).
+                let in_column = with_map(|m| match m.get(&key) {
+                    Some(t) if t.hover_column > 0 => {
+                        let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                        let mut rect = RECT::default();
+                        GetClientRect(hwnd, &mut rect).is_ok() && x >= rect.right - t.hover_column
+                    }
+                    _ => true,
+                });
+                if !in_column {
+                    let mut pt = windows::Win32::Foundation::POINT {
+                        x: (lparam.0 & 0xFFFF) as i16 as i32,
+                        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+                    };
+                    if windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt).as_bool() {
+                        // Forward to the ROOT window, not the direct parent:
+                        // switch rows inside the editor pane are children of
+                        // a child, and a caption drag on the pane would slide
+                        // the pane (with all controls) inside the manager
+                        // instead of moving the window.
+                        let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                            hwnd,
+                            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                        );
+                        if !root.is_invalid() {
+                            let packed =
+                                (((pt.y as isize) & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF);
+                            let _ = SendMessageW(
+                                root,
+                                WM_NCLBUTTONDOWN,
+                                Some(WPARAM(
+                                    windows::Win32::UI::WindowsAndMessaging::HTCAPTION as usize,
+                                )),
+                                Some(LPARAM(packed)),
+                            );
+                        }
+                    }
+                    return LRESULT(0);
+                }
                 if FOCUS_VISIBLE.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     invalidate(hwnd);
                 }
@@ -549,6 +663,36 @@ pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
                 None,
                 Some(LPARAM(&tool as *const _ as isize)),
             );
+            // Switch rows hover as their pill column alone (draw + click
+            // parity): clip the tooltip tool to that column too, so the
+            // blank half between label and pill never pops a tip over
+            // nothing. Rect is in the tool window's own client coords.
+            let column = with_map(|m| m.get(&(control.0 as isize)).map_or(0, |t| t.hover_column));
+            if column > 0 {
+                let mut client = RECT::default();
+                if GetClientRect(control, &mut client).is_ok() {
+                    let rect = RECT {
+                        left: (client.right - column).max(0),
+                        top: 0,
+                        right: client.right,
+                        bottom: client.bottom,
+                    };
+                    let clipped = TTTOOLINFOW {
+                        cbSize: size_of::<TTTOOLINFOW>() as u32,
+                        uFlags: TTF_IDISHWND,
+                        hwnd: parent,
+                        uId: control.0 as usize,
+                        rect,
+                        ..Default::default()
+                    };
+                    SendMessageW(
+                        tip,
+                        TTM_NEWTOOLRECT,
+                        None,
+                        Some(LPARAM(&clipped as *const _ as isize)),
+                    );
+                }
+            }
         }
         let empty = [0u16];
         let _ = SetWindowTheme(tip, PCWSTR(empty.as_ptr()), PCWSTR(empty.as_ptr()));

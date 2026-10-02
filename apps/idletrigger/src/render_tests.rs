@@ -1343,38 +1343,17 @@ fn settings_field_wells_paint_on_screen() {
     unsafe {
         let settings = crate::settings_ui::devtools_capture_hwnd();
         assert!(!settings.is_invalid());
-        // Read the timeout field's SURFACE rect (the 34px face carrying the
-        // ring), straight off the screen DC.
-        let field = GetDlgItem(Some(settings), 619).unwrap(); // surface of ID_IDLE_TIMEOUT
+        // The well rides the hosting card around the inset edit: read the
+        // edit's rect expanded by the well insets straight off the screen.
+        let field = GetDlgItem(Some(settings), 119).unwrap(); // ID_IDLE_TIMEOUT
         let mut rect = RECT::default();
         GetWindowRect(field, &mut rect).ok().unwrap();
+        let (side, vertical) = (crate::scale_pub(3), crate::scale_pub(7));
+        rect.left -= side;
+        rect.top -= vertical;
+        rect.right += side;
+        rect.bottom += vertical;
         eprintln!("surface rect {rect:?}");
-        {
-            let mut pt = windows::Win32::Foundation::POINT {
-                x: (rect.left + rect.right) / 2,
-                y: (rect.top + rect.bottom) / 2,
-            };
-            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(settings, &mut pt);
-            let top = windows::Win32::UI::WindowsAndMessaging::ChildWindowFromPointEx(
-                settings,
-                pt,
-                windows::Win32::UI::WindowsAndMessaging::CWP_ALL,
-            );
-            let mut cname = [0u16; 64];
-            let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(top, &mut cname);
-            eprintln!(
-                "ZCHECK top={:014x} class={} surface={:014x} card1={:014x} edit={:014x}",
-                top.0 as usize,
-                String::from_utf16_lossy(&cname[..n.max(0) as usize]),
-                GetDlgItem(Some(settings), 619).unwrap_or_default().0 as usize,
-                GetDlgItem(Some(settings), 620).unwrap_or_default().0 as usize,
-                field.0 as usize,
-            );
-        }
-        // Force the surface through a full invalidate + synchronous paint.
-        let surface = GetDlgItem(Some(settings), 619).unwrap();
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(surface), None, true);
-        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(surface);
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
         let screen = GetDC(None); // screen DC: rect is in screen coordinates
@@ -1401,11 +1380,12 @@ fn settings_field_wells_paint_on_screen() {
                     // COLORREF is 0x00BBGGRR.
                     let c = GetPixel(mem, x, y).0;
                     let (r, g, b) = (c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff);
-                    // Light theme: border RGB(132,144,156), inset RGB(246,248,250).
+                    // Light theme: border RGB(132,144,156), interior = the
+                    // plain surface RGB(255,255,255).
                     if r.abs_diff(132) < 20 && g.abs_diff(144) < 20 && b.abs_diff(156) < 20 {
                         ring_seen = true;
                     }
-                    if r.abs_diff(246) < 4 && g.abs_diff(248) < 4 && b.abs_diff(250) < 4 {
+                    if r.abs_diff(255) < 4 && g.abs_diff(255) < 4 && b.abs_diff(255) < 4 {
                         inset_seen = true;
                     }
                 }
@@ -1418,6 +1398,185 @@ fn settings_field_wells_paint_on_screen() {
         assert!(ok, "screen readback failed");
         assert!(ring_seen, "timeout field lost its border on screen");
         assert!(inset_seen, "timeout field lost its inset well on screen");
+        tray::remove();
+        DestroyWindow(settings).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+    }
+}
+
+/// Clicking an unrelated power-page switch must not blank the battery
+/// threshold edit: pixels inside the edit's inner rect (text ink, not the
+/// card's well ring) have to survive the full toggle path - click,
+/// switch flight, apply_dependent_states - with nothing forcing the edit
+/// to repaint afterwards.
+#[test]
+fn settings_toggle_keeps_neighbor_field_text() {
+    const CHILD: &str = "IDLETRIGGER_TEST_NEIGHBOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::settings_toggle_keeps_neighbor_field_text",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("neighbor field child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "neighbor field child failed");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    settings_ui::show();
+    pump(60);
+
+    let text_ink_pixels = |edit: HWND| -> i32 {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(edit, &mut rect) }.ok().unwrap();
+        // Stay off the well ring: read only the edit's inner face.
+        let inset = crate::scale_pub(4);
+        rect.left += inset;
+        rect.top += inset / 2;
+        rect.right -= inset;
+        rect.bottom -= inset / 2;
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        let screen = unsafe { GetDC(None) };
+        let mem = unsafe { CreateCompatibleDC(Some(screen)) };
+        let bitmap = unsafe { CreateCompatibleBitmap(screen, width.max(1), height.max(1)) };
+        let old = unsafe { SelectObject(mem, HGDIOBJ(bitmap.0)) };
+        let ok = unsafe {
+            BitBlt(
+                mem,
+                0,
+                0,
+                width,
+                height,
+                Some(screen),
+                rect.left,
+                rect.top,
+                SRCCOPY,
+            )
+            .is_ok()
+        };
+        let mut dark = 0i32;
+        if ok {
+            for y in 0..height {
+                for x in 0..width {
+                    let c = unsafe { GetPixel(mem, x, y) }.0;
+                    let (r, g, b) = (c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff);
+                    // Light theme: text ink on a white face.
+                    if r < 180 && g < 180 && b < 180 {
+                        dark += 1;
+                    }
+                }
+            }
+        }
+        unsafe {
+            SelectObject(mem, old);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(mem);
+            let _ = ReleaseDC(None, screen);
+        }
+        assert!(ok, "screen readback failed");
+        dark
+    };
+
+    unsafe {
+        let settings = crate::settings_ui::devtools_capture_hwnd();
+        assert!(!settings.is_invalid());
+        let battery = GetDlgItem(Some(settings), 114).unwrap(); // ID_BATTERY_THRESH
+        let mut text = [0u16; 32];
+        let n = GetWindowTextW(battery, &mut text);
+        eprintln!(
+            "battery text before: {}",
+            String::from_utf16_lossy(&text[..n.max(0) as usize])
+        );
+        let before = text_ink_pixels(battery);
+        eprintln!("ink before: {before}");
+
+        // BM_CLICK rides the exact real-click path (state dance, focus,
+        // WM_COMMAND -> handle_click -> toggle + flight + dependents).
+        for (step, id) in [("pause-on", 177), ("keep-screen", 111), ("pause-off", 177)] {
+            let button = GetDlgItem(Some(settings), id).unwrap();
+            SendMessageW(button, BM_CLICK, None, None);
+            pump(400); // outlast the 180ms switch flight and deferred work
+            let after = text_ink_pixels(battery);
+            let mut probe = [0u16; 32];
+            let n = GetWindowTextW(battery, &mut probe);
+            eprintln!(
+                "ink after {step}: {after} (text={}, enabled={})",
+                String::from_utf16_lossy(&probe[..n.max(0) as usize]),
+                windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(battery).as_bool()
+            );
+            assert!(
+                after >= 30,
+                "battery field lost its text after clicking {step}"
+            );
+        }
+
+        // The battery threshold field has no disabled state anymore: it
+        // stays editable regardless of the allowance switch, so no toggle
+        // may ever leave disabled gray (238,242,245) on its interior.
+        let near = |c: u32, r: u32, g: u32, b: u32, tol: u32| -> bool {
+            (c & 0xff).abs_diff(r) <= tol
+                && ((c >> 8) & 0xff).abs_diff(g) <= tol
+                && ((c >> 16) & 0xff).abs_diff(b) <= tol
+        };
+        let count_fill = |edit: HWND, r: u32, g: u32, b: u32| -> i32 {
+            let mut rect = RECT::default();
+            GetWindowRect(edit, &mut rect).ok().unwrap();
+            let inset = crate::scale_pub(4);
+            let width = rect.right - rect.left - 2 * inset;
+            let height = rect.bottom - rect.top - inset;
+            let screen = GetDC(None);
+            let mut hits = 0i32;
+            for y in 0..height {
+                for x in 0..width {
+                    if near(
+                        GetPixel(screen, rect.left + inset + x, rect.top + inset / 2 + y).0,
+                        r,
+                        g,
+                        b,
+                        6,
+                    ) {
+                        hits += 1;
+                    }
+                }
+            }
+            let _ = ReleaseDC(None, screen);
+            hits
+        };
+        for step in ["battery-on", "battery-off"] {
+            let button = GetDlgItem(Some(settings), 112).unwrap(); // ID_BATTERY_ALLOWED
+            SendMessageW(button, BM_CLICK, None, None);
+            pump(400);
+            let enabled =
+                windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(battery).as_bool();
+            // Light theme: the interior must stay enabled surface white;
+            // disabled gray (238,242,245) means a stale disabled fill.
+            let stale = count_fill(battery, 238, 242, 245);
+            eprintln!("{step}: enabled={enabled} stale_pixels={stale}");
+            assert!(enabled, "battery field must stay editable after {step}");
+            assert!(stale < 50, "{step} left disabled gray on the battery field");
+        }
+
         tray::remove();
         DestroyWindow(settings).unwrap();
         DestroyWindow(hwnd(&HIDDEN)).unwrap();

@@ -55,6 +55,10 @@ impl ChoiceItem {
 
 struct ChoiceData {
     items: Vec<ChoiceItem>,
+    /// Menu mode: the button keeps its own caption (no selection follow,
+    /// no dropdown caret) and only opens the flyout - the system-actions
+    /// and New-button grammar.
+    menu: bool,
     /// Index into the full row list (headers included).
     selected: i32,
     /// Popup window handle while open (0 closed).
@@ -154,6 +158,40 @@ pub fn set_items(button: HWND, items: &[(String, String)]) {
     set_rows(button, &rows);
 }
 
+/// Menu-trigger items: flyout rows for a button whose caption never
+/// changes and never draws the dropdown caret. Rows, caption retention,
+/// and caret suppression commit in ONE registry write with no intermediate
+/// repaint - a split write let the old dropdown look flash for a frame.
+pub fn set_menu_items(button: HWND, items: &[(String, String, bool)]) {
+    // set_rows latches the first row's caption while registering (standard
+    // dropdown behavior) - capture the caption first and restore it after,
+    // exactly the set_items_danger pattern, so the trigger keeps its name.
+    let mut caption = [0u16; 256];
+    unsafe {
+        GetWindowTextW(button, &mut caption);
+    }
+    let rows: Vec<ChoiceItem> = items
+        .iter()
+        .map(|(v, l, d)| ChoiceItem {
+            value: v.clone(),
+            label: l.clone(),
+            danger: *d,
+            header: false,
+        })
+        .collect();
+    set_rows(button, &rows);
+    if let Some(data) = choices()
+        .as_mut()
+        .and_then(|map| map.get_mut(&(button.0 as isize)))
+    {
+        data.update_caption = false;
+        data.menu = true;
+    }
+    unsafe {
+        let _ = SetWindowTextW(button, PCWSTR(caption.as_ptr()));
+    }
+}
+
 /// Item list with per-row danger styling (Go quick-actions menu).
 pub fn set_items_danger(button: HWND, items: &[(String, String, bool)]) {
     let mut caption = [0u16; 256];
@@ -203,6 +241,7 @@ pub fn set_rows(button: HWND, rows: &[ChoiceItem]) {
     choices().get_or_insert_with(Default::default).insert(
         button.0 as isize,
         ChoiceData {
+            menu: false,
             items: rows.to_vec(),
             selected: first_option,
             popup: 0,
@@ -345,15 +384,39 @@ pub fn draw_button(
     background: u32,
 ) {
     let p = theme::palette();
+    let mut state = state;
+    let font = font_for(button);
+    let menu = choices()
+        .as_ref()
+        .and_then(|m| m.get(&(button.0 as isize)))
+        .is_some_and(|d| d.menu);
+    if menu {
+        // Menu trigger: the caption is the button's own text and the flyout
+        // state shows only as the pressed/open look - no caret, no follow.
+        state.open = OPEN_BUTTON.load(Ordering::SeqCst) == button.0 as isize;
+        let len = unsafe { GetWindowTextLengthW(button) };
+        let mut buffer = vec![0u16; len.max(0) as usize + 1];
+        let copied = unsafe { GetWindowTextW(button, &mut buffer) };
+        let label = String::from_utf16_lossy(&buffer[..copied.max(0) as usize]);
+        paint::draw_button(
+            dc,
+            bounds,
+            font,
+            &label,
+            p,
+            background,
+            state,
+            paint::control_radius(),
+        );
+        return;
+    }
     let label = choices()
         .as_ref()
         .and_then(|m| m.get(&(button.0 as isize)))
         .and_then(|d| d.items.get(d.selected.max(0) as usize))
         .map(|item| item.label.clone())
         .unwrap_or_default();
-    let mut state = state;
     state.open = OPEN_BUTTON.load(Ordering::SeqCst) == button.0 as isize;
-    let font = font_for(button);
     paint::draw_choice(
         dc,
         bounds,
@@ -365,6 +428,37 @@ pub fn draw_button(
         paint::control_radius(),
         scale(),
     );
+}
+
+/// Physical width a menu flyout needs for its widest row: label extent
+/// plus the row insets, marker column, and breathing room.
+fn widest_row(button: HWND) -> i32 {
+    unsafe {
+        let labels: Vec<String> = choices()
+            .as_ref()
+            .and_then(|m| m.get(&(button.0 as isize)))
+            .map(|d| d.items.iter().map(|i| i.label.clone()).collect())
+            .unwrap_or_default();
+        let font = font_for(button);
+        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(button));
+        let old = windows::Win32::Graphics::Gdi::SelectObject(
+            hdc,
+            windows::Win32::Graphics::Gdi::HGDIOBJ(font.0 as *mut _),
+        );
+        let mut widest = 0i32;
+        for label in &labels {
+            let chars: Vec<u16> = label.encode_utf16().collect();
+            let mut size = windows::Win32::Foundation::SIZE::default();
+            if windows::Win32::Graphics::Gdi::GetTextExtentPoint32W(hdc, &chars, &mut size)
+                .as_bool()
+            {
+                widest = widest.max(size.cx);
+            }
+        }
+        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
+        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(button), hdc);
+        widest + 2 * crate::scale_pub(6) + crate::scale_pub(36)
+    }
 }
 
 /// Cached form font for choice painting (the button's own WM_SETFONT font).
@@ -428,7 +522,18 @@ fn open(button: HWND, owner: HWND, id: i32) {
             + (visible - 1) * crate::scale_pub(ROW_GAP);
         let mut anchor = RECT::default();
         let _ = GetWindowRect(button, &mut anchor);
-        let width = (anchor.right - anchor.left).min(work.right - work.left);
+        let mut width = (anchor.right - anchor.left).min(work.right - work.left);
+        // Menu triggers are narrow buttons; their flyouts size to the
+        // widest row instead of the anchor (the quick menu's wide host
+        // button never exposed this).
+        let menu = choices()
+            .as_ref()
+            .and_then(|m| m.get(&(button.0 as isize)))
+            .is_some_and(|d| d.menu);
+        if menu {
+            let measured = widest_row(button);
+            width = width.max(measured).min(work.right - work.left);
+        }
         // Below with a 1px gap; flip above when it would overflow.
         let prefer_above = choices()
             .as_ref()
