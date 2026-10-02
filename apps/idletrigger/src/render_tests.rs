@@ -1300,6 +1300,130 @@ fn blank_regions_drag_while_controls_stay_clickable() {
     }
 }
 
+/// The settings fields must paint their card-face wells (inset fill +
+/// family border) on the real screen DC. This locks the regression where
+/// sibling reorders parked section cards above the field surfaces and
+/// every field vanished into the card face.
+#[test]
+fn settings_field_wells_paint_on_screen() {
+    const CHILD: &str = "IDLETRIGGER_TEST_FIELDWELL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::settings_field_wells_paint_on_screen",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("field well child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "field well child failed");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    settings_ui::show();
+    pump(60);
+    unsafe {
+        let settings = crate::settings_ui::devtools_capture_hwnd();
+        assert!(!settings.is_invalid());
+        // Read the timeout field's SURFACE rect (the 34px face carrying the
+        // ring), straight off the screen DC.
+        let field = GetDlgItem(Some(settings), 619).unwrap(); // surface of ID_IDLE_TIMEOUT
+        let mut rect = RECT::default();
+        GetWindowRect(field, &mut rect).ok().unwrap();
+        eprintln!("surface rect {rect:?}");
+        {
+            let mut pt = windows::Win32::Foundation::POINT {
+                x: (rect.left + rect.right) / 2,
+                y: (rect.top + rect.bottom) / 2,
+            };
+            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(settings, &mut pt);
+            let top = windows::Win32::UI::WindowsAndMessaging::ChildWindowFromPointEx(
+                settings,
+                pt,
+                windows::Win32::UI::WindowsAndMessaging::CWP_ALL,
+            );
+            let mut cname = [0u16; 64];
+            let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(top, &mut cname);
+            eprintln!(
+                "ZCHECK top={:014x} class={} surface={:014x} card1={:014x} edit={:014x}",
+                top.0 as usize,
+                String::from_utf16_lossy(&cname[..n.max(0) as usize]),
+                GetDlgItem(Some(settings), 619).unwrap_or_default().0 as usize,
+                GetDlgItem(Some(settings), 620).unwrap_or_default().0 as usize,
+                field.0 as usize,
+            );
+        }
+        // Force the surface through a full invalidate + synchronous paint.
+        let surface = GetDlgItem(Some(settings), 619).unwrap();
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(surface), None, true);
+        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(surface);
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        let screen = GetDC(None); // screen DC: rect is in screen coordinates
+        let mem = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        let old = SelectObject(mem, HGDIOBJ(bitmap.0));
+        let ok = BitBlt(
+            mem,
+            0,
+            0,
+            width,
+            height,
+            Some(screen),
+            rect.left,
+            rect.top,
+            SRCCOPY,
+        )
+        .is_ok();
+        let mut ring_seen = false;
+        let mut inset_seen = false;
+        if ok {
+            for y in 0..height {
+                for x in 0..width {
+                    // COLORREF is 0x00BBGGRR.
+                    let c = GetPixel(mem, x, y).0;
+                    let (r, g, b) = (c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff);
+                    // Light theme: border RGB(132,144,156), inset RGB(246,248,250).
+                    if r.abs_diff(132) < 20 && g.abs_diff(144) < 20 && b.abs_diff(156) < 20 {
+                        ring_seen = true;
+                    }
+                    if r.abs_diff(246) < 4 && g.abs_diff(248) < 4 && b.abs_diff(250) < 4 {
+                        inset_seen = true;
+                    }
+                }
+            }
+        }
+        SelectObject(mem, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem);
+        let _ = ReleaseDC(Some(settings), screen);
+        assert!(ok, "screen readback failed");
+        assert!(ring_seen, "timeout field lost its border on screen");
+        assert!(inset_seen, "timeout field lost its inset well on screen");
+        tray::remove();
+        DestroyWindow(settings).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+    }
+}
+
 /// Focus tips must be transient and never wedge the shared tooltip control:
 /// they anchor under their control (not at the cursor), yield to mouse input,
 /// and are dismissed when the panel hides or the focused control dies. After

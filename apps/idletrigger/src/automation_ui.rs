@@ -2724,16 +2724,10 @@ pub fn layout_editor() {
         y += ED_LABEL_H + ED_CONTENT_GAP;
         match action.as_str() {
             "stay_awake" => {
-                // Only as wide as the checkbox + label (Go CheckboxHitWidth).
-                let label = window_text(get_dlg_item(ed, ED_KEEP_SCREEN));
-                let check_w = checkbox_hit_width(ed, &label).unwrap_or(content_w);
-                place(
-                    ED_KEEP_SCREEN,
-                    ED_PAD,
-                    y,
-                    check_w.min(content_w),
-                    ED_CHECK_H,
-                );
+                // Full row width: the switch row parks its pill at the right
+                // edge, so a checkbox-width control would slide the pill
+                // over its own label.
+                place(ED_KEEP_SCREEN, ED_PAD, y, content_w, ED_CHECK_H);
                 y += ED_CHECK_H;
             }
             "enable_idle_monitor" => {
@@ -2914,36 +2908,6 @@ fn set_weekdays(ed: HWND, keys: &[&str]) {
     for (id, key) in day_ids {
         let on = keys.contains(&key);
         edit_set_checked(ed, id, on);
-    }
-}
-
-/// Checkbox + label width in logical pixels (Go CheckboxHitWidth).
-fn checkbox_hit_width(ed: HWND, label: &str) -> Option<i32> {
-    unsafe {
-        let font = SendMessageW(
-            get_dlg_item(ed, ED_KEEP_SCREEN),
-            WM_GETFONT,
-            Some(WPARAM(0)),
-            Some(LPARAM(0)),
-        )
-        .0;
-        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(ed));
-        let old = windows::Win32::Graphics::Gdi::SelectObject(
-            hdc,
-            windows::Win32::Graphics::Gdi::HGDIOBJ(font as *mut _),
-        );
-        let mut size = windows::Win32::Foundation::SIZE::default();
-        let wide_label = label.encode_utf16().collect::<Vec<u16>>();
-        let ok = windows::Win32::Graphics::Gdi::GetTextExtentPoint32W(hdc, &wide_label, &mut size)
-            .as_bool();
-        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
-        windows::Win32::Graphics::Gdi::ReleaseDC(Some(ed), hdc);
-        if !ok {
-            return None;
-        }
-        let scale96 = crate::scale_pub(96).max(96) as f32 / 96.0;
-        let width = size.cx as f32 / scale96.max(1.0);
-        Some(2 + ED_CHECKBOX_SIZE + 8 + width.ceil() as i32 + 2)
     }
 }
 
@@ -3289,6 +3253,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 bounds,
                 p,
                 p.window_bg,
+                p.surface,
                 state,
                 crate::paint::control_radius(),
             );

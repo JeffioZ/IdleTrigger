@@ -292,6 +292,7 @@
   "settings_idle_action": "超时操作",
   "settings_theme_mode": "计划依据",
   "settings_theme_fixed": "固定时间",
+  "settings_theme_fixed_note": "在上方设定的时刻于浅色与深色主题之间切换",
   "settings_theme_sunrise": "日出与日落",
   "settings_light_time": "浅色开始",
   "settings_dark_time": "深色开始",

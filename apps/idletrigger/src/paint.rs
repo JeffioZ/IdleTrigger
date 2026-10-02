@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, FrameRect,
+    CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DeleteObject, DrawTextW, FillRect, FrameRect,
     GetTextExtentPoint32W, HDC, HFONT, HGDIOBJ, LineTo, MoveToEx, PEN_STYLE, PS_SOLID, RoundRect,
     SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
@@ -484,15 +484,19 @@ pub fn draw_surface(hdc: HDC, bounds: &RECT, background: u32, fill: u32, border:
 }
 
 /// Edit-field surface with focus/hover/disabled border states (Go DrawField).
+/// `fill` is the field's resting interior: the raised surface on window
+/// backgrounds, or the inset well color (window background) on card faces
+/// where a same-color fill would erase the field down to its border.
 pub fn draw_field(
     hdc: HDC,
     bounds: &RECT,
     p: &Palette,
     background: u32,
+    fill: u32,
     state: ControlState,
     radius: i32,
 ) {
-    let (mut fill, mut border) = (p.surface, p.border);
+    let (mut fill, mut border) = (fill, p.border);
     if state.disabled {
         fill = p.disabled_surface;
         border = p.subtle_border;
@@ -886,8 +890,30 @@ pub fn draw_switch_row(
     } else {
         p.text
     };
-    draw_label(hdc, &text, font, label, ink, true, 0, 0);
+    unsafe {
+        draw_row_text(hdc, &text, font, label, ink);
+    }
     draw_switch(hdc, &pill, p, background, state, scale, None);
+}
+
+/// Single-line, vertically centered, end-ellipsis label for compact rows:
+/// long settings labels must truncate at the pill column instead of
+/// wrapping underneath it.
+unsafe fn draw_row_text(hdc: HDC, bounds: &RECT, font: HFONT, label: &str, color: u32) {
+    unsafe {
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        SetTextColor(hdc, COLORREF(color));
+        SetBkMode(hdc, TRANSPARENT);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let mut rect = *bounds;
+        let _ = DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        let _ = SelectObject(hdc, old);
+    }
 }
 
 /// Ghost chip for secondary quick actions (preset strips): transparent fill,

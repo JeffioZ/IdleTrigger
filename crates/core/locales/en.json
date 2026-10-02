@@ -292,6 +292,7 @@
   "settings_idle_action": "Timeout action",
   "settings_theme_mode": "Schedule basis",
   "settings_theme_fixed": "Fixed times",
+  "settings_theme_fixed_note": "Switches between the light and dark themes at the times set above",
   "settings_theme_sunrise": "Sunrise and sunset",
   "settings_light_time": "Light from",
   "settings_dark_time": "Dark from",
