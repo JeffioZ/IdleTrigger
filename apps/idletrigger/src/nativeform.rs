@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -315,6 +315,9 @@ unsafe extern "system" fn tracked_proc(
                 }
             }
             WM_MOUSEMOVE => {
+                // Keyboard focus tips yield to mouse input (keyboard-cue
+                // convention); the tip's own control keeps it as its hover tip.
+                crate::tooltips::yield_focus_tip(hwnd);
                 if FOCUS_VISIBLE.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     invalidate(hwnd);
                 }
@@ -357,11 +360,31 @@ unsafe extern "system" fn tracked_proc(
                     }
                 });
                 invalidate(hwnd);
+                // Keyboard users deserve the tooltip too: show it while a
+                // focusable control carries focus, hide when focus leaves.
+                // Focus arriving from a mouse click skips activation — the
+                // hover tip is already on screen, and track-activating the
+                // same tool again makes the visible tip blink. Dismissals
+                // are posted: this can fire inside DestroyWindow dispatch,
+                // where a synchronous one poisons the tooltip control.
+                if focused {
+                    if !cursor_on_control(hwnd) {
+                        crate::tooltips::set_focus_tip(hwnd, true);
+                    }
+                } else if crate::tooltips::focus_tip_active(hwnd) {
+                    crate::tooltips::dismiss_focus_tip(hwnd);
+                }
             }
             WM_ENABLE | WM_CAPTURECHANGED => {
                 invalidate(hwnd);
             }
             WM_NCDESTROY => {
+                // A focus tip outliving its control would wedge the tooltip
+                // control forever — tracked tips never time out. Posted,
+                // because this runs inside DestroyWindow dispatch.
+                if crate::tooltips::focus_tip_active(hwnd) {
+                    crate::tooltips::dismiss_focus_tip(hwnd);
+                }
                 crate::accessibility::clear(hwnd);
                 with_map(|m| {
                     m.remove(&key);
@@ -406,6 +429,25 @@ unsafe fn begin_leave_tracking(hwnd: HWND) {
 unsafe fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// Whether the mouse cursor currently rests inside the control's client
+/// area — i.e. focus arrived from a click on that control, not the keyboard.
+unsafe fn cursor_on_control(hwnd: HWND) -> bool {
+    unsafe {
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point).is_err()
+            || !windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point).as_bool()
+        {
+            return false;
+        }
+        let mut rect = RECT::default();
+        GetClientRect(hwnd, &mut rect).is_ok()
+            && point.x >= rect.left
+            && point.x < rect.right
+            && point.y >= rect.top
+            && point.y < rect.bottom
     }
 }
 

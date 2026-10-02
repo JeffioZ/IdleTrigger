@@ -511,6 +511,10 @@ pub fn control_radius() -> i32 {
     crate::dpi::scale(6)
 }
 
+/// Fractional thumb position override for `draw_switch`: None snaps to the
+/// state, Some(t) places the thumb animated between off (0) and on (1).
+pub type SwitchProgress = Option<f32>;
+
 /// Pill toggle switch (Win11-style) for label-left rows. Geometry derives
 /// from the control's physical bounds and `scale`, never from integer
 /// logical rounding, so the track and thumb stay smooth and correctly
@@ -523,6 +527,7 @@ pub fn draw_switch(
     background: u32,
     state: ControlState,
     scale: i32,
+    progress: SwitchProgress,
 ) {
     fill_rect(hdc, bounds, background);
     let track_w = sp(40, scale);
@@ -550,10 +555,22 @@ pub fn draw_switch(
     };
     let thumb_d = thumb_d + grow;
     let center_y = track.top + track_h / 2;
-    let resting_center_x = if state.active {
-        track.right - inset - thumb_d / 2
-    } else {
-        track.left + inset + thumb_d / 2
+    // Animated runs place the thumb along the travel; the off/on ends stay
+    // exactly where the snapped path puts them.
+    let resting_center_x = match progress {
+        Some(t) => {
+            let t = t.clamp(0.0, 1.0);
+            let left = track.left + inset + thumb_d / 2;
+            let right = track.right - inset - thumb_d / 2;
+            left + ((right - left) as f32 * t).round() as i32
+        }
+        None => {
+            if state.active {
+                track.right - inset - thumb_d / 2
+            } else {
+                track.left + inset + thumb_d / 2
+            }
+        }
     };
     let thumb = RECT {
         left: resting_center_x - thumb_d / 2,

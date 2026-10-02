@@ -161,6 +161,8 @@ const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
 const WM_IPC_REQUEST: u32 = 0x8008;
 const WM_REFRESH_THEME: u32 = 0x8009;
+/// Queued focus-tip dismissal (see tooltips::dismiss_focus_tip).
+const WM_FOCUSTIP_DISMISS: u32 = 0x800A;
 static THEME_REFRESH: theme_refresh::Requests = theme_refresh::Requests::new();
 
 pub(crate) fn request_theme_repair_refresh() {
@@ -277,6 +279,19 @@ static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
 static TIMED_ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
 static SNOOZE_ARMED_CHIP: AtomicUsize = AtomicUsize::new(0);
 
+/// Switch thumb animation: per-control fractional position and travel
+/// direction, driven by the panel timer while a run is in flight.
+struct SwitchFlight {
+    /// Whether the flight heads toward the switch's on position.
+    to_now: bool,
+    started: std::time::Instant,
+}
+static SWITCH_FLIGHTS: Mutex<Vec<(usize, SwitchFlight)>> = Mutex::new(Vec::new());
+/// Switch thumb flight duration (ms). The paint eases the progress, so
+/// USER32's coarse timer granularity still reads as a smooth glide.
+const SWITCH_ANIM_MS: u64 = 180;
+const SWITCH_ANIM_TICK: u64 = 15;
+
 fn is_chip_id(id: usize) -> bool {
     matches!(
         id,
@@ -329,6 +344,10 @@ struct TimedNosleep {
 }
 static NOSLEEP_TIMED: Mutex<Option<TimedNosleep>> = Mutex::new(None);
 pub(crate) const NOSLEEP_TIMED_MAX_SECS: u64 = 24 * 60 * 60;
+
+/// Panel timer id for switch thumb animation ticks. IDs 1-5 are taken by
+/// the panel/warning/power/lock/timed timers on the same window.
+const SWITCH_ANIM_TIMER: usize = 6;
 
 /// Resolved display language is Chinese (Go ResolveLanguage short unit).
 pub(crate) fn i18n_is_chinese() -> bool {
@@ -944,6 +963,84 @@ fn invalidate_control(id: usize) {
     }
 }
 
+/// Progress (0..=1) of a running switch animation, if any.
+fn switch_animation_progress(id: usize) -> Option<f32> {
+    let flights = crate::runtime::lock(&SWITCH_FLIGHTS);
+    let flight = &flights.iter().find(|(i, _)| *i == id)?.1;
+    let elapsed = flight.started.elapsed().as_millis() as f32;
+    let t = (elapsed / SWITCH_ANIM_MS as f32).clamp(0.0, 1.0);
+    // Ease-out: fast start, soft landing. Few frames with a coarse system
+    // timer still read as a glide instead of steps.
+    let eased = 1.0 - (1.0 - t) * (1.0 - t);
+    // The paint state (state.active) is already the DESTINATION. The thumb
+    // position passed to draw_switch is measured from the OFF end, so a
+    // flight toward on sweeps 0->1 while a flight toward off sweeps 1->0.
+    // Without the direction term a to-off flight would draw at the
+    // destination and visibly snap back mid-run.
+    Some(if flight.to_now { eased } else { 1.0 - eased })
+}
+
+/// Arms a thumb flight for the control (no-op when animations are off or
+/// the state did not change). The panel timer advances and retires runs.
+fn start_switch_animation(id: usize, from: bool, to: bool) {
+    if from == to || !popups::client_area_animations() {
+        return;
+    }
+    let mut flights = crate::runtime::lock(&SWITCH_FLIGHTS);
+    flights.retain(|(i, _)| *i != id);
+    flights.push((
+        id,
+        SwitchFlight {
+            to_now: to,
+            started: std::time::Instant::now(),
+        },
+    ));
+    unsafe {
+        let _ = SetTimer(
+            Some(hwnd(&PANEL)),
+            SWITCH_ANIM_TIMER,
+            SWITCH_ANIM_TICK as u32,
+            None,
+        );
+    }
+}
+
+/// Arms the flights for a toggle and releases the click's refresh gate when
+/// none runs (animations disabled, or the toggle never changed state), so
+/// suppression cannot outlive the click handler.
+fn arm_switch_flights(flights: &[(usize, bool)]) {
+    for &(id, from) in flights {
+        start_switch_animation(id, from, toggle_value(id));
+    }
+    if crate::runtime::lock(&SWITCH_FLIGHTS).is_empty() {
+        crate::tooltips::set_suppressed(false);
+    }
+}
+
+/// Advances in-flight switch animations; returns true while any remain.
+fn tick_switch_animations() -> bool {
+    let running = {
+        let flights = crate::runtime::lock(&SWITCH_FLIGHTS);
+        !flights.is_empty()
+    };
+    if running {
+        crate::tooltips::set_suppressed(true);
+    }
+    let mut flights = crate::runtime::lock(&SWITCH_FLIGHTS);
+    flights.retain(|(id, flight)| {
+        let done = flight.started.elapsed().as_millis() >= SWITCH_ANIM_MS as u128;
+        if !done {
+            invalidate_control(*id);
+        }
+        !done
+    });
+    let still = !flights.is_empty();
+    if !still {
+        crate::tooltips::set_suppressed(false);
+    }
+    still
+}
+
 /// Semantic on/off state for the owner-drawn toggles (Go p.toggles).
 fn toggle_value(id: usize) -> bool {
     match id {
@@ -999,7 +1096,8 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
             accessibility::check(item.control, state.active);
-            paint::draw_switch(dc, bounds, p, p.surface, state, scale);
+            let progress = switch_animation_progress(id);
+            paint::draw_switch(dc, bounds, p, p.surface, state, scale, progress);
         } else if id == IDC_EXIT_BUTTON {
             draw_exit_button(item, dc, bounds, &label, p, scale);
         } else if is_chip_id(id) {
@@ -1217,7 +1315,39 @@ unsafe extern "system" fn panel_proc(
         match msg {
             WM_CLOSE => {
                 let _ = ShowWindow(hwnd_, SW_HIDE);
+                let _ = KillTimer(Some(hwnd_), SWITCH_ANIM_TIMER);
+                crate::runtime::lock(&SWITCH_FLIGHTS).clear();
+                // A flight cut by the close must not leave text refreshes
+                // suppressed for the rest of the panel's life.
+                crate::tooltips::set_suppressed(false);
                 LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_SHOWWINDOW if wparam.0 == 0 => {
+                // Every hide path (close, Esc, tray toggle) lands here; a
+                // tracked focus tip would otherwise stay afloat on the
+                // desktop above a hidden panel.
+                crate::tooltips::hide_focus_tip();
+                DefWindowProcW(hwnd_, msg, wparam, lparam)
+            }
+            WM_FOCUSTIP_DISMISS => {
+                // Focus-tip dismissals must run in a plain dispatch: sent
+                // from inside ShowWindow/DestroyWindow handling they poison
+                // the tooltip control and no tip ever hides again.
+                let control = HWND(lparam.0 as *mut _);
+                if crate::tooltips::focus_tip_active(control) {
+                    crate::tooltips::set_focus_tip(control, false);
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+                crate::tooltips::on_panel_destroyed();
+                DefWindowProcW(hwnd_, msg, wparam, lparam)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE => {
+                // Blank-area moves are mouse input too: keyboard focus tips
+                // yield to the pointer wherever it lands.
+                crate::tooltips::yield_focus_tip(hwnd_);
+                DefWindowProcW(hwnd_, msg, wparam, lparam)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN
                 if wparam.0 as u16 == windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0 =>
@@ -1243,17 +1373,29 @@ unsafe extern "system" fn panel_proc(
             WM_COMMAND => {
                 let code = wparam.0 & 0xFFFF;
                 if matches!(code, IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION) {
+                    let before = toggle_value(code);
+                    let twin = match code {
+                        IDC_NOSLEEP => Some(IDC_IDLE),
+                        IDC_IDLE => Some(IDC_NOSLEEP),
+                        _ => None,
+                    };
+                    let twin_before = twin.map(toggle_value);
+                    // Gate before the toggle: on_toggle refreshes
+                    // synchronously and would push the new state line into
+                    // a tooltip that is still on screen under the cursor.
+                    crate::tooltips::set_suppressed(true);
                     on_toggle(code);
+                    let mut flights = vec![(code, before)];
+                    if let (Some(twin_id), Some(before)) = (twin, twin_before) {
+                        flights.push((twin_id, before));
+                    }
+                    arm_switch_flights(&flights);
                     // Owner-drawn toggles need a repaint after the state
                     // flip; the mutual-exclusion twin flips too.
                     invalidate_control(code);
-                    invalidate_control(if code == IDC_NOSLEEP {
-                        IDC_IDLE
-                    } else if code == IDC_IDLE {
-                        IDC_NOSLEEP
-                    } else {
-                        code
-                    });
+                    if let Some(twin_id) = twin {
+                        invalidate_control(twin_id);
+                    }
                 } else if matches!(
                     code,
                     IDC_NOSLEEP_TIMED_30M | IDC_NOSLEEP_TIMED_1H | IDC_NOSLEEP_TIMED_2H
@@ -1284,7 +1426,10 @@ unsafe extern "system" fn panel_proc(
                 } else if code == IDC_SETTINGS_BUTTON {
                     settings_ui::show();
                 } else if code == IDC_THEME_ENABLE {
+                    let before = toggle_value(code);
+                    crate::tooltips::set_suppressed(true);
                     theme_engine::toggle_enabled();
+                    arm_switch_flights(&[(code, before)]);
                     refresh_checkboxes();
                     invalidate_control(IDC_THEME_ENABLE);
                 } else if code == IDC_THEME_SWITCH {
@@ -1352,8 +1497,45 @@ unsafe extern "system" fn panel_proc(
                     DefWindowProcW(hwnd_, msg, wparam, lparam)
                 }
             }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                // Blank client areas drag the window (HTCAPTION gives the
+                // system's move + snap for free). Blank means WindowFromPoint
+                // resolves to the panel itself: statics (section titles,
+                // status lines, row labels, card surfaces) return
+                // HTTRANSPARENT and fall through, so their whole-row blanks
+                // drag like the background, while interactive controls
+                // (switches, chips, buttons, links) keep native hit-testing.
+                let hit = DefWindowProcW(hwnd_, msg, wparam, lparam);
+                let blank = hit.0 as u32 == windows::Win32::UI::WindowsAndMessaging::HTCLIENT && {
+                    let screen = windows::Win32::Foundation::POINT {
+                        x: (lparam.0 & 0xFFFF) as i16 as i32,
+                        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+                    };
+                    windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(screen) == hwnd_
+                };
+                if blank {
+                    LRESULT(windows::Win32::UI::WindowsAndMessaging::HTCAPTION as isize)
+                } else {
+                    hit
+                }
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => {
+                // The panel carries WS_SYSMENU, so a right-click on a blank
+                // drag area would open the system menu — blanks never had a
+                // right-click action before and must not grow one now.
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == PANEL_TIMER => {
+                tooltips::reconcile_focus_tip();
                 refresh_status();
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == SWITCH_ANIM_TIMER => {
+                // A flight paints each tick through WM_DRAWITEM; when the
+                // last one lands, kill the timer.
+                if !tick_switch_animations() {
+                    let _ = KillTimer(Some(hwnd_), SWITCH_ANIM_TIMER);
+                }
                 LRESULT(0)
             }
             #[cfg(feature = "devtools")]

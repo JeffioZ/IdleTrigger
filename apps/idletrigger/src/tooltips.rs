@@ -4,14 +4,20 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Controls::{
-    TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH,
-    TTM_SETTIPBKCOLOR, TTM_SETTIPTEXTCOLOR, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTTOOLINFOW,
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
+use windows::Win32::UI::Controls::{
+    TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
+    TTM_GETTOOLINFOW, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_SETTIPBKCOLOR, TTM_SETTIPTEXTCOLOR,
+    TTM_SETTOOLINFOW, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
+    TTTOOLINFOW,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetDlgItem, SendMessageW, WINDOW_STYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    CreateWindowExW, GetDlgItem, GetWindowRect, IsWindow, SendMessageW, WINDOW_STYLE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -183,6 +189,11 @@ pub fn refresh_all(panel: HWND) {
         if tip.is_invalid() {
             return;
         }
+        // Text updates during switch flights re-register tools and make a
+        // visible tooltip flicker; the cache replays them after.
+        if SUPPRESS.load(Ordering::SeqCst) {
+            return;
+        }
         // The wrap width was fixed at creation; keep it in step with the
         // current DPI instead of wrapping at the startup resolution forever.
         static LAST_WIDTH: AtomicIsize = AtomicIsize::new(-1);
@@ -295,6 +306,214 @@ pub fn refresh_all(panel: HWND) {
             last[slot] = Some(text);
         }
     }
+}
+
+/// Whether a previous focus-tip activation belongs to `control` (so a
+/// KILLFOCUS can hide it even though focus tips only ever show for the
+/// controls that opted in).
+pub(crate) fn focus_tip_active(control: HWND) -> bool {
+    FOCUS_TIP.load(Ordering::SeqCst) == control.0 as isize
+}
+
+static FOCUS_TIP: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// While true (a switch toggle or its flight is painting), text refreshes
+/// pause so updating a visible tooltip cannot flicker it. Never TTM_POP
+/// from here: while ANY tool is track-active (a focus tip), popping it
+/// wedges comctl32 — tracked tools ignore the mouse, so nothing ever
+/// re-activates it and tooltips stop appearing at all. Pops belong in
+/// set_focus_tip's deactivation, after TRACKACTIVATE FALSE.
+static SUPPRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_suppressed(value: bool) {
+    SUPPRESS.store(value, Ordering::SeqCst);
+}
+
+/// Pops the tooltip for a keyboard-focused control. The tool is fetched
+/// first because TTM_SETTOOLINFOW rewrites it wholesale: the live flags and
+/// text must survive the track-mode dance. Tracked placement is anchored
+/// under the control and clamped into its monitor's work area — without an
+/// explicit TTM_TRACKPOSITION a tracked tip appears wherever the cursor
+/// happened to be, which can sit outside the panel entirely.
+pub fn set_focus_tip(control: HWND, active: bool) {
+    unsafe {
+        let tip = HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _);
+        if tip.is_invalid() {
+            return;
+        }
+        let panel = crate::hwnd(&crate::PANEL);
+        if panel.is_invalid() {
+            return;
+        }
+        let mut text = [0u16; 1024];
+        let mut tool = TTTOOLINFOW {
+            cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND,
+            hwnd: panel,
+            uId: control.0 as usize,
+            lpszText: windows::core::PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        if SendMessageW(
+            tip,
+            TTM_GETTOOLINFOW,
+            None,
+            Some(LPARAM(&mut tool as *mut _ as isize)),
+        )
+        .0 == 0
+        {
+            return; // the control has no registered tool
+        }
+        if active {
+            FOCUS_TIP.store(control.0 as isize, Ordering::SeqCst);
+            tool.uFlags |= TTF_TRACK | TTF_ABSOLUTE;
+            let _ = SendMessageW(
+                tip,
+                TTM_SETTOOLINFOW,
+                None,
+                Some(LPARAM(&tool as *const _ as isize)),
+            );
+            let (x, y) = track_position(control);
+            let _ = SendMessageW(
+                tip,
+                TTM_TRACKPOSITION,
+                None,
+                Some(LPARAM(
+                    (((y as isize) & 0xFFFF) << 16) | ((x as isize) & 0xFFFF),
+                )),
+            );
+        }
+        let _ = SendMessageW(
+            tip,
+            TTM_TRACKACTIVATE,
+            Some(WPARAM(active as usize)),
+            Some(LPARAM(&tool as *const _ as isize)),
+        );
+        if !active {
+            // Restore hover semantics: a tool left with TTF_TRACK keeps
+            // ignoring the mouse, which is how one tip could monopolize the
+            // whole tooltip control.
+            tool.uFlags &= !(TTF_TRACK | TTF_ABSOLUTE);
+            let _ = SendMessageW(
+                tip,
+                TTM_SETTOOLINFOW,
+                None,
+                Some(LPARAM(&tool as *const _ as isize)),
+            );
+            if focus_tip_active(control) {
+                FOCUS_TIP.store(0, Ordering::SeqCst);
+            }
+            // The tool is no longer track-active, so a plain pop cannot
+            // strand it. Some owner states (e.g. the panel hiding while the
+            // tip shows) make comctl ignore EVERY hide request — TTM_POP
+            // included — leaving the window afloat forever; hide the window
+            // directly when the message-level hide did not take.
+            let _ = SendMessageW(tip, TTM_POP, None, None);
+            if windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(tip).as_bool() {
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                    tip,
+                    windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                );
+            }
+        }
+    }
+}
+
+/// Anchor point for a tracked focus tip: under the control's bottom-left,
+/// clamped into the control's monitor work area.
+unsafe fn track_position(control: HWND) -> (i32, i32) {
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(control, &mut rect).is_err() {
+            return (0, 0);
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mut work = rect;
+        if GetMonitorInfoW(
+            MonitorFromWindow(control, MONITOR_DEFAULTTONEAREST),
+            &mut info,
+        )
+        .as_bool()
+        {
+            work = info.rcWork;
+        }
+        let gap = crate::scale_pub(4);
+        let x = rect.left.clamp(work.left, work.right.max(work.left) - 1);
+        let y = (rect.bottom + gap).clamp(work.top, work.bottom.max(work.top) - 1);
+        (x, y)
+    }
+}
+
+/// Queues a focus-tip dismissal onto the panel's message loop. Dismissing
+/// synchronously from inside ShowWindow/DestroyWindow dispatch poisons the
+/// tooltip control — every later hide becomes a no-op and the visible tip
+/// wedges until restart — so the actual deactivation must run in a plain
+/// message dispatch, which posted delivery guarantees. The handler re-checks
+/// the recorded tip, so a dismissal that lost its race with a newer
+/// activation is a harmless no-op.
+pub(crate) fn dismiss_focus_tip(control: HWND) {
+    let panel = crate::hwnd(&crate::PANEL);
+    if panel.is_invalid() {
+        return;
+    }
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(panel),
+            crate::WM_FOCUSTIP_DISMISS,
+            WPARAM(0),
+            LPARAM(control.0 as isize),
+        );
+    }
+}
+
+/// Mouse input on `control`: a keyboard focus tip yields (the Windows
+/// keyboard-cue convention), unless the pointer rests on the tip's own
+/// control where it doubles as the hover tip.
+pub(crate) fn yield_focus_tip(control: HWND) {
+    let stored = FOCUS_TIP.load(Ordering::SeqCst);
+    if stored != 0 && stored != control.0 as isize {
+        dismiss_focus_tip(HWND(stored as *mut _));
+    }
+}
+
+/// Dismisses any focus tip (panel hiding, destruction).
+pub(crate) fn hide_focus_tip() {
+    let stored = FOCUS_TIP.load(Ordering::SeqCst);
+    if stored != 0 {
+        dismiss_focus_tip(HWND(stored as *mut _));
+    }
+}
+
+/// Self-healing net run from the panel timer: a recorded focus tip must
+/// belong to the control that currently holds focus. Anything else leaked
+/// from a missed path and is dismissed here, so a stale track activation
+/// can never outlive its cause by more than a second.
+pub(crate) fn reconcile_focus_tip() {
+    let stored = FOCUS_TIP.load(Ordering::SeqCst);
+    if stored == 0 {
+        return;
+    }
+    unsafe {
+        let control = HWND(stored as *mut _);
+        if !IsWindow(Some(control)).as_bool() || GetFocus() != control {
+            dismiss_focus_tip(control);
+        }
+    }
+}
+
+/// Drops the shared tooltip state when the panel window is destroyed.
+pub(crate) fn on_panel_destroyed() {
+    TOOLTIP_HWND.store(0, Ordering::SeqCst);
+    FOCUS_TIP.store(0, Ordering::SeqCst);
+    SUPPRESS.store(false, Ordering::SeqCst);
+}
+
+/// The shared tooltip control's window (regression tests).
+#[cfg(test)]
+pub(crate) fn tooltip_hwnd() -> HWND {
+    HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _)
 }
 
 /// Go withPowerStatusTooltip: 手动设置 state. 运行状态 status. body

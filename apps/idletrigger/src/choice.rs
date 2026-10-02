@@ -462,6 +462,30 @@ fn open(button: HWND, owner: HWND, id: i32) {
         BAR_HOVER.store(false, Ordering::SeqCst);
         WHEEL_DELTA.store(0, Ordering::SeqCst);
         theme::apply_to_window(popup);
+        // DWM rounds corners with real anti-aliasing where supported
+        // (Windows 11) — the same treatment native menus get. The window
+        // region only masks in 1-bit and leaves hard stair steps, so it is
+        // strictly the pre-Win11 fallback.
+        let corner = windows::Win32::Graphics::Dwm::DWMWCP_ROUND.0 as u32;
+        let dwm_rounded = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            popup,
+            windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const u32 as *const core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok();
+        if !dwm_rounded {
+            let radius = paint::control_radius();
+            let region = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(
+                0,
+                0,
+                width + 1,
+                height + 1,
+                radius * 2,
+                radius * 2,
+            );
+            let _ = windows::Win32::Graphics::Gdi::SetWindowRgn(popup, Some(region), true);
+        }
         let _ = SetWindowPos(
             popup,
             Some(HWND_TOPMOST),
@@ -581,6 +605,10 @@ fn register_class() {
         let instance =
             windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
         let wc = WNDCLASSW {
+            // The menu-class drop shadow is what makes a flyout read as
+            // floating over the panel; without it the popup is a flat
+            // rectangle whose fill sits nearly on the panel background.
+            style: windows::Win32::UI::WindowsAndMessaging::CS_DROPSHADOW,
             lpfnWndProc: Some(popup_proc),
             hInstance: instance.into(),
             lpszClassName: windows::core::w!("IdleTriggerChoicePopup"),
@@ -619,8 +647,17 @@ unsafe fn paint_popup_buffered(hwnd: HWND, hdc: windows::Win32::Graphics::Gdi::H
 /// Direct popup row painting (shared by the buffered path).
 unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
     let p = theme::palette();
-    // Card background fills the whole popup (Go popup surface).
-    paint::fill_rect(hdc, client, p.elevated);
+    // Elevated surface with the family hairline border: the flyout must
+    // read as floating ON the panel — the previous flat fill matched the
+    // panel background almost 1:1 in light mode, so the boundary vanished.
+    paint::draw_surface(
+        hdc,
+        client,
+        p.elevated,
+        p.elevated,
+        p.border,
+        paint::control_radius(),
+    );
     let button = OPEN_BUTTON.load(Ordering::SeqCst);
     let (items, selected, hover, first, pressed) =
         match choices().as_ref().and_then(|m| m.get(&button)) {
@@ -1245,6 +1282,68 @@ mod tests {
             assert!(open_popup().is_invalid());
             DestroyWindow(owner).unwrap();
             assert!(!is_choice(button));
+        }
+    }
+
+    /// A flyout must be rounded one way or the other: DWM corner preference
+    /// where the OS supports it (real anti-aliasing, the menu treatment),
+    /// or the 1-bit window-region fallback on older systems. Square is a
+    /// regression, and so is relying on the region where DWM could round —
+    /// that is the stair-stepped-corner bug.
+    #[test]
+    fn popup_corners_are_dwm_rounded_or_region_fallback() {
+        let _guard = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        unsafe {
+            let owner = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_POPUP,
+                0,
+                0,
+                400,
+                400,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let rows: Vec<_> = (0..4)
+                .map(|i| ChoiceItem::option(&i.to_string(), &format!("Item {i}")))
+                .collect();
+            let _dpi = crate::dpi::Scope::window(owner);
+            let font = windows::Win32::Graphics::Gdi::HFONT(
+                windows::Win32::Graphics::Gdi::GetStockObject(
+                    windows::Win32::Graphics::Gdi::DEFAULT_GUI_FONT,
+                )
+                .0,
+            );
+            let button = create_rows(owner, 101, (0, 0, 200, 32), &rows, font);
+            open(button, owner, 101);
+            let popup = open_popup();
+            let mut preference: u32 = 0;
+            let dwm_rounded = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                popup,
+                windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
+                &mut preference as *mut u32 as *mut core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && preference == windows::Win32::Graphics::Dwm::DWMWCP_ROUND.0 as u32;
+            if !dwm_rounded {
+                let region = windows::Win32::Graphics::Gdi::CreateRectRgn(0, 0, 0, 0);
+                let complexity = windows::Win32::Graphics::Gdi::GetWindowRgn(popup, region);
+                assert!(
+                    complexity == windows::Win32::Graphics::Gdi::SIMPLEREGION,
+                    "neither DWM rounding nor the region fallback shaped the flyout (complexity {complexity:?})"
+                );
+                let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                    windows::Win32::Graphics::Gdi::HGDIOBJ(region.0),
+                );
+            }
+            SendMessageW(popup, WM_KILLFOCUS, Some(WPARAM(0)), None);
+            DestroyWindow(owner).unwrap();
         }
     }
 }

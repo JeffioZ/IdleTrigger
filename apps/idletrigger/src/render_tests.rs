@@ -633,6 +633,7 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                             ..Default::default()
                         },
                         scale,
+                        None,
                     );
                 };
                 let px = |x: i32, y: i32| GetPixel(dc, x, y).0;
@@ -682,6 +683,7 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                         ..Default::default()
                     },
                     scale,
+                    None,
                 );
                 assert_eq!(
                     px(track_cx, center_y),
@@ -698,6 +700,7 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                         ..Default::default()
                     },
                     scale,
+                    None,
                 );
                 assert_eq!(
                     px(track_left + inset + thumb_d / 2, center_y),
@@ -715,6 +718,7 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                         ..Default::default()
                     },
                     scale,
+                    None,
                 );
                 assert_eq!(
                     px(track_left + inset + thumb_d / 2, center_y),
@@ -728,6 +732,7 @@ fn switch_paints_smooth_and_aligned_at_every_dpi_and_theme() {
                     p.surface,
                     paint::ControlState::default(),
                     scale,
+                    None,
                 );
                 // Anti-aliasing: the pill and thumb edges must pass through
                 // blended pixels — a hard-edged GDI fallback has none.
@@ -1127,5 +1132,498 @@ fn interactive_controls_react_to_every_state() {
         DestroyWindow(panel).unwrap();
         DestroyWindow(hwnd(&HIDDEN)).unwrap();
         assert!(failures.is_empty(), "state audit failures: {failures:?}");
+    }
+}
+
+/// The animated thumb must sweep the full travel: at progress 0.5 it sits
+/// between the two resting positions, not at either end.
+#[test]
+fn switch_animation_progress_places_thumb_between_ends() {
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    unsafe {
+        theme::force_dark(false);
+        let p = theme::palette();
+        let scale = 96;
+        let width = paint::sp(SWITCH_HIT_W, 96);
+        let height = paint::sp(BUTTON_H, 96);
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        let old = SelectObject(dc, HGDIOBJ(bitmap.0));
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let track_w = paint::sp(40, scale);
+        let track_h = paint::sp(20, scale);
+        let thumb_d = paint::sp(16, scale);
+        let track_left = (width - track_w) / 2;
+        let center_y = height / 2;
+        let left_center = track_left + ((track_h - thumb_d) / 2).max(1) + thumb_d / 2;
+        let right_center = track_left + track_w - ((track_h - thumb_d) / 2).max(1) - thumb_d / 2;
+
+        // draw_switch receives the ALREADY-EASED position; 0/0.5/1 map to
+        // the start, midpoint, and end of the travel.
+        for (progress, expect_center) in [
+            (0.0f32, left_center),
+            (0.5, (left_center + right_center) / 2),
+            (1.0, right_center),
+        ] {
+            paint::draw_switch(
+                dc,
+                &bounds,
+                p,
+                p.window_bg,
+                paint::ControlState {
+                    active: true,
+                    ..Default::default()
+                },
+                scale,
+                Some(progress),
+            );
+            let mut min = -1;
+            let mut max = -1;
+            for x in track_left..track_left + track_w {
+                if GetPixel(dc, x, center_y).0 == p.accent_text {
+                    if min < 0 {
+                        min = x;
+                    }
+                    max = x;
+                }
+            }
+            assert!(min >= 0, "no thumb at progress {progress}");
+            let center = (min + max) / 2;
+            assert!(
+                (center - expect_center).abs() <= 2,
+                "progress {progress}: thumb center {center} != {expect_center}"
+            );
+        }
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(dc);
+        let _ = ReleaseDC(None, screen);
+    }
+}
+
+/// Blank-looking panel areas must offer the drag affordance: the background,
+/// the undrawn remainder of section titles, and card surfaces away from
+/// rows. Interactive controls must never become drag areas — an unguarded
+/// NCHITTEST rewrite is exactly how the first draft broke the footer.
+#[test]
+fn blank_regions_drag_while_controls_stay_clickable() {
+    const CHILD: &str = "IDLETRIGGER_TEST_DRAG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::blank_regions_drag_while_controls_stay_clickable",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("drag child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "drag child failed");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(30);
+    unsafe {
+        let hit_at = |x: i32, y: i32| -> u32 {
+            let packed = (((y as isize) & 0xFFFF) << 16) | ((x as isize) & 0xFFFF);
+            SendMessageW(panel, WM_NCHITTEST, None, Some(LPARAM(packed))).0 as u32
+        };
+        let rect_of = |id: usize| -> RECT {
+            let mut rect = RECT::default();
+            GetWindowRect(GetDlgItem(Some(panel), id as i32).unwrap(), &mut rect)
+                .ok()
+                .unwrap();
+            rect
+        };
+        // The user-visible blanks: the strip right of a section title, the
+        // card surface before its first row, and the left margin strip.
+        let title = rect_of(STATIC_SECTION_BASE);
+        assert_eq!(
+            hit_at(title.right - 8, (title.top + title.bottom) / 2),
+            HTCAPTION,
+            "blank remainder right of a section title must drag"
+        );
+        let card = rect_of(IDC_CARD_BASE);
+        assert_eq!(
+            hit_at(card.left + 4, card.top + 4),
+            HTCAPTION,
+            "card surface away from rows must drag"
+        );
+        let card2 = rect_of(IDC_CARD_BASE + 1);
+        assert_eq!(
+            hit_at(card2.left - 6, (card2.top + card2.bottom) / 2),
+            HTCAPTION,
+            "left margin strip must drag"
+        );
+        // Interactive controls keep native hit-testing.
+        for id in [
+            IDC_NOSLEEP,
+            IDC_NOSLEEP_TIMED_30M,
+            IDC_MANAGE_BUTTON,
+            IDC_SETTINGS_BUTTON,
+        ] {
+            let rect = rect_of(id);
+            assert_eq!(
+                hit_at((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
+                HTCLIENT,
+                "control {id} lost its click area to the drag rewrite"
+            );
+        }
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+    }
+}
+
+/// Focus tips must be transient and never wedge the shared tooltip control:
+/// they anchor under their control (not at the cursor), yield to mouse input,
+/// and are dismissed when the panel hides or the focused control dies. After
+/// every dismissal the tool must regain its hover semantics — a leftover
+/// TTF_TRACK monopolizes the tooltip and no other tip ever shows again.
+#[test]
+fn focus_tips_are_transient_and_never_wedge() {
+    const CHILD: &str = "IDLETRIGGER_TEST_FOCUSTIP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::focus_tips_are_transient_and_never_wedge",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("focus tip child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "focus tip child failed");
+        return;
+    }
+    use windows::Win32::UI::Controls::{TTF_SUBCLASS, TTF_TRACK, TTM_GETTOOLINFOW, TTTOOLINFOW};
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(30);
+    unsafe {
+        // Park the panel at a known spot and the cursor far from it, so
+        // focus genuinely arrives from the keyboard path. (The cursor jump
+        // is momentary and confined to this spawned child.)
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        assert!(
+            GetMonitorInfoW(
+                MonitorFromWindow(panel, MONITOR_DEFAULTTONEAREST),
+                &mut info
+            )
+            .as_bool()
+        );
+        let work = info.rcWork;
+        let _ = SetWindowPos(
+            panel,
+            None,
+            work.left + 100,
+            work.top + 100,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        pump(5);
+        assert!(SetCursorPos(work.left + 4, work.top + 4).is_ok());
+        let tip = tooltips::tooltip_hwnd();
+        assert!(!tip.is_invalid());
+        let switch = GetDlgItem(Some(panel), IDC_NOSLEEP as i32).unwrap();
+        let rect_of = |hwnd_: HWND| -> RECT {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd_, &mut rect).ok().unwrap();
+            rect
+        };
+        let visible = || IsWindowVisible(tip).as_bool();
+
+        // Keyboard focus shows the tip, anchored under the control.
+        nativeform::keyboard_navigation();
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+        pump(10);
+        assert!(tooltips::focus_tip_active(switch), "focus tip not armed");
+        assert!(visible(), "focus tip failed to show");
+        let (tip_rect, switch_rect) = (rect_of(tip), rect_of(switch));
+        assert!(
+            tip_rect.top >= switch_rect.bottom && tip_rect.top <= switch_rect.bottom + 60,
+            "focus tip not anchored under its control: {tip_rect:?} vs {switch_rect:?}"
+        );
+        assert!(
+            tip_rect.left >= work.left
+                && tip_rect.top >= work.top
+                && tip_rect.left < work.right
+                && tip_rect.top < work.bottom,
+            "focus tip anchor left the work area: {tip_rect:?} in {work:?}"
+        );
+
+        // Mouse input on another control dismisses it…
+        let other = GetDlgItem(Some(panel), IDC_AUTOMATION as i32).unwrap();
+        let _ = SendMessageW(other, WM_MOUSEMOVE, None, Some(LPARAM(10 | (10 << 16))));
+        pump(5);
+        assert!(!tooltips::focus_tip_active(switch), "tip did not yield");
+        assert!(!visible(), "yield left the tip visible");
+        // …and the tool regains hover semantics (no leftover track flags).
+        let mut text = [0u16; 512];
+        let mut tool = TTTOOLINFOW {
+            cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+            uFlags: windows::Win32::UI::Controls::TTF_IDISHWND,
+            hwnd: panel,
+            uId: switch.0 as usize,
+            lpszText: windows::core::PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        assert_ne!(
+            SendMessageW(
+                tip,
+                TTM_GETTOOLINFOW,
+                None,
+                Some(LPARAM(&mut tool as *mut _ as isize)),
+            )
+            .0,
+            0,
+            "tool vanished after dismissal"
+        );
+        assert!(
+            tool.uFlags.contains(TTF_SUBCLASS) && !tool.uFlags.contains(TTF_TRACK),
+            "dismissal left track flags on the tool: {:?}",
+            tool.uFlags
+        );
+
+        // (Re)activating needs a genuine focus transition: bouncing off the
+        // panel first, since a repeat SetFocus on the same window fires
+        // nothing.
+        let refocus = |target: HWND| {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+            pump(5);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(target));
+            pump(10);
+        };
+
+        // Hiding the panel (any path) dismisses an active tip; the dismissal
+        // is delivered posted, so it survives the ShowWindow dispatch that
+        // would poison a synchronous one.
+        refocus(switch);
+        assert!(visible());
+        let _ = ShowWindow(panel, SW_HIDE);
+        pump(20);
+        assert!(!visible(), "panel hide left the tip afloat");
+        assert!(!tooltips::focus_tip_active(switch));
+        let _ = ShowWindow(panel, SW_SHOW);
+        pump(5);
+
+        // Destroying the focused control dismisses its tip without wedging
+        // the tooltip control: another control must still be able to show
+        // and dismiss afterwards — the on-site failure was exactly this
+        // wedge (one tip stuck, every other tip dead).
+        refocus(switch);
+        assert!(visible());
+        let _ = DestroyWindow(switch);
+        pump(20);
+        assert!(!visible(), "destroyed control left its tip visible");
+        assert!(IsWindow(Some(tip)).as_bool(), "tooltip control died");
+        let survivor = GetDlgItem(Some(panel), IDC_AUTOMATION as i32).unwrap();
+        refocus(survivor);
+        assert!(visible(), "tooltip wedged after destroy: no further tips");
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+        pump(20);
+        assert!(!visible(), "post-destroy dismissal wedged");
+
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
+    }
+}
+
+/// A light/dark switch must not kill the panel tooltips until the next
+/// reopen (the recorded on-site failure). Reproduces with the production
+/// apply path and bisects its stages: each stage must leave the tooltip
+/// machinery able to show AND hide a tip again.
+#[test]
+fn theme_switch_keeps_panel_tooltips_alive() {
+    const CHILD: &str = "IDLETRIGGER_TEST_THEMESWITCH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "render_tests::theme_switch_keeps_panel_tooltips_alive",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("theme switch child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "theme switch child failed");
+        return;
+    }
+    let _ui_test = crate::runtime::lock(&CONFIG_TEST_LOCK);
+    *crate::runtime::lock(&CONFIG) = Some(config::Config::default());
+    *I18N.write().unwrap() = Some(I18n::load("zh-CN"));
+    theme::force_dark(false);
+    create_windows();
+    let panel = hwnd(&PANEL);
+    show_panel();
+    pump(30);
+    unsafe {
+        // Same staging as the focus-tip test: panel parked, cursor far away,
+        // so keyboard focus drives the tip.
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        assert!(
+            GetMonitorInfoW(
+                MonitorFromWindow(panel, MONITOR_DEFAULTTONEAREST),
+                &mut info
+            )
+            .as_bool()
+        );
+        let work = info.rcWork;
+        let _ = SetWindowPos(
+            panel,
+            None,
+            work.left + 100,
+            work.top + 100,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        pump(5);
+        assert!(SetCursorPos(work.left + 4, work.top + 4).is_ok());
+        let tip = tooltips::tooltip_hwnd();
+        let switch = GetDlgItem(Some(panel), IDC_NOSLEEP as i32).unwrap();
+        let visible = || IsWindowVisible(tip).as_bool();
+        let cycle = |stage: &str| {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+            pump(5);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            pump(10);
+            assert!(visible(), "{stage}: tip refuses to show");
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+            pump(20);
+            assert!(!visible(), "{stage}: tip refuses to hide");
+        };
+
+        cycle("baseline");
+
+        // Hover path (what the recorded failure actually describes): a real
+        // cursor over the control drives the subclass relay and comctl's
+        // mouse timers. Baseline first to prove the harness, then again
+        // after the palette flips.
+        let hover = |stage: &str| {
+            let mut rect = RECT::default();
+            GetWindowRect(switch, &mut rect).ok().unwrap();
+            assert!(
+                SetCursorPos((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2).is_ok()
+            );
+            pump(1500);
+            assert!(visible(), "{stage}: hover tip refuses to show");
+            assert!(SetCursorPos(work.left + 4, work.top + 4).is_ok());
+            pump(6500); // system autopop delay
+            assert!(!visible(), "{stage}: hover tip refuses to autopop");
+        };
+        hover("baseline hover");
+
+        // The recorded failure needs a tip ON SCREEN while the palette
+        // flips: theme changes are exactly when a visible tip gets its
+        // window re-themed underneath itself. Run the full production path.
+        let flip = |dark: bool, side: &str| {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            pump(10);
+            assert!(visible(), "{side}: tip missing before switch");
+            theme::force_dark(dark);
+            theme::apply_to_all();
+            pump(50);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+            pump(20);
+            assert!(
+                !visible(),
+                "{side}: tip showing during the switch refuses to hide (wedge)"
+            );
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            pump(10);
+            assert!(visible(), "{side}: no tips after theme switch");
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
+            pump(20);
+            assert!(!visible(), "{side}: post-switch tip refuses to hide");
+        };
+        flip(true, "dark");
+        flip(false, "light");
+        hover("post-switch hover");
+
+        // Scheduled day/night flips mostly happen while the panel is hidden
+        // (a different apply path: no cloak, no focus). Reopening must still
+        // yield working tips.
+        let _ = ShowWindow(panel, SW_HIDE);
+        pump(5);
+        theme::force_dark(true);
+        theme::apply_to_all();
+        pump(50);
+        let _ = ShowWindow(panel, SW_SHOW);
+        pump(20);
+        hover("after hidden-flip + reopen");
+
+        assert!(
+            IsWindow(Some(tip)).as_bool(),
+            "tooltip window was destroyed by the switch"
+        );
+
+        tray::remove();
+        DestroyWindow(panel).unwrap();
+        DestroyWindow(hwnd(&HIDDEN)).unwrap();
     }
 }

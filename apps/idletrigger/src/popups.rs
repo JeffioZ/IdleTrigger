@@ -874,7 +874,7 @@ pub(crate) fn capture_lock_preview(
         .save_preview(path)
 }
 
-fn client_area_animations() -> bool {
+pub(crate) fn client_area_animations() -> bool {
     unsafe {
         let mut value: i32 = 0;
         SystemParametersInfoW(
