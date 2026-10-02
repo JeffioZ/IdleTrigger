@@ -1407,16 +1407,31 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
     } else {
         let label = window_text(item.control);
         let state = crate::nativeform::control_state(item.control, item.state);
-        crate::paint::draw_button(
-            dc,
-            bounds,
-            form_font_body(),
-            &label,
-            p,
-            p.window_bg,
-            state,
-            crate::paint::control_radius(),
-        );
+        // Deleting a rule is the manager's one destructive action: quiet
+        // danger ink at rest, the filled danger style on approach.
+        if id == MGR_DELETE {
+            crate::paint::draw_button_danger(
+                dc,
+                bounds,
+                form_font_body(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
+        } else {
+            crate::paint::draw_button(
+                dc,
+                bounds,
+                form_font_body(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
+        }
     }
 }
 

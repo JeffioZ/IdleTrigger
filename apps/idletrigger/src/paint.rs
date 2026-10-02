@@ -816,6 +816,43 @@ pub fn draw_button(
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
 }
 
+/// Danger push button, sharing the quiet-danger grammar with menu rows:
+/// danger ink on the neutral surface at rest, committing to the filled
+/// danger style only on hover/press. Destructive actions stay visually
+/// calm until approached, then leave no doubt.
+pub fn draw_button_danger(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    radius: i32,
+) {
+    let (mut fill, mut border, mut text) = (p.surface, p.subtle_border, p.danger_surface_text);
+    if state.hovered {
+        fill = p.danger_bg;
+        border = p.danger_bg;
+        text = p.danger_text;
+    }
+    if state.pressed {
+        fill = p.danger_pressed;
+        border = p.danger_pressed;
+        text = p.danger_text;
+    }
+    if state.disabled {
+        fill = p.disabled_surface;
+        border = p.subtle_border;
+        text = p.disabled_text;
+    }
+    if state.focused && !state.disabled {
+        border = p.danger_focus;
+    }
+    draw_surface(hdc, bounds, background, fill, border, radius);
+    draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
+}
+
 /// Ghost chip for secondary quick actions (preset strips): transparent fill,
 /// hairline border, muted text at rest — one step below the primary buttons
 /// in weight at every state, with an accent outline while armed.

@@ -2667,6 +2667,20 @@ fn draw_settings_item_impl(hwnd: HWND, item: &crate::nativeform::DrawItem, dc: H
                 state,
                 scale,
             );
+        } else if id == ID_RESTORE_DEFAULT {
+            // Factory reset is the form's one destructive action: quiet
+            // danger ink at rest, the filled danger style on approach.
+            let state = crate::nativeform::control_state(item.control, item.state);
+            crate::paint::draw_button_danger(
+                dc,
+                bounds,
+                body_font(),
+                &label,
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+            );
         } else if id == ID_SAVE {
             // Save is the form's default action: accent fill (Go state.Active).
             let mut state = crate::nativeform::control_state(item.control, item.state);

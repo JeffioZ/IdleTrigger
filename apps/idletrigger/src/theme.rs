@@ -638,6 +638,11 @@ mod visual_tests {
             assert!(contrast(p.muted, p.window_bg) >= 4.5);
             assert!(contrast(p.border, p.surface) >= 3.0);
             assert!(contrast(p.focus, p.surface) >= 3.0);
+            // Quiet-danger buttons: resting ink on the neutral surface and
+            // the inverted pair over the filled danger states.
+            assert!(contrast(p.danger_surface_text, p.surface) >= 4.5);
+            assert!(contrast(p.danger_text, p.danger_bg) >= 4.5);
+            assert!(contrast(p.danger_text, p.danger_pressed) >= 4.5);
             for background in [p.danger_hover, p.danger_pressed] {
                 assert!(contrast(p.danger_focus, background) >= 3.0);
             }
