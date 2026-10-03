@@ -315,6 +315,12 @@ unsafe extern "system" fn window_proc(
             let old = state.dpi.replace(new);
             let _new_scope = Scope::enter(new as i32);
             resize_children(hwnd, old, new);
+            // resize_children rescales children from their creation-time
+            // geometry; the panel's update links are placed at runtime from
+            // phase state instead, so re-derive them at the new scale.
+            if hwnd == crate::hwnd(&crate::PANEL) {
+                crate::request_update_refresh();
+            }
             let rect = &*(lp.0 as *const RECT);
             let _ = SetWindowPos(
                 hwnd,

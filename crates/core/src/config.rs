@@ -49,6 +49,10 @@ pub struct Config {
     /// Snapshot of the cursor state before the first day/night application
     /// (scheme name + 15 role paths, tab-separated; empty = not captured).
     pub theme_restore_cursor: String,
+    /// Panel-shown background checks against GitHub Releases (at most once
+    /// per minute); manual checks from the tray menu or settings stay
+    /// available regardless.
+    pub update_check_enabled: bool,
 }
 
 impl Default for Config {
@@ -87,6 +91,7 @@ impl Default for Config {
             theme_dark_cursor_scheme: String::new(),
             theme_restore_wallpaper: String::new(),
             theme_restore_cursor: String::new(),
+            update_check_enabled: true,
         }
     }
 }
@@ -324,6 +329,8 @@ fn read_config(
         theme_restore_cursor: as_str(document, "theme_restore_cursor", bad_fields)
             .unwrap_or(&defaults.theme_restore_cursor)
             .to_string(),
+        update_check_enabled: as_bool(document, "update_check_enabled", bad_fields)
+            .unwrap_or(defaults.update_check_enabled),
     }
 }
 
@@ -484,6 +491,11 @@ fn save_candidate(
         "theme_restore_cursor",
         &config.theme_restore_cursor,
     );
+    set_bool(
+        document,
+        "update_check_enabled",
+        config.update_check_enabled,
+    );
     set_str(document, "language", &config.language);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -630,6 +642,7 @@ mod save_tests {
             theme_dark_cursor_scheme: "Windows Black".into(),
             theme_restore_wallpaper: "picture\tfill\tMON1\tC:\\walls\\orig.jpg".into(),
             theme_restore_cursor: "No Scheme\t\tC:\\c\\a.cur".into(),
+            update_check_enabled: false,
         };
         let path = std::env::temp_dir().join(format!(
             "idletrigger-full-field-{}-{}.toml",

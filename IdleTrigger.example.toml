@@ -64,6 +64,8 @@ theme_skip_fullscreen = true
 # theme_restore_cursor = ""
 
 # -- 设置 / Settings --
+# 每次显示控制面板时在后台检查一次 GitHub Releases 的新版本（每分钟最多一次；托盘菜单与设置中的手动检查不受此开关限制）；确认后自动下载、校验并重启更新 / Check GitHub Releases in the background each time the control panel is shown (at most once a minute; manual checks from the tray menu or settings ignore this switch); after one confirmation the update downloads, verifies, and restarts automatically
+update_check_enabled = true
 # 启用全局热键：Ctrl+Win+Shift+S 睡眠，Win+Shift+L 锁定，Win+Shift+N 切换保持唤醒，Win+Shift+D 切换昼夜 / Enable global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock, Win+Shift+N toggle Stay Awake, Win+Shift+D switch day/night
 hotkeys_enabled = false
 # 锁定键状态变化时显示短暂提示 / Briefly show Caps Lock, Num Lock and Scroll Lock state changes

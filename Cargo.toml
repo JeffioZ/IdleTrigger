@@ -52,6 +52,7 @@ windows = { version = "0.62", features = [
     "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
 ] }
 
 # Release profile tuned for a small self-contained EXE.

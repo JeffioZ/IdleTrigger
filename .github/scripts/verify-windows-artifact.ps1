@@ -47,6 +47,9 @@ $systemDlls = @(
     'comctl32.dll', 'oleaut32.dll', 'ntdll.dll', 'ole32.dll', 'pdh.dll',
     'version.dll', 'advapi32.dll', 'winhttp.dll', 'gdiplus.dll', 'powrprof.dll',
     'comdlg32.dll', 'combase.dll', 'dwmapi.dll', 'bcryptprimitives.dll',
+    # bcrypt.dll: CNG hash provider (self-update SHA-256 verification);
+    # inbox since Vista, part of the system-DLLs-only dependency rule.
+    'bcrypt.dll',
     'wtsapi32.dll',
     'api-ms-win-core-synch-l1-2-0.dll', 'api-ms-win-core-winrt-l1-1-0.dll'
 )

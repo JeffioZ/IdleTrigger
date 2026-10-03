@@ -101,6 +101,11 @@ const ID_PAGE_SUB_APP: i32 = 209;
 const ID_RESTORE_PREV: i32 = 210;
 const ID_RESTORE_DEFAULT: i32 = 211;
 const ID_RESTORE_HINT: i32 = 212;
+// App page update block lives inside the general card (below logging): the
+// auto-check switch plus a manual check button (same one-click flow as the
+// panel link).
+const ID_APP_UPDATE_AUTO: i32 = 214;
+const ID_APP_UPDATE_CHECK: i32 = 215;
 
 /// Session state for the wallpaper library: seeded from the config when the
 /// settings window opens, mutated by Add/Remove, committed on Save.
@@ -826,7 +831,10 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         );
 
         // Application page.
-        section_card(hwnd, CARD_BASE + 7, font, (CONTENT_X, 114, CARD_W, 152));
+        // Application page. The auto-check switch and the manual check
+        // button ride the general card (same one-click flow as the panel
+        // link); the about block closes the page.
+        section_card(hwnd, CARD_BASE + 7, font, (CONTENT_X, 114, CARD_W, 228));
         label(
             hwnd,
             ID_APP_GENERAL_TITLE,
@@ -871,6 +879,22 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             &t_pub("menu_logging"),
             (ROW_X, 230, ROW_W, CHECK_H),
         );
+        checkbox(
+            hwnd,
+            ID_APP_UPDATE_AUTO,
+            &t_pub("settings_update_auto"),
+            (ROW_X, 264, ROW_W, CHECK_H),
+        );
+        // Manual check button: caption follows the updater phase (检查更新 →
+        // 检查中… → 更新到 vX → 下载更新 N%), drawn on the card surface.
+        // Wider than the footer buttons: the phase captions ("Update to
+        // v9.9.9") must not wrap inside draw_button_label's word-break.
+        push_button(
+            hwnd,
+            ID_APP_UPDATE_CHECK,
+            &t_pub("menu_check_updates"),
+            (ROW_RIGHT - 132, 298, 132, BTN_H),
+        );
         // The about block is one quiet row, not a card: a 40px face around
         // a single link read as filler chrome.
         label(
@@ -878,7 +902,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_APP_ABOUT_TITLE,
             &t_pub("settings_app_about_group"),
             section_font,
-            (CONTENT_X, 276, CARD_W, SECTION_TITLE_H),
+            (CONTENT_X, 352, CARD_W, SECTION_TITLE_H),
             false,
         );
         let project_label = t_pub("settings_project_home_label");
@@ -894,7 +918,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             ID_PROJECT_HOME_LBL,
             &project_label,
             font,
-            (CONTENT_X, 308, label_w, 22),
+            (CONTENT_X, 384, label_w, 22),
             false,
         );
         // Go renders the URL as an underlined accent-colored text link with
@@ -903,7 +927,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_PROJECT_HOME,
             PROJECT_URL,
-            (link_x, 308, url_w.min(CONTENT_RIGHT - link_x), 22),
+            (link_x, 384, url_w.min(CONTENT_RIGHT - link_x), 22),
         );
 
         // Screen notifications page.
@@ -1680,6 +1704,7 @@ fn populate(hwnd: HWND) {
         hotkeys,
         autostart,
         logging,
+        update_auto,
     ) = crate::cfg_map(|c| {
         *crate::runtime::lock(&DRAFT_BASE) = Some(c.clone());
         (
@@ -1710,6 +1735,7 @@ fn populate(hwnd: HWND) {
             c.hotkeys_enabled,
             crate::system::autostart_is_enabled(),
             c.logging_enabled,
+            c.update_check_enabled,
         )
     });
 
@@ -1729,6 +1755,7 @@ fn populate(hwnd: HWND) {
         (ID_HOTKEYS, hotkeys),
         (ID_AUTOSTART, autostart),
         (ID_LOGGING, logging),
+        (ID_APP_UPDATE_AUTO, update_auto),
     ] {
         set_checked(hwnd, id, value);
     }
@@ -1796,6 +1823,37 @@ fn populate(hwnd: HWND) {
         ID_THEME_LOCATION_STATUS,
         &location_status_text(ip_enabled),
     );
+    refresh_update_status();
+}
+
+/// Settings-side manual check button: same one-click flow as the panel link.
+/// Idle starts a (manual) check; a known update opens the shared confirm;
+/// in-flight phases ignore clicks.
+fn on_update_check_button() {
+    match crate::selfupdate::phase() {
+        crate::selfupdate::Phase::Checking | crate::selfupdate::Phase::Downloading { .. } => {}
+        crate::selfupdate::Phase::Available(_) | crate::selfupdate::Phase::Ready(_) => {
+            crate::update_prompt_and_begin();
+        }
+        _ => crate::selfupdate::manual_check(),
+    }
+    refresh_update_status();
+}
+
+/// Runtime refresh hook (WM_REFRESH_UI + language refresh): the check
+/// button's caption follows the updater phase; no-op when closed.
+pub fn refresh_update_status() {
+    let hwnd = current();
+    if hwnd.is_invalid() {
+        return;
+    }
+    set_text(hwnd, ID_APP_UPDATE_CHECK, &crate::update_action_caption());
+    unsafe {
+        let control = get(hwnd, ID_APP_UPDATE_CHECK);
+        if !control.is_invalid() {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, false);
+        }
+    }
 }
 
 /// Go theme_location.go status line for the day/night page.
@@ -1908,6 +1966,8 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_LOGGING,
             ID_PROJECT_HOME_LBL,
             ID_PROJECT_HOME,
+            ID_APP_UPDATE_AUTO,
+            ID_APP_UPDATE_CHECK,
         ],
         _ => &[
             ID_PAGE_TITLE_NOTIFICATIONS,
@@ -2025,6 +2085,7 @@ struct Draft {
     hotkeys: bool,
     autostart: bool,
     logging: bool,
+    update_auto: bool,
 }
 
 fn collect_draft(hwnd: HWND) -> Draft {
@@ -2085,6 +2146,7 @@ fn collect_draft(hwnd: HWND) -> Draft {
         hotkeys: is_checked(hwnd, ID_HOTKEYS),
         autostart: is_checked(hwnd, ID_AUTOSTART),
         logging: is_checked(hwnd, ID_LOGGING),
+        update_auto: is_checked(hwnd, ID_APP_UPDATE_AUTO),
     }
 }
 
@@ -2238,6 +2300,7 @@ fn draft_differs(draft: &Draft) -> bool {
         || draft.hotkeys != cfg_hotkeys
         || draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst)
         || draft.logging != cfg_logging
+        || draft.update_auto != base.update_check_enabled
 }
 
 /// Draft-vs-live comparison key that ignores the restore snapshot fields:
@@ -2309,6 +2372,7 @@ fn save() {
             c.lock_keys_skip_fullscreen = draft.lock_fullscreen;
             c.hotkeys_enabled = draft.hotkeys;
             c.logging_enabled = draft.logging;
+            c.update_check_enabled = draft.update_auto;
             Ok(())
         }) {
             set_validation(hwnd, &err, true);
@@ -2448,6 +2512,7 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_HOTKEYS, "tip_hotkeys"),
         (ID_AUTOSTART, "tip_autostart"),
         (ID_LOGGING, "tip_logging"),
+        (ID_APP_UPDATE_AUTO, "tip_update_auto"),
         (ID_PROJECT_HOME, "tip_project_home"),
         (ID_CANCEL, "tip_settings_cancel"),
         (ID_SAVE, "tip_settings_save"),
@@ -2913,7 +2978,7 @@ unsafe fn draw_settings_item_impl(
             scale,
             progress,
         );
-    } else if matches!(id, ID_RESTORE_PREV | ID_LOCK_PREVIEW) {
+    } else if matches!(id, ID_RESTORE_PREV | ID_LOCK_PREVIEW | ID_APP_UPDATE_CHECK) {
         // Buttons that sit on a card face must erase with the card
         // color, or their background punch-through shows window ink.
         let state = crate::nativeform::control_state(item.control, item.state);
@@ -2981,7 +3046,8 @@ fn handle_click(hwnd: HWND, idc: i32) {
             }
             ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_PAUSE_ON_LOCK | ID_IDLE_ENHANCED
             | ID_THEME_BATTERY | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING
-            | ID_LOCK_KEYS | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL | ID_LOCK_FULLSCREEN => {
+            | ID_APP_UPDATE_AUTO | ID_LOCK_KEYS | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL
+            | ID_LOCK_FULLSCREEN => {
                 // Owner-drawn checkboxes keep state in CHECKS. The flight
                 // animates the flip with the same glide the panel uses.
                 let before = is_checked(hwnd, idc);
@@ -3013,6 +3079,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 report_restore_result(hwnd, crate::theme_engine::restore_default_appearance());
             }
             ID_PROJECT_HOME => open_project_home(hwnd),
+            ID_APP_UPDATE_CHECK => on_update_check_button(),
             ID_SAVE => save(),
             ID_CANCEL => close_request(),
             _ => {}
@@ -3141,6 +3208,7 @@ pub fn refresh_language() {
         (ID_AUTOSTART, "menu_autostart"),
         (ID_LOGGING, "menu_logging"),
         (ID_APP_ABOUT_TITLE, "settings_app_about_group"),
+        (ID_APP_UPDATE_AUTO, "settings_update_auto"),
         (ID_NOTIFICATIONS_TITLE, "settings_lock_keys"),
         (ID_LOCK_KEYS, "settings_lock_keys_enable"),
         (ID_NOTIFICATIONS_BEHAVIOR, "settings_notification_behavior"),
@@ -3158,6 +3226,9 @@ pub fn refresh_language() {
         ID_VERSION,
         &t_pub("settings_version").replace("%s", crate::APP_VERSION),
     );
+    // The check button's caption is phase-formatted; re-derive it in the
+    // new language.
+    refresh_update_status();
     for (id, labels) in [
         (ID_IDLE_ACTION, idle_action_labels()),
         (

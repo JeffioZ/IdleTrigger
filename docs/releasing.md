@@ -11,6 +11,7 @@
 3. 确认发布版不启用诊断预览、强制主题和捕获行为；真实系统操作及主题修复使用独立测试环境。
 4. 审查差异和版本后再打 tag。格式为 `vMAJOR.MINOR.PATCH`，可附 SemVer 预发布/构建信息；三个主版本分量各在 0..65535 内，Windows 固定版本为 `MAJOR.MINOR.PATCH.0`，ProductVersion 保留完整版本及附加信息。
 5. 工作流完成验证、双架构构建、产物检查和校验和计算后创建**发布草稿**。有预发布标签时同时标记为 GitHub 预发布，只有构建信息时不标记。检查产物，填写简洁双语说明后发布。
+6. 草稿创建后工作流会执行 **Verify updater metadata** 闸门：将 `SHA256SUMS.txt` 的每一行与 GitHub 在上传时计算的资产 digest 交叉校验，不一致即失败。应用内自更新（设置 → 应用 → 检查更新）以 `SHA256SUMS.txt` 为首要摘要来源，该闸门是它的完整性锚点，不要跳过或绕过失败继续发布。
 
 Files: `IdleTrigger-x64.exe`, `IdleTrigger-x86.exe`, `SHA256SUMS.txt`. Describe user-visible changes and known limitations. Successful builds cannot replace unperformed hardware/UI checks.
 

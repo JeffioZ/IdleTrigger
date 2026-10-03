@@ -115,3 +115,37 @@ jobs:
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify updater metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The Windows self-updater trusts SHA256SUMS.txt as its primary
+          # digest source (github.com host, no API quota). Cross-check every
+          # checksum line against the digests GitHub computed on upload so a
+          # CI-side mistake cannot publish an updater that would refuse or
+          # mis-verify its own replacements. Draft releases are invisible to
+          # releases/tags/<tag>, so look the release up by tag first.
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases" --jq ('.[] | select(.tag_name == "' + $env:RELEASE_TAG + '")') | ConvertFrom-Json
+          if (-not $release) {
+            Write-Error "No release found for tag $env:RELEASE_TAG"
+            exit 1
+          }
+          foreach ($name in @("IdleTrigger-x86.exe", "IdleTrigger-x64.exe")) {
+            $digest = ($release.assets | Where-Object { $_.name -eq $name }).digest
+            if ($digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
+              Write-Error "$name is missing a valid SHA-256 digest"
+              exit 1
+            }
+            $line = Get-Content SHA256SUMS.txt | Where-Object { $_ -match ('\s\*?' + [regex]::Escape($name) + '$') } | Select-Object -First 1
+            if (-not $line) {
+              Write-Error "SHA256SUMS.txt has no line for $name"
+              exit 1
+            }
+            $expected = ($line -split '\s\*?')[0]
+            if ($expected -ne $digest.Substring(7)) {
+              Write-Error "$name digest mismatch between SHA256SUMS.txt and GitHub"
+              exit 1
+            }
+          }
+          Write-Output "Updater metadata verified."

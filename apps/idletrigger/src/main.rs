@@ -44,15 +44,15 @@ use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, FindWindowW, GetDlgCtrlID, GetDlgItem, GetMessageW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW, IDC_HAND,
-    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetCursor,
-    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    DispatchMessageW, FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW,
+    IDC_HAND, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SendMessageTimeoutW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -86,6 +86,13 @@ const IDC_THEME_SNOOZE_1H: usize = 157;
 const IDC_THEME_SNOOZE_MORNING: usize = 158;
 const IDC_THEME_SNOOZE_CANCEL: usize = 159;
 const IDC_EXIT_BUTTON: usize = 140;
+// Panel update action link (header-link grammar) centered in the left slot
+// of the on-demand row below the footer; hidden until a check finds a newer
+// release.
+const IDC_UPDATE_BUTTON: usize = 160;
+// Opens the release page for the pending update version (same row, middle
+// slot, centered).
+const IDC_UPDATE_NOTES_LINK: usize = 161;
 const IDC_WARN_TEXT: usize = 130;
 const IDC_WARN_CANCEL: usize = 131;
 
@@ -133,6 +140,10 @@ const PANEL_CLIENT_WIDTH: i32 = 486;
 // Exact flow: pad12 + (title 18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
 // + (18 + 4 + card(8 + 36+6 + 20 + 8)) + 10
 // + (18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10 + 36 + pad12 = 458.
+// The update row (two links below the footer buttons) is an on-demand
+// extra row: the panel stays 458 without an update and grows upward by
+// (LINK_BOX_H + 2*LABEL_GAP − PAD) when one appears (see sync_update_row)
+// — the footer buttons never move.
 const PANEL_CLIENT_HEIGHT: i32 = 458;
 // Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
@@ -151,6 +162,13 @@ pub(crate) fn request_theme_repair_refresh() {
     enqueue_theme_refresh(true);
 }
 
+/// Queue one update-prompt refresh on the UI thread (posted so callers from
+/// any window's message handling stay re-entrancy-free).
+pub(crate) fn request_update_refresh() {
+    unsafe {
+        let _ = PostMessageW(Some(hwnd(&HIDDEN)), WM_REFRESH_UI, WPARAM(0), LPARAM(0));
+    }
+}
 pub(crate) fn request_theme_refresh() {
     enqueue_theme_refresh(false);
 }
@@ -194,6 +212,7 @@ mod popups;
 #[cfg(test)]
 mod render_tests;
 mod runtime;
+mod selfupdate;
 mod settings_ui;
 mod single_instance;
 mod system;
@@ -236,6 +255,9 @@ static LBL_POWER_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_AUTOMATION_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_THEME_SCHEDULE: AtomicIsize = AtomicIsize::new(0);
 static WARN_TEXT: AtomicIsize = AtomicIsize::new(0);
+// Whether the on-demand update row below the footer buttons currently
+// occupies its extra zone at the panel's bottom.
+static UPDATE_ROW_SHOWN: AtomicBool = AtomicBool::new(false);
 
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
 static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -310,7 +332,12 @@ fn is_chip_id(id: usize) -> bool {
 fn is_link_id(id: usize) -> bool {
     matches!(
         id,
-        IDC_NOSLEEP_TIMED_CANCEL | IDC_THEME_SNOOZE_CANCEL | IDC_MANAGE_BUTTON | IDC_THEME_REPAIR
+        IDC_NOSLEEP_TIMED_CANCEL
+            | IDC_THEME_SNOOZE_CANCEL
+            | IDC_MANAGE_BUTTON
+            | IDC_THEME_REPAIR
+            | IDC_UPDATE_BUTTON
+            | IDC_UPDATE_NOTES_LINK
     )
 }
 
@@ -422,6 +449,7 @@ fn refresh_language() {
         (IDC_SYSTEM_BUTTON, "menu_system_controls"),
         (IDC_SETTINGS_BUTTON, "settings_open"),
         (IDC_EXIT_BUTTON, "menu_exit_panel"),
+        (IDC_UPDATE_NOTES_LINK, "panel_update_notes"),
     ] {
         let control = unsafe { GetDlgItem(Some(panel), id as i32).unwrap_or_default() };
         set_control_text(control, &t(key));
@@ -429,6 +457,9 @@ fn refresh_language() {
     let theme_chip =
         unsafe { GetDlgItem(Some(panel), IDC_THEME_SWITCH as i32) }.unwrap_or_default();
     set_control_text(theme_chip, &theme_switch_chip_label());
+    // The update action link's caption is phase-formatted; re-derive it in
+    // the new language (and re-place both update links).
+    refresh_update_button();
     layout_header_links(panel);
     // The tray menu is rebuilt at popup time, so language changes apply on
     // the next right click without any explicit rebuild here.
@@ -531,6 +562,11 @@ fn main() {
         init_log(&exe_dir);
     }
     log_line("IdleTrigger starting");
+    // Reclaim the previous round's update staging (logs a replace failure
+    // trail when present) and restore a staged-update phase so the panel
+    // link can offer "restart and update" without waiting for a fresh check.
+    selfupdate::cleanup_on_startup();
+    selfupdate::restore_ready_phase();
     #[cfg(feature = "devtools")]
     let diagnostics = devtools::ENABLED.load(Ordering::SeqCst);
     #[cfg(not(feature = "devtools"))]
@@ -633,6 +669,8 @@ fn main() {
     if !start_minimized || !tray_alive {
         // Atomic first presentation: no light flash in dark mode.
         FirstFrameGate::begin(hwnd(&PANEL)).reveal();
+        selfupdate::on_panel_shown();
+        refresh_update_button();
     }
 
     let mut msg = msg_default();
@@ -795,6 +833,24 @@ unsafe extern "system" fn hidden_proc(
             }
             WM_REFRESH_UI => {
                 settings_ui::refresh_location_status();
+                refresh_update_button();
+                settings_ui::refresh_update_status();
+                if selfupdate::take_exit_request() {
+                    log_line("exit via self-update");
+                    PostQuitMessage(0);
+                }
+                if let Some(error) = selfupdate::take_error() {
+                    warn_dialog("", &error);
+                }
+                if let Some(message) = selfupdate::take_feedback() {
+                    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK};
+                    let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                        Some(hwnd(&PANEL)),
+                        PCWSTR(wide(&message).as_ptr()),
+                        PCWSTR(wide(&t_pub("app_title")).as_ptr()),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
                 theme_engine::finish_manual_switch();
                 theme_engine::finish_repair();
                 automation::show_save_errors();
@@ -1472,6 +1528,10 @@ unsafe extern "system" fn panel_proc(
                 } else if code == IDC_THEME_SNOOZE_CANCEL {
                     theme_engine::snooze_cancel();
                     refresh_status();
+                } else if code == IDC_UPDATE_BUTTON {
+                    update_prompt_and_begin();
+                } else if code == IDC_UPDATE_NOTES_LINK {
+                    open_update_notes();
                 } else if code == IDC_EXIT_BUTTON {
                     log_line("exit via panel button");
                     PostQuitMessage(0);
@@ -1771,6 +1831,9 @@ fn create_windows() {
         let _dpi = dpi::Scope::window(panel);
         let font = make_font(14, 400);
         let subtitle_font = make_font(12, 600);
+        // Always created compact: the update row is added on demand by
+        // sync_update_row when the first refresh finds an update.
+        UPDATE_ROW_SHOWN.store(false, Ordering::SeqCst);
         let mut frame = RECT {
             left: 0,
             top: 0,
@@ -2213,6 +2276,41 @@ fn create_windows() {
         let exit_label = t("menu_exit_panel");
         set_control_text(exit_btn, &exit_label);
 
+        // On-demand update row below the footer buttons: two header-grammar
+        // text links — the action (更新到 vX) centered in the left grid slot,
+        // the release-notes link centered in the middle slot. Created hidden;
+        // positioned while hidden and shown only afterwards by
+        // refresh_update_button (never show an owner-draw control at its stub
+        // geometry — see the crash note there).
+        let update_link = owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: String::new(),
+                x: 0,
+                y: 0,
+                width: scale(4),
+                id: IDC_UPDATE_BUTTON,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_BOX_H),
+        );
+        let _ = ShowWindow(update_link, SW_HIDE);
+        let notes_link = owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("panel_update_notes"),
+                x: 0,
+                y: 0,
+                width: scale(4),
+                id: IDC_UPDATE_NOTES_LINK,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_BOX_H),
+        );
+        let _ = ShowWindow(notes_link, SW_HIDE);
+
         // Header links get their exact-fit geometry from the labels.
         layout_header_links(panel);
 
@@ -2533,6 +2631,8 @@ fn layout_header_links(panel: HWND) {
             )
         };
     };
+    // The update prompt owns its own row below the footer
+    // (refresh_update_button); header links never move because of it.
     place(IDC_NOSLEEP_TIMED_CANCEL, 0, None);
     place(IDC_MANAGE_BUTTON, 1, None);
     place(IDC_THEME_REPAIR, 2, None);
@@ -3013,6 +3113,12 @@ fn show_panel() {
             let _ = ShowWindow(target, SW_SHOW);
         }
         let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(target);
+        // Panel shown (and no modal in front): one throttled update check,
+        // and the update row re-syncs with the current updater phase.
+        if target == hwnd(&PANEL) {
+            selfupdate::on_panel_shown();
+            refresh_update_button();
+        }
     }
 }
 
@@ -3036,6 +3142,200 @@ fn toggle_panel() {
             show_panel();
         }
     }
+}
+
+/// Tray menu "Check for Updates": explicit user intent, so it ignores the
+/// auto-check switch and cooldown; shows the panel and answers the outcome.
+pub fn tray_check_update() {
+    show_panel();
+    selfupdate::manual_check();
+}
+
+/// The update action's phase-dependent caption, shared by the panel link and
+/// the settings button: 更新到 vX / 下载更新 N% / 检查中… / 检查更新.
+pub(crate) fn update_action_caption() -> String {
+    match selfupdate::phase() {
+        // Available and Ready share one caption: a single confirm always
+        // runs the whole tail (download if needed → apply → restart).
+        selfupdate::Phase::Available(version) | selfupdate::Phase::Ready(version) => {
+            t_pub("panel_update_caption").replace("%s", &version)
+        }
+        selfupdate::Phase::Downloading { percent, .. } => {
+            t_args("panel_update_downloading", &[&percent.to_string()])
+        }
+        selfupdate::Phase::Checking => t_pub("update_checking"),
+        _ => t_pub("menu_check_updates"),
+    }
+}
+
+/// Grows or shrinks the panel by the on-demand update row below the footer
+/// buttons. Growing is UPWARD (the panel anchors at its bottom edge near the
+/// tray; growing downward would push it past the work-area bottom), so the
+/// footer buttons never move — the fresh space appears at the client bottom
+/// and the row lands there. Idempotent — only acts on a visibility flip.
+fn sync_update_row() {
+    let want = matches!(
+        selfupdate::phase(),
+        selfupdate::Phase::Available(_)
+            | selfupdate::Phase::Ready(_)
+            | selfupdate::Phase::Downloading { .. }
+    );
+    if UPDATE_ROW_SHOWN.swap(want, Ordering::SeqCst) == want {
+        return;
+    }
+    unsafe {
+        let panel = hwnd(&PANEL);
+        // The link row centers in a tight zone between the footer buttons
+        // and the panel's bottom border: LABEL_GAP above the link, LINK_BOX_H
+        // for the link, LABEL_GAP below. The zone REPLACES the footer's
+        // trailing PAD (counting both double-books 12px and pushes the link
+        // 20px off the buttons), so the grow delta is zone − PAD.
+        let zone = LINK_BOX_H + 2 * LABEL_GAP;
+        let dy = if want {
+            scale(zone - PAD)
+        } else {
+            -scale(zone - PAD)
+        };
+        let mut window = RECT::default();
+        if GetWindowRect(panel, &mut window).is_ok() {
+            let _ = SetWindowPos(
+                panel,
+                None,
+                window.left,
+                window.top - dy,
+                window.right - window.left,
+                (window.bottom - window.top) + dy,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(panel), None, true);
+    }
+}
+
+/// Panel update row (two text links below the footer buttons): caption and
+/// visibility follow the updater phase.
+fn refresh_update_button() {
+    unsafe {
+        sync_update_row();
+        let control = GetDlgItem(Some(hwnd(&PANEL)), IDC_UPDATE_BUTTON as i32).unwrap_or_default();
+        if control.is_invalid() {
+            return;
+        }
+        let notes =
+            GetDlgItem(Some(hwnd(&PANEL)), IDC_UPDATE_NOTES_LINK as i32).unwrap_or_default();
+        if notes.is_invalid() {
+            return;
+        }
+        // The row's links stay hidden while idle or checking (the settings
+        // page owns the explicit-check affordance, and a transient "checking"
+        // row would grow/shrink the panel on every show).
+        let show = matches!(
+            selfupdate::phase(),
+            selfupdate::Phase::Available(_)
+                | selfupdate::Phase::Ready(_)
+                | selfupdate::Phase::Downloading { .. }
+        );
+        if !show {
+            let _ = ShowWindow(control, SW_HIDE);
+            let _ = ShowWindow(notes, SW_HIDE);
+            return;
+        }
+        let text = update_action_caption();
+        // Row geometry from the LIVE client rect (after sync_update_row's
+        // resize).
+        let mut client = RECT::default();
+        if GetClientRect(hwnd(&PANEL), &mut client).is_err() {
+            return;
+        }
+        // Visually centered in the tight zone: LABEL_GAP to the footer
+        // buttons above, LABEL_GAP to the bottom border below.
+        let link_h = scale(LINK_BOX_H);
+        let link_y = client.bottom - scale(LABEL_GAP) - link_h;
+        let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
+        // Grid continuation of the footer row, in link grammar: the action
+        // link centers in the left slot (under 系统操作), the notes link in
+        // the middle slot (under 设置); the right slot stays empty.
+        let (action_x, action_w_slot) = row_slot(card_w, 3, 0);
+        let (notes_x, notes_w_slot) = row_slot(card_w, 3, 1);
+        let notes_text = window_text(notes);
+        let action_w =
+            scale(measured_text_width(hwnd(&PANEL), panel_font_subtitle(), &text).max(16));
+        let notes_w =
+            scale(measured_text_width(hwnd(&PANEL), panel_font_subtitle(), &notes_text).max(16));
+        // Position while STILL HIDDEN, show only afterwards: a freshly
+        // created owner-draw control must never be shown at its 4px creation
+        // stub geometry (first-paint at the stub crashes the button wndproc;
+        // verified by bisection — show-at-stub crashed 5/5, position-first
+        // runs clean).
+        set_control_text(control, &text);
+        for (link, slot_x, slot_w, width) in [
+            (control, action_x, action_w_slot, action_w),
+            (notes, notes_x, notes_w_slot, notes_w),
+        ] {
+            let _ = SetWindowPos(
+                link,
+                None,
+                scale(PAD + slot_x) + (scale(slot_w) - width) / 2,
+                link_y,
+                width,
+                link_h,
+                SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+            );
+        }
+        let _ = ShowWindow(control, SW_SHOW);
+        let _ = ShowWindow(notes, SW_SHOW);
+        for window in [control, notes] {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(window), None, false);
+        }
+    }
+}
+
+/// Opens the pending update's release page (update info lives there).
+fn open_update_notes() {
+    let Some(version) = selfupdate::pending_update_version() else {
+        return;
+    };
+    let url = format!(
+        "https://github.com/{}/releases/tag/v{}",
+        selfupdate::APP_REPO,
+        version
+    );
+    unsafe {
+        let _ = windows::Win32::UI::Shell::ShellExecuteW(
+            Some(hwnd(&PANEL)),
+            windows::core::w!("open"),
+            PCWSTR(wide(&url).as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// One-click update, shared by the panel link and the settings button: one
+/// confirm (owned by the frontmost window), then a worker downloads (if
+/// needed), applies and requests the exit.
+pub fn update_prompt_and_begin() {
+    let Some(version) = selfupdate::pending_update_version() else {
+        return;
+    };
+    let body = t_pub("update_confirm_body").replacen("%s", &version, 1);
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
+    let owner = active_modal_window().unwrap_or_else(|| hwnd(&PANEL));
+    let choice = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            Some(owner),
+            PCWSTR(wide(&body).as_ptr()),
+            PCWSTR(wide(&t_pub("update_restart")).as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    if choice != IDYES {
+        return;
+    }
+    selfupdate::begin_update();
+    refresh_update_button();
+    settings_ui::refresh_update_status();
 }
 
 fn on_toggle(code: usize) {

@@ -31,7 +31,8 @@ pub const CALLBACK_MSG: u32 = 0x8001;
 const TRAY_ID: u32 = 1;
 // Popup commands, returned by TrackPopupMenu with TPM_RETURNCMD.
 const CMD_OPEN_PANEL: usize = 1;
-const CMD_EXIT: usize = 2;
+const CMD_CHECK_UPDATE: usize = 2;
+const CMD_EXIT: usize = 3;
 // Go resourceid: tray-dark (3) shows on light mode, tray-light (4) on dark.
 const RES_DARK_STROKES: i32 = 3;
 const RES_LIGHT_STROKES: i32 = 4;
@@ -188,9 +189,14 @@ fn build_menu() -> Option<HMENU> {
         .encode_utf16()
         .chain([0])
         .collect();
+    let check: Vec<u16> = crate::t("menu_check_updates")
+        .encode_utf16()
+        .chain([0])
+        .collect();
     let exit: Vec<u16> = crate::t("menu_exit").encode_utf16().chain([0]).collect();
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN_PANEL, PCWSTR(open.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, PCWSTR(check.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, PCWSTR(exit.as_ptr()));
         // These text-only actions need no checkmark gutter. Keep native text
@@ -231,6 +237,7 @@ fn theme_prep_and_track(menu: HMENU, owner: HWND, x: i32, y: i32) {
         let _ = DestroyMenu(menu);
         match choice as usize {
             CMD_OPEN_PANEL => crate::toggle_panel(),
+            CMD_CHECK_UPDATE => crate::tray_check_update(),
             CMD_EXIT => PostQuitMessage(0),
             _ => {}
         }

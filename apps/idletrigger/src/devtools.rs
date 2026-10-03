@@ -12,6 +12,10 @@ pub static IDLE_TEST_SECONDS: std::sync::atomic::AtomicU32 = std::sync::atomic::
 pub static WARNING_PREVIEW: AtomicBool = AtomicBool::new(false);
 pub static CAPTURE_PANEL: AtomicBool = AtomicBool::new(false);
 static ACTION_WARNING_PREVIEW: AtomicBool = AtomicBool::new(false);
+/// Self-update UI preview: injects a simulated release so the panel link,
+/// confirm dialog, download progress and restart states can be inspected
+/// without touching the network or the running EXE.
+pub static UPDATE_PREVIEW: AtomicBool = AtomicBool::new(false);
 
 /// Preview sessions cannot dispatch any real system action, including Run now.
 pub fn preview_only() -> bool {
@@ -54,6 +58,10 @@ pub fn load() -> bool {
     }
     if std::env::var("IDLETRIGGER_DEVTOOLS_ACTION_WARNING").as_deref() == Ok("1") {
         ACTION_WARNING_PREVIEW.store(true, Ordering::SeqCst);
+        active = true;
+    }
+    if std::env::var("IDLETRIGGER_DEVTOOLS_UPDATE_PREVIEW").as_deref() == Ok("1") {
+        UPDATE_PREVIEW.store(true, Ordering::SeqCst);
         active = true;
     }
     if std::env::var("IDLETRIGGER_DEVTOOLS_CAPTURE_PANEL").as_deref() == Ok("1") {
