@@ -1682,6 +1682,14 @@ static CLASSES_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// Creates the application windows; DPI changes preserve these handles.
 fn create_windows() {
+    // Test/devtools callers build the UI without main()'s startup: give
+    // config commits a real temp path so save paths succeed silently
+    // instead of popping a blocking "configuration path unavailable"
+    // dialog (which stalled test children until someone clicked OK).
+    if crate::runtime::lock(&CONFIG_PATH).as_ref().is_none() {
+        let path = std::env::temp_dir().join(format!("idletrigger-ui-{}.toml", std::process::id()));
+        *crate::runtime::lock(&CONFIG_PATH) = Some(path);
+    }
     unsafe {
         let instance = GetModuleHandleW(None).expect("module handle");
         if !CLASSES_REGISTERED.swap(true, Ordering::SeqCst) {
