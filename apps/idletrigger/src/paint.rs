@@ -1260,7 +1260,7 @@ fn draw_arrow(hdc: HDC, x: i32, y: i32, up: bool, color: u32, scale: i32) {
     }
 }
 
-fn draw_label(
+pub fn draw_label(
     hdc: HDC,
     bounds: &RECT,
     font: HFONT,
@@ -1270,6 +1270,13 @@ fn draw_label(
     left_inset: i32,
     right_inset: i32,
 ) {
+    if label.is_empty() {
+        // An empty Vec<u16>'s buffer pointer is the dangling aligned
+        // pointer (0x2 for u16), and DrawTextW still probes the text
+        // pointer - an access violation (the picker's blank description
+        // column crashed here on first paint). Empty labels draw nothing.
+        return;
+    }
     unsafe {
         // No trailing NUL: windows-rs passes the slice length as cchText, and
         // an explicitly counted NUL widens DT_CALCRECT results.

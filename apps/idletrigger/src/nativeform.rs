@@ -51,6 +51,49 @@ pub struct InteractionState {
     pub(crate) focused: bool,
 }
 
+/// The settings field-well rect of a card-hosted control, in the card's own
+/// coordinate space (card origin passed as `card`). Shared by the settings
+/// pages, the automation editor cards and the picker's search field so the
+/// well ring looks and insets identically everywhere.
+pub fn field_well_rect(card: &RECT, control: &RECT) -> RECT {
+    let (side, vertical) = (crate::scale_pub(3), crate::scale_pub(7));
+    RECT {
+        left: control.left - card.left - side,
+        top: control.top - card.top - vertical,
+        right: control.right - card.left + side,
+        bottom: control.bottom - card.top + vertical,
+    }
+}
+
+/// Invalidate a card-hosted control's well region on the card itself, so a
+/// focus change repaints only the ring, not the whole card face. Returns
+/// true when the control was found inside the card.
+pub fn invalidate_field_well(card: HWND, control: HWND) -> bool {
+    unsafe {
+        if card.is_invalid() || control.is_invalid() {
+            return false;
+        }
+        let mut control_rect = RECT::default();
+        let mut card_rect = RECT::default();
+        if GetWindowRect(control, &mut control_rect).is_err()
+            || GetWindowRect(card, &mut card_rect).is_err()
+            || control_rect.left < card_rect.left
+            || control_rect.right > card_rect.right
+            || control_rect.top < card_rect.top
+            || control_rect.bottom > card_rect.bottom
+        {
+            return false;
+        }
+        let well = field_well_rect(&card_rect, &control_rect);
+        if well.right > well.left && well.bottom > well.top {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(card), Some(&well), false);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 struct Tracked {
     old_proc: isize,
     state: InteractionState,
@@ -59,6 +102,11 @@ struct Tracked {
     /// on the pill alone - panel parity, where the label is a separate
     /// static that never hovers.
     hover_column: i32,
+    /// False for EDIT controls: they draw no hover state of their own, and
+    /// repainting them on hover transitions hides and reshows the caret
+    /// mid-blink (a visible stutter). Focus repaints still reach them via
+    /// the card well invalidation.
+    paints_hover: bool,
 }
 
 static CONTROLS: Mutex<Option<HashMap<isize, Tracked>>> = Mutex::new(None);
@@ -75,17 +123,15 @@ pub fn keyboard_navigation() {
     FOCUS_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Keep the native edit (including its cue accessibility text), but paint the
-/// empty-field hint with the same readable palette as the other form controls.
+/// Keep the native edit, but paint the empty-field hint entirely from the
+/// subclass below (palette colors + our own focus rule). The NATIVE
+/// EM_SETCUEBANNER layer is deliberately NOT set: its hide-on-focus
+/// behavior lives inside the OS edit control and has been observed to
+/// redraw the hint on repaints even while focused on current Windows
+/// builds - a path our code cannot gate. With only the subclass painting,
+/// "focused edit shows the hint" cannot happen by construction.
 pub fn cue_banner(control: HWND, key: &'static str) {
     unsafe {
-        let text: Vec<u16> = crate::t_pub(key).encode_utf16().chain([0]).collect();
-        SendMessageW(
-            control,
-            0x1501,
-            Some(WPARAM(1)),
-            Some(LPARAM(text.as_ptr() as isize)),
-        );
         let mut existing = 0;
         if windows::Win32::UI::Shell::GetWindowSubclass(
             control,
@@ -129,7 +175,13 @@ unsafe extern "system" fn cue_proc(
             return DefSubclassProc(control, msg, wp, lp);
         }
         let result = DefSubclassProc(control, msg, wp, lp);
-        if matches!(msg, WM_PAINT | WM_PRINTCLIENT) && GetWindowTextLengthW(control) == 0 {
+        // The hint shows ONLY on an empty, unfocused edit: while focused the
+        // caret alone carries the state, so no hover/tooltip repaint can
+        // bring the hint back mid-focus.
+        if matches!(msg, WM_PAINT | WM_PRINTCLIENT)
+            && GetWindowTextLengthW(control) == 0
+            && windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() != control
+        {
             let dc = if msg == WM_PRINTCLIENT {
                 HDC(wp.0 as *mut _)
             } else {
@@ -243,12 +295,17 @@ pub fn track(control: HWND) {
         if old == 0 {
             return;
         }
+        let mut class = [0u16; 8];
+        let len = GetClassNameW(control, &mut class);
+        let paints_hover =
+            !String::from_utf16_lossy(&class[..len.max(0) as usize]).eq_ignore_ascii_case("EDIT");
         with_map(|m| {
             m.insert(
                 key,
                 Tracked {
                     old_proc: old,
                     hover_column: 0,
+                    paints_hover,
                     state: InteractionState::default(),
                 },
             );
@@ -262,9 +319,9 @@ pub fn interaction(control: HWND) -> InteractionState {
     with_map(|m| m.get(&key).map(|t| t.state).unwrap_or_default())
 }
 
-const ODS_SELECTED: u32 = 0x0001;
+pub(crate) const ODS_SELECTED: u32 = 0x0001;
 const ODS_DISABLED: u32 = 0x0004;
-const ODS_FOCUS: u32 = 0x0010;
+pub(crate) const ODS_FOCUS: u32 = 0x0010;
 
 /// Merges tracked interaction into a paint ControlState; pressed/disabled
 /// come from the WM_DRAWITEM itemState flags (native-sourced like Go).
@@ -390,18 +447,21 @@ unsafe extern "system" fn tracked_proc(
                         _ => true,
                     }
                 });
-                let changed = with_map(|m| {
+                let (changed, paints) = with_map(|m| {
+                    let mut changed = false;
                     if let Some(t) = m.get_mut(&key)
                         && t.state.hovered != in_column
                     {
                         t.state.hovered = in_column;
-                        return true;
+                        changed = true;
                     }
-                    false
+                    (changed, m.get(&key).is_some_and(|t| t.paints_hover))
                 });
                 if changed {
                     begin_leave_tracking(hwnd);
-                    invalidate(hwnd);
+                    if paints {
+                        invalidate(hwnd);
+                    }
                 }
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
@@ -455,14 +515,17 @@ unsafe extern "system" fn tracked_proc(
                 }
             }
             WM_MOUSELEAVE => {
-                let changed = with_map(|m| {
-                    if let Some(t) = m.get_mut(&key) {
+                let (changed, paints) = with_map(|m| {
+                    let mut changed = false;
+                    if let Some(t) = m.get_mut(&key)
+                        && t.state.hovered
+                    {
                         t.state.hovered = false;
-                        return true;
+                        changed = true;
                     }
-                    false
+                    (changed, m.get(&key).is_some_and(|t| t.paints_hover))
                 });
-                if changed {
+                if changed && paints {
                     invalidate(hwnd);
                 }
             }
@@ -574,6 +637,8 @@ pub struct DrawItem {
     pub dc: HDC,
     pub bounds: RECT,
     pub state: u32,
+    /// Listbox row index (owner-draw list items); 0 for buttons/statics.
+    pub item_id: u32,
 }
 
 /// Parses WM_DRAWITEM; returns None for other control types.
@@ -583,7 +648,10 @@ pub fn draw_item(lparam: LPARAM) -> Option<DrawItem> {
     }
     unsafe {
         let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
-        if item.CtlType.0 != ODT_BUTTON && item.CtlType.0 != ODT_STATIC {
+        if item.CtlType.0 != ODT_BUTTON
+            && item.CtlType.0 != ODT_STATIC
+            && item.CtlType.0 != ODT_LISTBOX
+        {
             return None;
         }
         Some(DrawItem {
@@ -592,12 +660,14 @@ pub fn draw_item(lparam: LPARAM) -> Option<DrawItem> {
             dc: item.hDC,
             bounds: item.rcItem,
             state: item.itemState.0,
+            item_id: item.itemID,
         })
     }
 }
 
 const ODT_BUTTON: u32 = 4;
 const ODT_STATIC: u32 = 5;
+const ODT_LISTBOX: u32 = 2;
 
 /// Owned tooltip window; reinstallation replaces translated text atomically.
 pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {

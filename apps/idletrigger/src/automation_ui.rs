@@ -85,10 +85,20 @@ const ED_PROC_INFO: usize = 363;
 const ED_BATTERY: usize = 364;
 const ED_BATTERY_LBL: usize = 365;
 const ED_MODE_TITLE: usize = 366;
+/// Section cards (owner-draw statics pinned beneath their rows) and the
+/// basic-info section title (settings card grammar: titles ride outside).
+const ED_CARD_BASIC: usize = 368;
+const ED_CARD_TRIGGER: usize = 369;
+const ED_CARD_OPTIONS: usize = 370;
+const ED_BASIC_TITLE: usize = 371;
 
 /// Every editor control laid out by layout_editor (Go editorControlIDs).
-const ED_LAYOUT_IDS: [usize; 46] = [
+const ED_LAYOUT_IDS: [usize; 50] = [
     ED_MODE_TITLE,
+    ED_CARD_BASIC,
+    ED_CARD_TRIGGER,
+    ED_CARD_OPTIONS,
+    ED_BASIC_TITLE,
     ED_NAME_LBL,
     ED_NAME,
     ED_NAME_HINT,
@@ -149,6 +159,8 @@ const PK_PREVIEW_TITLE: usize = 408;
 const PK_PREVIEW: usize = 409;
 const PK_REFRESH: usize = 412;
 const PK_BROWSE: usize = 413;
+/// Owner-draw column sort buttons (the listview header's replacement).
+const PK_COL_BASE: usize = 414; // +0 name, +1 description, +2 instances
 const PK_EMPTY: usize = 344;
 /// Window-scoped debounce timer id for the search box filter.
 const PK_FILTER_TIMER: usize = 1;
@@ -278,8 +290,9 @@ fn edit_toggle(ed: HWND, id: usize) {
 // process picker remains a modal popup.
 const MGR_PAD: i32 = 18;
 const MGR_TITLE_Y: i32 = 16; // formEdgePadding
-const MGR_TEXT_H: i32 = 18; // formTextHeight
-const MGR_LIST_Y: i32 = MGR_TITLE_Y + MGR_TEXT_H + 12;
+const MGR_TEXT_H: i32 = 18;
+const MGR_TITLE_H: i32 = 24; // page-title row (settings header parity) // formTextHeight
+const MGR_LIST_Y: i32 = MGR_TITLE_Y + MGR_TITLE_H + 12;
 const MGR_LIST_H: i32 = 240;
 const MGR_STATUS_Y: i32 = MGR_LIST_Y + MGR_LIST_H + 8;
 const MGR_BUTTONS_Y: i32 = MGR_STATUS_Y + MGR_TEXT_H + 16;
@@ -290,7 +303,9 @@ const MGR_H: i32 = MGR_BUTTONS_Y + BUTTON_H + 18;
 
 // Editor: editor.go / nativeform metrics.go.
 const ED_W: i32 = ED_PANE_W;
-const ED_PAD: i32 = 18; // FormPadding
+// Card-inner row padding: cards ride at ED_EDGE with the settings
+// CARD_PAD_X rhythm inside (18 -> ED_EDGE + 12).
+const ED_PAD: i32 = ED_EDGE + 12;
 const ED_GAP: i32 = 8; // ControlGap
 const ED_EDGE: i32 = 16; // formEdgePadding
 const ED_LABEL_H: i32 = 18; // formTextHeight
@@ -303,9 +318,6 @@ const ED_CHECK_H: i32 = 28; // checkboxRowHeight
 const ED_SUMMARY_H: i32 = 22; // processSummaryRowH
 const ED_DIALOG_W: i32 = 104; // DialogButtonWidth
 const ED_CHECKBOX_SIZE: i32 = 16; // CheckboxSize
-
-// Edit surfaces use the Go idFieldSurfaceBase offset from the edit id.
-const FIELD_SURFACE_BASE: i32 = 500;
 
 // Picker: processpicker.go / nativeform metrics.go.
 const PK_W: i32 = 700;
@@ -332,25 +344,6 @@ const PK_H: i32 = PK_BUTTONS_Y + BUTTON_H + PK_TOP;
 const PK_BUTTON_W: i32 = 104;
 
 // Raw Win32 tokens that are missing or awkward in the windows crate surface.
-const LVM_FIRST: u32 = 0x1000;
-const LVM_SETBKCOLOR: u32 = LVM_FIRST + 1;
-const LVM_SETIMAGELIST: u32 = LVM_FIRST + 3;
-const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
-const LVM_GETITEMSTATE: u32 = LVM_FIRST + 44;
-const LVM_SETITEMSTATE: u32 = LVM_FIRST + 43;
-const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
-const LVM_SUBITEMHITTEST: u32 = LVM_FIRST + 57;
-const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
-const LVM_SETCOLUMNW: u32 = LVM_FIRST + 96;
-const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
-const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
-const LVM_SETTEXTCOLOR: u32 = LVM_FIRST + 36;
-const LVM_SETTEXTBKCOLOR: u32 = LVM_FIRST + 38;
-const LVM_GETHEADER: u32 = LVM_FIRST + 31;
-const LVSIL_STATE: usize = 2;
-const LVS_EX_CHECKBOXES: u32 = 0x0000_0004;
-const LVS_EX_FULLROWSELECT: u32 = 0x0000_0020;
-const LVS_EX_DOUBLEBUFFER: u32 = 0x0001_0000;
 const LBS_NOSEL: u32 = 0x4000;
 const EN_CHANGE: u16 = 0x0300;
 const EN_SETFOCUS: u16 = 0x0100;
@@ -425,7 +418,13 @@ fn font_cache(weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
 }
 
 fn secondary_style() -> WINDOW_STYLE {
-    WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0)
+    // WS_CLIPCHILDREN: these forms host overlay scrollbar siblings above
+    // their lists - without the clip the form's background erase would blank
+    // the bar between its repaints.
+    WINDOW_STYLE(
+        (WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0)
+            | WS_CLIPCHILDREN.0,
+    )
 }
 
 fn confirm_dialog(parent: HWND, title: &str, body: &str) -> bool {
@@ -704,14 +703,15 @@ pub fn ensure_created() {
             hwnd_
         };
 
+        // Page-title parity with the settings header: 17/600 on a 24px row.
         let _ = mk_static(
             MGR_TITLE,
             &t_pub(caption_key(MANAGER_TEXTS, MGR_TITLE)),
-            section_font,
+            crate::make_font_pub(17, 600),
             MGR_PAD,
             MGR_TITLE_Y,
             content_w,
-            MGR_TEXT_H,
+            MGR_TITLE_H,
         );
 
         // Rounded surface behind the listbox (Go idListSurface), then the
@@ -751,9 +751,10 @@ pub fn ensure_created() {
                 WS_CHILD.0
                     | WS_VISIBLE.0
                     | WS_TABSTOP.0
-                    | WS_VSCROLL.0
                     | WS_CLIPSIBLINGS.0
                     | LBS_NOTIFY as u32
+                    | LBS_OWNERDRAWFIXED as u32
+                    | LBS_HASSTRINGS as u32
                     | windows::Win32::UI::WindowsAndMessaging::LBS_NOINTEGRALHEIGHT as u32,
             ),
             s(MGR_PAD + 2),
@@ -774,6 +775,8 @@ pub fn ensure_created() {
         );
         MGR_LIST_HWND.store(list.0 as isize, Ordering::SeqCst);
         crate::list_style::install(list);
+        // The list's scrollbar is painted into its card face.
+        crate::list_style::set_lane_card(list, get_dlg_item(mgr, MGR_LIST_SURFACE));
 
         // Empty-state overlay centered in the list card.
         let empty_y = MGR_LIST_Y + (MGR_LIST_H - (2 * MGR_TEXT_H + 12)) / 2;
@@ -1253,6 +1256,16 @@ unsafe extern "system" fn mgr_proc(
         lparam,
         move || unsafe {
             match msg {
+                WM_MEASUREITEM => {
+                    // Owner-draw rule rows: settings-row height rhythm.
+                    let measure =
+                        &mut *(lparam.0 as *mut windows::Win32::UI::Controls::MEASUREITEMSTRUCT);
+                    if measure.CtlID == MGR_LIST as u32 {
+                        measure.itemHeight = s(30) as u32;
+                        return LRESULT(1);
+                    }
+                    LRESULT(0)
+                }
                 WM_MGR_TEMPLATE_OPEN => {
                     // Posted by the New flyout commit: opens the editor
                     // outside the popup teardown chain.
@@ -1297,11 +1310,28 @@ unsafe extern "system" fn mgr_proc(
                     LRESULT(0)
                 }
                 windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                    // Painted scrollbar lanes take pointer input on the form:
+                    // report HTCLIENT so mouse messages reach lane_pointer.
+                    if crate::list_style::lane_hit(hwnd, lparam) {
+                        return LRESULT(1); // HTCLIENT
+                    }
                     // Shared blank drag (nativeform::blank_drag_hit): a
                     // HTCLIENT point no interactive child claims drags the
                     // window; never WindowFromPoint from inside a hit-test
                     // (its probe re-enters the caller and recurses).
                     crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN
+                | windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE
+                | windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP
+                | windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE
+                | windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED
+                | windows::Win32::UI::Controls::WM_MOUSELEAVE => {
+                    if crate::list_style::lane_pointer(hwnd, msg, wparam, lparam) {
+                        LRESULT(0)
+                    } else {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
                 }
                 windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
                 WM_CLOSE => {
@@ -1419,7 +1449,9 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
     let p = theme::palette();
     let id = item.control_id as usize;
     if id == MGR_LIST_SURFACE {
-        // Card surface behind the listbox: elevated fill + border.
+        // Card surface behind the listbox: elevated fill + border, plus the
+        // painted scrollbar lane beside the list (no bar window - the lane
+        // shares this card's paint pass with the scroll that drives it).
         crate::paint::draw_surface(
             dc,
             bounds,
@@ -1428,6 +1460,85 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             p.border,
             crate::paint::control_radius(),
         );
+        unsafe {
+            crate::list_style::paint_lane(
+                dc,
+                item.control,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+            );
+        }
+    } else if id == MGR_LIST {
+        // Owner-draw rule rows, family selection grammar: the selected row
+        // carries the nav accent bar and heavier ink (the system highlight
+        // was the last non-family color in the app).
+        let selected = item.state & crate::nativeform::ODS_SELECTED != 0;
+        let focused = item.state & crate::nativeform::ODS_FOCUS != 0;
+        let len = unsafe {
+            SendMessageW(
+                item.control,
+                windows::Win32::UI::WindowsAndMessaging::LB_GETTEXTLEN,
+                Some(WPARAM(item.item_id as usize)),
+                None,
+            )
+        }
+        .0
+        .max(0) as usize;
+        let mut text = String::new();
+        if len > 0 {
+            let mut buffer = vec![0u16; len + 1];
+            let copied = unsafe {
+                SendMessageW(
+                    item.control,
+                    windows::Win32::UI::WindowsAndMessaging::LB_GETTEXT,
+                    Some(WPARAM(item.item_id as usize)),
+                    Some(LPARAM(buffer.as_mut_ptr() as isize)),
+                )
+            }
+            .0
+            .max(0) as usize;
+            text = String::from_utf16_lossy(&buffer[..copied.min(len)]);
+        }
+        // The buffered blit rewrites the whole row rect from an uninitialized
+        // memory bitmap: seed the card face first or unpainted pixels leak as
+        // black bands (same rule as the picker rows).
+        crate::paint::fill_rect(dc, bounds, p.surface);
+        if selected {
+            let bar_w = crate::scale_pub(3);
+            let bar_h = crate::scale_pub(20);
+            let marker = RECT {
+                left: bounds.left,
+                top: bounds.top + (bounds.bottom - bounds.top - bar_h) / 2,
+                right: bounds.left + bar_w,
+                bottom: bounds.top + (bounds.bottom - bounds.top + bar_h) / 2,
+            };
+            match crate::paint::fill_rounded_rect(dc, &marker, bar_w.max(1), p.accent, p.accent) {
+                crate::paint::DrawResult::Completed | crate::paint::DrawResult::MayBeDirty => {}
+                crate::paint::DrawResult::NotStarted => {
+                    crate::paint::fill_rect(dc, &marker, p.accent);
+                }
+            }
+        }
+        let mut row = *bounds;
+        row.left += crate::scale_pub(12);
+        row.right -= crate::scale_pub(8);
+        crate::paint::draw_label(
+            dc,
+            &row,
+            if selected {
+                section_font_cached()
+            } else {
+                form_font_body()
+            },
+            text.as_str(),
+            if selected { p.text } else { p.text2 },
+            true,
+            0,
+            0,
+        );
+        if focused {
+            crate::paint::draw_focus_frame(dc, bounds, p.focus);
+        }
     } else if crate::choice::is_choice(item.control) {
         // The New button hosts the template flyout and renders its closed
         // state like every other dropdown.
@@ -1803,11 +1914,12 @@ fn show_editor() {
         let _ = ShowWindow(ed, SW_SHOW);
         sync_manager_height();
         let _ = UpdateWindow(ed);
-        // Go focuses the name field when the editor opens.
-        let name = get_dlg_item(ed, ED_NAME);
-        if !name.is_invalid() {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(name));
-        }
+        // No default focus into the name field: the empty-field hint only
+        // shows while the edit is unfocused, and opening straight into it
+        // hid the hint until the user clicked elsewhere. The pane itself
+        // takes focus so keyboard state is clean (the list behind it is
+        // hidden at this point).
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(ed));
     }
 }
 
@@ -1863,6 +1975,37 @@ fn create_editor() {
         EDIT_HWND.store(ed.0 as isize, Ordering::SeqCst);
         theme::apply_to_window(ed);
 
+        // Section cards first (settings card grammar): owner-draw statics
+        // pinned beneath every row they host; layout_editor sizes them per
+        // trigger/action mode. Blank-surface hit transparency keeps the
+        // pane's blank drag alive over them.
+        for card_id in [ED_CARD_BASIC, ED_CARD_TRIGGER, ED_CARD_OPTIONS] {
+            let card = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
+                0,
+                0,
+                1,
+                1,
+                Some(ed),
+                Some(HMENU(card_id as *mut _)),
+                Some(instance.into()),
+                None,
+            )
+            .expect("editor section card");
+            let _ = SetWindowPos(
+                card,
+                Some(windows::Win32::Foundation::HWND(1 as *mut _)), // HWND_BOTTOM
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+
         let mk_label = |id: usize, text: &str, font: windows::Win32::Graphics::Gdi::HFONT| {
             let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
             let hwnd_ = CreateWindowExW(
@@ -1889,28 +2032,9 @@ fn create_editor() {
         };
 
         let mk_edit = |id: usize, numeric: bool| {
-            // Surface static behind the edit, matching settings (Go editWithStyle).
-            let surface = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("STATIC"),
-                windows::core::w!(""),
-                WINDOW_STYLE(WS_CHILD.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-                0,
-                0,
-                1,
-                1,
-                Some(ed),
-                Some(HMENU((FIELD_SURFACE_BASE + id as i32) as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("ed field surface");
-            let _ = SendMessageW(
-                surface,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
+            // Settings field-well architecture: a bare inset EDIT; the
+            // ring/margin is painted by the hosting section card (see the
+            // editor card arm), so nothing stacks against the card.
             let extra = if numeric { ES_NUMBER as u32 } else { 0 };
             let hwnd_ = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -1976,6 +2100,11 @@ fn create_editor() {
 
         // Section titles + labels (Go editor.go build order).
         mk_label(ED_MODE_TITLE, &t_pub("automation_new_title"), section_font);
+        mk_label(
+            ED_BASIC_TITLE,
+            &t_pub(caption_key(EDITOR_TEXTS, ED_BASIC_TITLE)),
+            section_font,
+        );
         mk_label(
             ED_TRIGGER_TITLE,
             &t_pub(caption_key(EDITOR_TEXTS, ED_TRIGGER_TITLE)),
@@ -2544,31 +2673,18 @@ pub fn layout_editor() {
             if control.is_invalid() {
                 return;
             }
-            // Field edits sit inset 2px inside their surface (Go place()).
-            if let Some(surface_id) = field_surface_of(id) {
-                let surface = get_dlg_item(ed, surface_id);
-                if !surface.is_invalid() {
-                    let _ = SetWindowPos(
-                        surface,
-                        None,
-                        s(x),
-                        s(y),
-                        s(w),
-                        s(h),
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-                    );
-                    visible.push(surface);
-                    let inner_h = (h - 4).min(20);
-                    let _ = SetWindowPos(
-                        control,
-                        None,
-                        s(x + 2),
-                        s(y + (h - inner_h) / 2),
-                        s(w - 4),
-                        s(inner_h),
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-                    );
-                }
+            // Field edits sit inset inside their card-painted well
+            // (settings parity: x+3, y+7, w-6, h-14).
+            if is_field_edit(id) {
+                let _ = SetWindowPos(
+                    control,
+                    None,
+                    s(x + 3),
+                    s(y + 7),
+                    s(w - 6),
+                    s(h - 14).max(20),
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                );
             } else {
                 let _ = SetWindowPos(
                     control,
@@ -2593,15 +2709,26 @@ pub fn layout_editor() {
 
         // Mode title spans the pane top; the form starts directly with the
         // name row (a second section header right below read as duplication).
+        // Settings card grammar: page title, then title-outside-card
+        // sections whose cards span [ED_EDGE, ED_EDGE + card_w] with rows
+        // at the ED_PAD inner rhythm. Card heights close over whatever
+        // rows the current trigger/action pair produced.
+        let card_w = ED_W - 2 * ED_EDGE;
         let mut y = ED_EDGE;
-        place(ED_MODE_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
-        y += ED_LABEL_H + ED_CONTENT_GAP;
+        place(ED_MODE_TITLE, ED_EDGE, y, card_w, ED_LABEL_H);
+        y += ED_LABEL_H + ED_SECTION_GAP;
+
+        // 基本信息.
+        place(ED_BASIC_TITLE, ED_EDGE, y, card_w, ED_LABEL_H);
+        y += ED_LABEL_H + crate::layout::TITLE_GAP;
+        let basic_top = y;
+        y += crate::layout::CARD_PAD_Y;
         place(ED_NAME_LBL, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_LABEL_GAP;
         place(ED_NAME, ED_PAD, y, content_w, ED_FIELD_H);
         y += ED_FIELD_H + ED_LABEL_GAP;
         place(ED_NAME_HINT, ED_PAD, y, content_w, ED_LABEL_H);
-        y += ED_LABEL_H + ED_SECTION_GAP;
+        y += ED_LABEL_H + ED_CONTENT_GAP;
         label_row2(&mut place, ED_ACTION_LBL, ED_TRIGGER_LBL, y);
         y += ED_LABEL_H + ED_LABEL_GAP;
         place(ED_ACTION, ED_PAD, y, column_w, ED_FIELD_H);
@@ -2612,11 +2739,15 @@ pub fn layout_editor() {
             column_w,
             ED_FIELD_H,
         );
-        y += ED_FIELD_H + ED_SECTION_GAP;
+        y += ED_FIELD_H + crate::layout::CARD_PAD_Y;
+        place(ED_CARD_BASIC, ED_EDGE, basic_top, card_w, y - basic_top);
+        y += crate::layout::CARD_GAP;
 
         // 触发条件.
-        place(ED_TRIGGER_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
-        y += ED_LABEL_H + ED_CONTENT_GAP;
+        place(ED_TRIGGER_TITLE, ED_EDGE, y, card_w, ED_LABEL_H);
+        y += ED_LABEL_H + crate::layout::TITLE_GAP;
+        let trigger_top = y;
+        y += crate::layout::CARD_PAD_Y;
         set_text(get_dlg_item(ed, ED_TIME_LBL), &time_label_text(&trigger));
 
         let row_fields = |place: &mut dyn FnMut(usize, i32, i32, i32, i32),
@@ -2728,11 +2859,21 @@ pub fn layout_editor() {
         } else {
             place(ED_PROC_SUMMARY, ED_PAD, y, content_w, ED_SUMMARY_H);
         }
-        y += ED_SUMMARY_H + ED_CONTENT_GAP;
+        y += ED_SUMMARY_H + crate::layout::CARD_PAD_Y;
+        place(
+            ED_CARD_TRIGGER,
+            ED_EDGE,
+            trigger_top,
+            card_w,
+            y - trigger_top,
+        );
+        y += crate::layout::CARD_GAP;
 
         // 执行选项.
-        place(ED_OPTIONS_TITLE, ED_PAD, y, content_w, ED_LABEL_H);
-        y += ED_LABEL_H + ED_CONTENT_GAP;
+        place(ED_OPTIONS_TITLE, ED_EDGE, y, card_w, ED_LABEL_H);
+        y += ED_LABEL_H + crate::layout::TITLE_GAP;
+        let options_top = y;
+        y += crate::layout::CARD_PAD_Y;
         match action.as_str() {
             "stay_awake" => {
                 // Full row width: the switch row parks its pill at the right
@@ -2788,7 +2929,15 @@ pub fn layout_editor() {
         // Status row + footer follow the flow: the manager window grows to
         // the content height, and anything the work area cannot fit scrolls
         // via fit_content.
-        y += ED_RELATED_GAP;
+        y += crate::layout::CARD_PAD_Y;
+        place(
+            ED_CARD_OPTIONS,
+            ED_EDGE,
+            options_top,
+            card_w,
+            y - options_top,
+        );
+        y += ED_SECTION_GAP;
         place(ED_VALIDATION, ED_PAD, y, content_w, ED_LABEL_H);
         y += ED_LABEL_H + ED_SECTION_GAP;
         place(
@@ -2811,10 +2960,6 @@ pub fn layout_editor() {
         for id in ED_LAYOUT_IDS {
             let control = get_dlg_item(ed, id);
             crate::nativeform::set_visible_deferred(control, visible.contains(&control));
-            if let Some(surface_id) = field_surface_of(id) {
-                let surface = get_dlg_item(ed, surface_id);
-                crate::nativeform::set_visible_deferred(surface, visible.contains(&surface));
-            }
         }
         // Grow the window first, then record the content extent against the
         // final client size: recording against the old (short) pane would
@@ -2913,9 +3058,10 @@ fn set_weekdays(ed: HWND, keys: &[&str]) {
     }
 }
 
-/// Maps an edit id to its field-surface id (Go idFieldSurfaceBase scheme).
-fn field_surface_of(edit_id: usize) -> Option<usize> {
-    if matches!(
+/// Whether an id is one of the editor's numeric/text EDIT fields (they get
+/// the card-painted well treatment; settings field grammar).
+fn is_field_edit(edit_id: usize) -> bool {
+    matches!(
         edit_id,
         ED_NAME
             | ED_TIME
@@ -2925,10 +3071,21 @@ fn field_surface_of(edit_id: usize) -> Option<usize> {
             | ED_IDLE_MIN
             | ED_MAX_WAIT
             | ED_BATTERY
-    ) {
-        Some((FIELD_SURFACE_BASE + edit_id as i32) as usize)
-    } else {
-        None
+    )
+}
+
+/// Scoped invalidation of one field's card-painted well (settings parity):
+/// full-card repaints erase sibling pixels, so only the well rect goes.
+fn invalidate_editor_well(ed: HWND, edit_id: usize) {
+    let edit = get_dlg_item(ed, edit_id);
+    if edit.is_invalid() {
+        return;
+    }
+    for card_id in [ED_CARD_BASIC, ED_CARD_TRIGGER, ED_CARD_OPTIONS] {
+        let card = get_dlg_item(ed, card_id);
+        if !card.is_invalid() && crate::nativeform::invalidate_field_well(card, edit) {
+            return;
+        }
     }
 }
 
@@ -3038,20 +3195,11 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             clear_editor_error(hwnd);
                         }
 
-                        // Field focus repaints the surface border (Go surfaces).
+                        // Field focus repaints the card-painted well border.
                         code if (hi == EN_SETFOCUS || hi == EN_KILLFOCUS)
-                            && field_surface_of(code).is_some() =>
+                            && is_field_edit(code) =>
                         {
-                            if let Some(surface) = field_surface_of(code) {
-                                let control = get_dlg_item(hwnd, surface);
-                                if !control.is_invalid() {
-                                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
-                                        Some(control),
-                                        None,
-                                        true,
-                                    );
-                                }
-                            }
+                            invalidate_editor_well(hwnd, code);
                         }
 
                         // Choice selections drive the dynamic Go layout; the
@@ -3119,9 +3267,26 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     };
                     let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
                     let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(color));
-                    let _ =
-                        windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(theme::bg_color()));
-                    LRESULT(theme::bg_brush().0 as isize)
+                    // Card grammar: labels riding a section card erase with
+                    // the card face; the page/section titles and the
+                    // validation row sit on the pane background.
+                    let on_card = !matches!(
+                        id,
+                        ED_MODE_TITLE
+                            | ED_BASIC_TITLE
+                            | ED_TRIGGER_TITLE
+                            | ED_OPTIONS_TITLE
+                            | ED_VALIDATION
+                    );
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let p = theme::palette();
+                    let (fill, brush) = if on_card {
+                        (p.surface, if theme::is_dark() { dark.0 } else { light.0 })
+                    } else {
+                        (theme::bg_color(), theme::bg_brush())
+                    };
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(fill));
+                    LRESULT(brush.0 as isize)
                 }
                 WM_CTLCOLOREDIT => {
                     // Edit interior: PrimaryText on Surface (Go surfaces).
@@ -3193,6 +3358,42 @@ fn sanitize_numeric_edit(ed: HWND, id: usize) {
 /// Shared WM_DRAWITEM painter for the editor and picker forms.
 fn draw_form_item(item: &crate::nativeform::DrawItem) {
     unsafe {
+        // Section-card repaints end in ONE SRCCOPY of the whole card rect
+        // with no sibling clipping (the settings blanked-field lesson):
+        // cut every visible child that overlaps the card out of the TARGET
+        // dc first, so the blit can only ever paint the card's own blank
+        // face - labels, field surfaces and edits keep their pixels.
+        if ((ED_CARD_BASIC as i32..=ED_CARD_OPTIONS as i32).contains(&item.control_id)
+            || item.control_id == PK_SEARCH_SURFACE as i32)
+            && let Ok(parent) = GetParent(item.control)
+        {
+            let mut card_rect = RECT::default();
+            if GetWindowRect(item.control, &mut card_rect).is_ok() {
+                let mut child = GetWindow(parent, GW_CHILD).unwrap_or_default();
+                let mut guard = 0;
+                while !child.is_invalid() && guard < 128 {
+                    let mut rect = RECT::default();
+                    if child != item.control
+                        && IsWindowVisible(child).as_bool()
+                        && GetWindowRect(child, &mut rect).is_ok()
+                        && rect.left < card_rect.right
+                        && rect.right > card_rect.left
+                        && rect.top < card_rect.bottom
+                        && rect.bottom > card_rect.top
+                    {
+                        let _ = windows::Win32::Graphics::Gdi::ExcludeClipRect(
+                            item.dc,
+                            rect.left - card_rect.left,
+                            rect.top - card_rect.top,
+                            rect.right - card_rect.left,
+                            rect.bottom - card_rect.top,
+                        );
+                    }
+                    child = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
+                    guard += 1;
+                }
+            }
+        }
         if crate::nativeform::draw_buffered(item.dc, &item.bounds, |dc, bounds| {
             draw_form_item_impl(item, dc, bounds);
         }) {
@@ -3207,12 +3408,11 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
     let scale = crate::scale_pub(96);
     let font = form_font_body();
     unsafe {
-        // Picker card surfaces (Go DrawSurface): elevated fill + border,
-        // no label — never the button path.
-        if matches!(
-            item.control_id as usize,
-            PK_SEARCH_SURFACE | PK_LIST_SURFACE | PK_PREVIEW_SURFACE
-        ) {
+        // Editor section cards: the settings card face (surface + family
+        // hairline) plus the settings field wells - every visible EDIT
+        // hosted on the card gets its ring painted as card pixels; the
+        // clip guard in draw_form_item keeps this paint out of the edits.
+        if (ED_CARD_BASIC as i32..=ED_CARD_OPTIONS as i32).contains(&item.control_id) {
             crate::paint::draw_surface(
                 dc,
                 bounds,
@@ -3221,38 +3421,84 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 p.border,
                 crate::paint::control_radius(),
             );
-            return;
-        }
-
-        // Choice buttons render their closed state via the choice module.
-        if crate::choice::is_choice(item.control) {
-            let state = crate::nativeform::control_state(item.control, item.state);
-            crate::choice::draw_button(item.control, dc, bounds, state, p.window_bg);
-            return;
-        }
-
-        if item.control_id >= FIELD_SURFACE_BASE {
-            // Edit field surface: focus/disabled border via draw_field.
-            let parent = GetParent(item.control).unwrap_or_default();
-            let edit = get_dlg_item(parent, (item.control_id - FIELD_SURFACE_BASE) as usize);
-            let mut buffer = [0u16; 8];
-            let len = GetClassNameW(edit, &mut buffer);
-            let edit_class =
-                String::from_utf16_lossy(&buffer[..len.max(0) as usize]).to_uppercase();
-            if edit_class != "EDIT" {
-                crate::paint::draw_surface(
-                    dc,
-                    bounds,
-                    p.window_bg,
-                    p.surface,
-                    p.border,
-                    crate::paint::control_radius(),
-                );
+            let Ok(parent) = GetParent(item.control) else {
+                return;
+            };
+            let mut card_rect = RECT::default();
+            if GetWindowRect(item.control, &mut card_rect).is_err() {
                 return;
             }
-            let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.focused = GetFocus() == edit;
-            state.disabled = !IsWindowEnabled(edit).as_bool();
+            let mut child = GetWindow(parent, GW_CHILD).unwrap_or_default();
+            let mut guard = 0;
+            while !child.is_invalid() && guard < 128 {
+                let mut edit_rect = RECT::default();
+                if IsWindowVisible(child).as_bool()
+                    && GetWindowRect(child, &mut edit_rect).is_ok()
+                    && edit_rect.left >= card_rect.left
+                    && edit_rect.right <= card_rect.right
+                    && edit_rect.top >= card_rect.top
+                    && edit_rect.bottom <= card_rect.bottom
+                {
+                    let mut class = [0u16; 8];
+                    let len = GetClassNameW(child, &mut class);
+                    if String::from_utf16_lossy(&class[..len.max(0) as usize])
+                        .eq_ignore_ascii_case("EDIT")
+                    {
+                        let local = RECT {
+                            left: 0,
+                            top: 0,
+                            right: bounds.right - bounds.left,
+                            bottom: bounds.bottom - bounds.top,
+                        };
+                        let control = RECT {
+                            left: edit_rect.left - card_rect.left,
+                            top: edit_rect.top - card_rect.top,
+                            right: edit_rect.right - card_rect.left,
+                            bottom: edit_rect.bottom - card_rect.top,
+                        };
+                        let well = crate::nativeform::field_well_rect(&local, &control);
+                        let hole = control;
+                        if well.right > well.left && well.bottom > well.top {
+                            let state = crate::paint::ControlState {
+                                focused: GetFocus() == child,
+                                disabled: !IsWindowEnabled(child).as_bool(),
+                                ..Default::default()
+                            };
+                            crate::paint::draw_field(
+                                dc,
+                                &well,
+                                p,
+                                p.surface,
+                                p.surface,
+                                state,
+                                crate::paint::control_radius(),
+                                Some(&hole),
+                            );
+                        }
+                    }
+                }
+                child = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
+                guard += 1;
+            }
+            return;
+        }
+
+        // The search field is one plain settings-style field well: a
+        // single draw_field pass over the window background - the SAME
+        // function, radius and stroke every other input in the app uses.
+        // (A card face underneath would double the border and show the two
+        // rounded edges cutting into each other as white fringing.)
+        if item.control_id as usize == PK_SEARCH_SURFACE {
+            let edit = GetParent(item.control)
+                .ok()
+                .map(|parent| get_dlg_item(parent, PK_SEARCH))
+                .filter(|edit| !edit.is_invalid())
+                .unwrap_or_default();
+            let state = crate::paint::ControlState {
+                focused: GetFocus() == edit,
+                disabled: !IsWindowEnabled(edit).as_bool(),
+                ..Default::default()
+            };
             crate::paint::draw_field(
                 dc,
                 bounds,
@@ -3263,6 +3509,170 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 crate::paint::control_radius(),
                 None,
             );
+            return;
+        }
+
+        // Picker card surfaces (Go DrawSurface): elevated fill + border,
+        // no label — never the button path.
+        if matches!(
+            item.control_id as usize,
+            PK_LIST_SURFACE | PK_PREVIEW_SURFACE
+        ) {
+            crate::paint::draw_surface(
+                dc,
+                bounds,
+                p.window_bg,
+                p.surface,
+                p.border,
+                crate::paint::control_radius(),
+            );
+            // The painted scrollbar lanes ride the list and preview card
+            // faces (no bar window - the lane shares this card's paint pass
+            // with the scroll that drives it).
+            crate::list_style::paint_lane(
+                dc,
+                item.control,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+            );
+            return;
+        }
+
+        if item.control_id == PK_LIST as i32 {
+            // Picker process rows (manager listbox grammar): family checkbox,
+            // three text columns, accent-bar selection cursor. Checked state
+            // lives in PK_SELECTED; the row is painted, not state-imaged.
+            let selected = item.state & crate::nativeform::ODS_SELECTED != 0;
+            let visible = crate::runtime::lock(&PK_VISIBLE);
+            let mut name = String::new();
+            let mut description = String::new();
+            let mut count = String::new();
+            let mut checked = false;
+            if let Some(row) = visible.get(item.item_id as usize) {
+                name = row.name.clone();
+                description = row.description.clone();
+                count = row.count.to_string();
+                let selected_now = crate::runtime::lock(&PK_SELECTED);
+                checked = selected_now.iter().any(|t| t.key() == row.target.key());
+            }
+            drop(visible);
+            // Seed the row with the card face: draw_buffered blits an
+            // uninitialized memory bitmap over the whole row, so any pixel
+            // not painted here would come back black.
+            crate::paint::fill_rect(dc, bounds, p.surface);
+            // Quiet column rules at the column gaps: without them the three
+            // text columns read as one run-on line (the old listview header
+            // drew dividers; rows need the same hint).
+            for gap in [crate::scale_pub(256), crate::scale_pub(564)] {
+                let rule = RECT {
+                    left: bounds.left + gap,
+                    top: bounds.top,
+                    right: bounds.left + gap + crate::scale_pub(1),
+                    bottom: bounds.bottom,
+                };
+                crate::paint::fill_rect(dc, &rule, p.subtle_border);
+            }
+            let box_size = crate::scale_pub(ED_CHECKBOX_SIZE);
+            let box_y = bounds.top + (bounds.bottom - bounds.top - box_size) / 2;
+            let box_rect = RECT {
+                left: bounds.left + crate::scale_pub(14),
+                top: box_y,
+                right: bounds.left + crate::scale_pub(14) + box_size,
+                bottom: box_y + box_size,
+            };
+            let (fill, border) = if checked {
+                (p.accent, p.accent)
+            } else {
+                (p.surface, p.border)
+            };
+            let scale96 = crate::scale_pub(96);
+            let radius = crate::paint::sp(2, scale96);
+            match crate::paint::fill_rounded_rect(dc, &box_rect, radius, fill, border) {
+                crate::paint::DrawResult::Completed | crate::paint::DrawResult::MayBeDirty => {}
+                crate::paint::DrawResult::NotStarted => {
+                    crate::paint::fill_rect(dc, &box_rect, fill);
+                }
+            }
+            if checked {
+                crate::paint::draw_check(
+                    dc,
+                    box_rect.left,
+                    box_rect.top,
+                    box_rect.right,
+                    box_rect.bottom,
+                    p.accent_text,
+                    radius.max(1),
+                );
+            }
+            if selected {
+                let bar_w = crate::scale_pub(3);
+                let bar_h = crate::scale_pub(20);
+                let marker = RECT {
+                    left: bounds.left,
+                    top: bounds.top + (bounds.bottom - bounds.top - bar_h) / 2,
+                    right: bounds.left + bar_w,
+                    bottom: bounds.top + (bounds.bottom - bounds.top + bar_h) / 2,
+                };
+                match crate::paint::fill_rounded_rect(dc, &marker, bar_w.max(1), p.accent, p.accent)
+                {
+                    crate::paint::DrawResult::Completed
+                    | crate::paint::DrawResult::NotStarted
+                    | crate::paint::DrawResult::MayBeDirty => {}
+                }
+            }
+            let columns = [
+                (
+                    crate::scale_pub(40),
+                    crate::scale_pub(212),
+                    name.as_str(),
+                    true,
+                ),
+                (
+                    crate::scale_pub(260),
+                    crate::scale_pub(300),
+                    description.as_str(),
+                    false,
+                ),
+                (
+                    crate::scale_pub(568),
+                    crate::scale_pub(72),
+                    count.as_str(),
+                    false,
+                ),
+            ];
+            for (x, width, text, primary) in columns {
+                let cell = RECT {
+                    left: bounds.left + x,
+                    top: bounds.top,
+                    right: bounds.left + x + width,
+                    bottom: bounds.bottom,
+                };
+                crate::paint::draw_label(
+                    dc,
+                    &cell,
+                    if primary && selected {
+                        section_font_cached()
+                    } else {
+                        form_font_body()
+                    },
+                    text,
+                    if primary { p.text } else { p.muted },
+                    true,
+                    0,
+                    0,
+                );
+            }
+            // No row-wide focus frame here: it crossed the accent bar at the
+            // left edge and ran under the overlay scrollbar at the right; the
+            // accent bar already tracks the cursor row (mouse and keyboard).
+            return;
+        }
+        // Choice buttons render their closed state via the choice module;
+        // every editor choice rides a section card, so their faces erase
+        // with the card color.
+        if crate::choice::is_choice(item.control) {
+            let state = crate::nativeform::control_state(item.control, item.state);
+            crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
             return;
         }
 
@@ -3284,15 +3694,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
             state.active = edit_is_checked(ED_KEEP_SCREEN);
             let progress = crate::switch_animation_progress(item.control);
             crate::paint::draw_switch_row(
-                dc,
-                bounds,
-                font,
-                &label,
-                p,
-                p.window_bg,
-                state,
-                scale,
-                progress,
+                dc, bounds, font, &label, p, p.surface, state, scale, progress,
             );
         } else if item.control_id == ED_PROC_INFO as i32 {
             // Round info glyph (Go draws it as a circle button).
@@ -3303,22 +3705,27 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 font,
                 "i",
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 (bounds.bottom - bounds.top) / 2,
             );
         } else if weekday_ids.contains(&item.control_id) {
+            // Day chips: quiet when off, accent-filled when on - chip
+            // grammar rather than button chrome, pairing with the quick
+            // pair below. Both ride the trigger card face.
             let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.active = edit_is_checked(item.control_id as usize);
-            crate::paint::draw_button(
+            let selected = edit_is_checked(item.control_id as usize);
+            state.active = selected;
+            crate::paint::draw_chip(
                 dc,
                 bounds,
                 font,
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 crate::paint::control_radius(),
+                selected,
             );
         } else if matches!(
             item.control_id as usize,
@@ -3326,7 +3733,7 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
         ) {
             // The weekday quick pair uses the panel's instant-action chip
             // grammar (same as the timed keep-awake presets): a quiet verb
-            // chip, not a button.
+            // chip, not a button. Rides the trigger card face.
             let state = crate::nativeform::control_state(item.control, item.state);
             crate::paint::draw_chip(
                 dc,
@@ -3334,25 +3741,63 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 font,
                 &label,
                 p,
-                p.window_bg,
+                p.surface,
                 state,
                 crate::paint::control_radius(),
                 false,
             );
+        } else if (PK_COL_BASE as i32..=(PK_COL_BASE + 2) as i32).contains(&item.control_id) {
+            // Sort strip: quiet ink captions on the list card (nav-item
+            // grammar - text color alone carries hover), the active column
+            // heavier with its arrow.
+            let state = crate::nativeform::control_state(item.control, item.state);
+            let (column, _) = *crate::runtime::lock(&PK_SORT);
+            let active = column == item.control_id - PK_COL_BASE as i32;
+            let ink = if state.pressed {
+                p.link_pressed
+            } else if state.hovered || active {
+                p.link
+            } else {
+                p.text2
+            };
+            crate::paint::fill_rect(dc, bounds, p.surface);
+            let mut text_bounds = *bounds;
+            text_bounds.left += crate::scale_pub(2);
+            crate::paint::draw_label(
+                dc,
+                &text_bounds,
+                if active {
+                    section_font_cached()
+                } else {
+                    form_font_body()
+                },
+                &label,
+                ink,
+                true,
+                0,
+                0,
+            );
         } else {
             let mut state = crate::nativeform::control_state(item.control, item.state);
             // Footer parity with the settings form: Save (and the picker's
-            // Confirm) carry the accent fill of a default action.
+            // Confirm) carry the accent fill of a default action. The
+            // editor's process picker rides the trigger card, the footer
+            // buttons ride the pane background.
             if matches!(item.control_id as usize, ED_SAVE | PK_CONFIRM) {
                 state.active = true;
             }
+            let background = if item.control_id as usize == ED_CHOOSE {
+                p.surface
+            } else {
+                p.window_bg
+            };
             crate::paint::draw_button(
                 dc,
                 bounds,
                 font,
                 &label,
                 p,
-                p.window_bg,
+                background,
                 state,
                 crate::paint::control_radius(),
             );
@@ -3393,7 +3838,7 @@ unsafe fn lower_surfaces(parent: HWND) {
         ];
         for id in ids
             .into_iter()
-            .chain(ED_LAYOUT_IDS.into_iter().filter_map(field_surface_of))
+            .chain([ED_CARD_BASIC, ED_CARD_TRIGGER, ED_CARD_OPTIONS])
         {
             let surface = get_dlg_item(parent, id);
             if !surface.is_invalid() {
@@ -3448,13 +3893,23 @@ fn show_picker(owner: HWND) {
 
         picker_load();
         apply_filter();
+        picker_load();
+        apply_filter();
 
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(owner, false);
+        // Modal target is the manager ROOT: disabling only the embedded
+        // pane left the manager's caption draggable/clickable underneath.
+        // The picker is an owned popup, so the standard owner-disable modal
+        // pattern applies.
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+            GetAncestor(owner, GA_ROOT),
+            false,
+        );
         // The snapshot, rows, preview and status commit as one visible
         // frame (Go picker firstFrame.Reveal).
         if crate::viewport::metrics(pk).is_none() {
             crate::viewport::fit(pk);
         }
+        crate::FirstFrameGate::begin(pk).reveal();
         crate::FirstFrameGate::begin(pk).reveal();
         // The uncloak can leave freshly-filled native controls with a
         // validated region; force their first on-screen paint explicitly.
@@ -3462,10 +3917,10 @@ fn show_picker(owner: HWND) {
         present_control(HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _));
         present_control(get_dlg_item(pk, PK_PREVIEW));
         let _ = SetForegroundWindow(pk);
-        let search = get_dlg_item(pk, PK_SEARCH);
-        if !search.is_invalid() {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(search));
-        }
+        // No default focus into the search edit - same reasoning as the
+        // editor's name field: the hint must be visible on arrival. The
+        // form itself takes focus.
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(pk));
     }
 }
 
@@ -3476,7 +3931,10 @@ fn hide_picker() {
         let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
         let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
         let _ = ShowWindow(pk, SW_HIDE);
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(ed, true);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+            GetAncestor(ed, GA_ROOT),
+            true,
+        );
         // The editor is an embedded pane: foreground belongs to its root.
         let _ = SetForegroundWindow(GetAncestor(ed, GA_ROOT));
         // Go returns focus to the editor's Choose button.
@@ -3614,9 +4072,11 @@ fn create_picker(owner: HWND) {
                     | WS_CLIPSIBLINGS.0
                     | ES_AUTOHSCROLL as u32,
             ),
-            s(PK_PAD + 2),
+            // The settings field grammar (place()): the 3px inset puts the
+            // well ring exactly on the card edge, like every other input.
+            s(PK_PAD + 3),
             s(PK_SEARCH_Y + 7),
-            s(370 - 4),
+            s(370 - 6),
             s(20),
             Some(pk),
             Some(HMENU(PK_SEARCH as *mut _)),
@@ -3629,6 +4089,17 @@ fn create_picker(owner: HWND) {
             WM_SETFONT,
             Some(WPARAM(font.0 as usize)),
             Some(LPARAM(1)),
+        );
+        // Same inner margins as every mk_edit field (Go editWithStyle).
+        // AFTER the font assignment, in mk_edit's order: a font change
+        // resets an edit's margins to the font-derived defaults, which
+        // silently wiped a before-font setting here.
+        let margin = s(6) as usize;
+        let _ = SendMessageW(
+            search,
+            EM_SETMARGINS_RAW,
+            Some(WPARAM(3)),
+            Some(LPARAM((margin | (margin << 16)) as isize)),
         );
         // Cue banner hint (Go NewCueBanner).
         crate::nativeform::cue_banner(search, "process_picker_search_hint");
@@ -3705,24 +4176,57 @@ fn create_picker(owner: HWND) {
             Some(LPARAM(1)),
         );
 
+        // Column sort strip (the old listview header's job), quiet text
+        // buttons in the family grammar riding the list card face.
+        let col_widths = [250, 310, 82];
+        let mut col_x = PK_PAD + 2;
+        for (index, width) in col_widths.iter().enumerate() {
+            let btn = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("BUTTON"),
+                windows::core::w!(""),
+                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0B), // BS_OWNERDRAW
+                s(col_x),
+                s(PK_LIST_Y + 2),
+                s(*width),
+                s(24),
+                Some(pk),
+                Some(HMENU((PK_COL_BASE + index) as *mut _)),
+                Some(instance.into()),
+                None,
+            )
+            .expect("picker column button");
+            let _ = SendMessageW(
+                btn,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(1)),
+            );
+            crate::nativeform::track(btn);
+            col_x += width + 8;
+        }
+
+        // The process list itself: the manager's owner-draw LISTBOX
+        // (family rows, family scrollbar) - SysListView32's self-managed
+        // scrollbar and themed chrome were an endless mismatch source.
         let list = CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            windows::core::w!("SysListView32"),
+            windows::core::w!("LISTBOX"),
             windows::core::w!(""),
             WINDOW_STYLE(
                 WS_CHILD.0
                     | WS_VISIBLE.0
                     | WS_TABSTOP.0
-                    | WS_CLIPCHILDREN.0
                     | WS_CLIPSIBLINGS.0
-                    | 0x0001 // LVS_REPORT
-                    | 0x0004 // LVS_SINGLESEL
-                    | 0x0008, // LVS_SHOWSELALWAYS
+                    | LBS_NOTIFY as u32
+                    | LBS_OWNERDRAWFIXED as u32
+                    | LBS_HASSTRINGS as u32
+                    | windows::Win32::UI::WindowsAndMessaging::LBS_NOINTEGRALHEIGHT as u32,
             ),
             s(PK_PAD + 2),
-            s(PK_LIST_Y + 2),
+            s(PK_LIST_Y + 30),
             s(content_w - 4),
-            s(PK_LIST_H - 4),
+            s(PK_LIST_H - 32),
             Some(pk),
             Some(HMENU(PK_LIST as *mut _)),
             Some(instance.into()),
@@ -3736,20 +4240,22 @@ fn create_picker(owner: HWND) {
             Some(LPARAM(1)),
         );
         PK_LIST_HWND.store(list.0 as isize, Ordering::SeqCst);
-
-        let _ = SendMessageW(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            Some(WPARAM(0)),
-            Some(LPARAM(
-                (LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
-            )),
-        );
-        picker_create_columns(list);
+        {
+            let proc: unsafe extern "system" fn(
+                HWND,
+                u32,
+                WPARAM,
+                LPARAM,
+                usize,
+                usize,
+            ) -> LRESULT = picker_list_proc;
+            windows::Win32::UI::Shell::SetWindowSubclass(list, Some(proc), 0x5150, 0)
+                .expect("picker list subclass");
+        }
         dpi_changed(pk);
-        apply_list_theme(list);
-        apply_state_images(list);
         crate::list_style::install(list);
+        // The list's scrollbar is painted into its card face.
+        crate::list_style::set_lane_card(list, get_dlg_item(pk, PK_LIST_SURFACE));
 
         // Loading overlay inside the list card (Go idEmpty, hidden until the
         // list turns empty).
@@ -3812,7 +4318,6 @@ fn create_picker(owner: HWND) {
             WINDOW_STYLE(
                 WS_CHILD.0
                     | WS_VISIBLE.0
-                    | WS_VSCROLL.0
                     | WS_CLIPSIBLINGS.0
                     | LBS_NOSEL
                     | LBS_NOINTEGRALHEIGHT as u32,
@@ -3827,13 +4332,16 @@ fn create_picker(owner: HWND) {
             None,
         )
         .expect("picker preview");
-        crate::list_style::install(preview);
         let _ = SendMessageW(
             preview,
             WM_SETFONT,
             Some(WPARAM(font.0 as usize)),
             Some(LPARAM(1)),
         );
+        // Install after the font: the family bar's visibility math reads the
+        // item height, which the final font sets.
+        crate::list_style::install(preview);
+        crate::list_style::set_lane_card(preview, get_dlg_item(pk, PK_PREVIEW_SURFACE));
 
         mk_static(
             PK_PRIVACY,
@@ -3894,157 +4402,7 @@ unsafe fn register_picker_class(instance: windows::Win32::Foundation::HMODULE) {
     }
 }
 
-unsafe fn picker_create_columns(list: HWND) {
-    unsafe {
-        let widths = [250, 310, 82];
-        let keys = [
-            "process_picker_column_process",
-            "process_picker_column_description",
-            "process_picker_column_instances",
-        ];
-        use windows::Win32::UI::Controls::{
-            LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCOLUMNW,
-        };
-        for (index, key) in keys.iter().enumerate() {
-            let mut text = wide(&t_pub(key));
-            let mut column = LVCOLUMNW {
-                mask: LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM,
-                fmt: LVCFMT_LEFT,
-                cx: s(widths[index]),
-                pszText: windows::core::PWSTR(text.as_mut_ptr()),
-                cchTextMax: 0,
-                iSubItem: index as i32,
-                iImage: 0,
-                iOrder: index as i32,
-                cxMin: 0,
-                ..Default::default()
-            };
-            let _ = SendMessageW(
-                list,
-                LVM_INSERTCOLUMNW,
-                Some(WPARAM(index)),
-                Some(LPARAM(&mut column as *mut _ as isize)),
-            );
-        }
-    }
-}
-
-unsafe fn apply_list_theme(list: HWND) {
-    unsafe {
-        // Use the same native style on first creation and subsequent flips.
-        theme::apply_control_theme(list);
-        let p = theme::palette();
-        let _ = SendMessageW(
-            list,
-            LVM_SETBKCOLOR,
-            Some(WPARAM(0)),
-            Some(LPARAM(p.surface as isize)),
-        );
-        let _ = SendMessageW(
-            list,
-            LVM_SETTEXTCOLOR,
-            Some(WPARAM(0)),
-            Some(LPARAM(p.text as isize)),
-        );
-        let _ = SendMessageW(
-            list,
-            LVM_SETTEXTBKCOLOR,
-            Some(WPARAM(0)),
-            Some(LPARAM(p.surface as isize)),
-        );
-        // Header colors are custom-drawn by list_style; native theming still
-        // supplies interaction state. DWM title-bar attributes do not color it.
-        let header = SendMessageW(list, LVM_GETHEADER, Some(WPARAM(0)), Some(LPARAM(0))).0;
-        if header != 0 {
-            theme::apply_control_theme(HWND(header as *mut _));
-        }
-    }
-}
-
 /// Custom checkbox state images (Go applyStateImages): the same glyph style
-/// as form checkboxes, drawn into an image list.
-unsafe fn apply_state_images(list: HWND) {
-    unsafe {
-        use windows::Win32::UI::Controls::{ImageList_Add, ImageList_Create};
-        let p = theme::palette();
-        let size = s(22).max(22);
-        let images = ImageList_Create(
-            size,
-            size,
-            windows::Win32::UI::Controls::IMAGELIST_CREATION_FLAGS(0x0000_0020), // ILC_COLOR32
-            2,
-            0,
-        );
-        if images.is_invalid() {
-            return;
-        }
-        for checked in [false, true] {
-            let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(list));
-            let memory = windows::Win32::Graphics::Gdi::CreateCompatibleDC(Some(hdc));
-            let bitmap = windows::Win32::Graphics::Gdi::CreateCompatibleBitmap(hdc, size, size);
-            let old = windows::Win32::Graphics::Gdi::SelectObject(
-                memory,
-                windows::Win32::Graphics::Gdi::HGDIOBJ(bitmap.0),
-            );
-            let cell = RECT {
-                left: 0,
-                top: 0,
-                right: size,
-                bottom: size,
-            };
-            crate::paint::fill_rect(memory, &cell, p.surface);
-            let box_size = s(ED_CHECKBOX_SIZE);
-            let box_rect = RECT {
-                left: (size - box_size) / 2,
-                top: (size - box_size) / 2,
-                right: (size + box_size) / 2,
-                bottom: (size + box_size) / 2,
-            };
-            let (fill, border) = if checked {
-                (p.accent, p.accent)
-            } else {
-                (p.surface, p.border)
-            };
-            let _ = crate::paint::fill_rounded_rect(
-                memory,
-                &box_rect,
-                crate::paint::sp(2, crate::scale_pub(96)),
-                fill,
-                border,
-            );
-            if checked {
-                let _ = crate::paint::draw_check(
-                    memory,
-                    box_rect.left,
-                    box_rect.top,
-                    box_rect.right,
-                    box_rect.bottom,
-                    p.accent_text,
-                    crate::paint::sp(2, crate::scale_pub(96)).max(1),
-                );
-            }
-            windows::Win32::Graphics::Gdi::SelectObject(memory, old);
-            ImageList_Add(images, bitmap, None);
-            let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                windows::Win32::Graphics::Gdi::HGDIOBJ(bitmap.0),
-            );
-            let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
-            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(list), hdc);
-        }
-        let old = SendMessageW(
-            list,
-            LVM_SETIMAGELIST,
-            Some(WPARAM(LVSIL_STATE)),
-            Some(LPARAM(images.0 as isize)),
-        );
-        if old.0 != 0 {
-            let _ = windows::Win32::UI::Controls::ImageList_Destroy(Some(
-                windows::Win32::UI::Controls::HIMAGELIST(old.0),
-            ));
-        }
-    }
-}
-
 // Each refresh owns its result. Workers never mutate the visible model.
 static PK_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 type PickerResult = (usize, bool, Result<Vec<PickItem>, String>);
@@ -4106,14 +4464,18 @@ fn picker_load() {
                         .names()
                         .iter()
                         .filter(|name| {
-                            snapshot
-                                .pid_names()
-                                .iter()
-                                .any(|(n, pid)| n == *name && *pid != std::process::id())
+                            // Bracketed entries are kernel pseudo-processes
+                            // ([System Process] and friends): Task Manager
+                            // hides them, and no rule usefully targets them.
+                            !name.starts_with('[')
+                                && snapshot
+                                    .pid_names()
+                                    .iter()
+                                    .any(|(n, pid)| n == *name && *pid != std::process::id())
                         })
                         .map(|name| auto::ProcessTarget {
                             kind: "name".into(),
-                            executable: name.clone(),
+                            executable: snapshot.display_of(name).to_string(),
                             path: String::new(),
                         })
                         .collect();
@@ -4234,7 +4596,9 @@ fn file_description(path: &str) -> Option<String> {
         {
             return None;
         }
-        // Read the translation table, then the first language's description.
+        // Read the translation table, then each language's description in
+        // turn: some binaries only carry FileDescription under a secondary
+        // translation, and Task Manager walks them all before giving up.
         let mut block: *mut core::ffi::c_void = std::ptr::null_mut();
         let mut len: u32 = 0;
         let query = windows::core::w!("\\VarFileInfo\\Translation");
@@ -4253,41 +4617,52 @@ fn file_description(path: &str) -> Option<String> {
         let end = start + data.len();
         if block.is_null()
             || (block as usize) < start
-            || (block as usize).checked_add(4).is_none_or(|p| p > end)
-        {
-            return None;
-        }
-        let lang = (block as *const u16).read_unaligned();
-        let code_page = (block as *const u16).add(1).read_unaligned();
-        let sub = format!(
-            "\\StringFileInfo\\{:04x}{:04x}\\FileDescription",
-            lang, code_page
-        );
-        let sub_wide = wide(&sub);
-        let mut text: *mut core::ffi::c_void = std::ptr::null_mut();
-        if !windows::Win32::Storage::FileSystem::VerQueryValueW(
-            data.as_ptr().cast(),
-            PCWSTR(sub_wide.as_ptr()),
-            &mut text,
-            &mut len,
-        )
-        .as_bool()
-            || text.is_null()
-        {
-            return None;
-        }
-        if (text as usize) < start
-            || (text as usize)
-                .checked_add(len as usize * 2)
+            || (block as usize)
+                .checked_add(len as usize)
                 .is_none_or(|p| p > end)
         {
             return None;
         }
-        let chars: Vec<u16> = (0..len as usize)
-            .map(|i| (text as *const u16).add(i).read_unaligned())
-            .collect();
-        let end = chars.iter().position(|c| *c == 0).unwrap_or(chars.len());
-        Some(String::from_utf16_lossy(&chars[..end]))
+        for index in 0..(len / 4) as usize {
+            let lang = (block as *const u16).add(index * 2).read_unaligned();
+            let code_page = (block as *const u16).add(index * 2 + 1).read_unaligned();
+            let sub = format!(
+                "\\StringFileInfo\\{:04x}{:04x}\\FileDescription",
+                lang, code_page
+            );
+            let sub_wide = wide(&sub);
+            let mut text: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut text_len: u32 = 0;
+            if !windows::Win32::Storage::FileSystem::VerQueryValueW(
+                data.as_ptr().cast(),
+                PCWSTR(sub_wide.as_ptr()),
+                &mut text,
+                &mut text_len,
+            )
+            .as_bool()
+                || text.is_null()
+            {
+                continue;
+            }
+            if (text as usize) < start
+                || (text as usize)
+                    .checked_add(text_len as usize * 2)
+                    .is_none_or(|p| p > end)
+            {
+                continue;
+            }
+            let chars: Vec<u16> = (0..text_len as usize)
+                .map(|i| (text as *const u16).add(i).read_unaligned())
+                .collect();
+            let terminator = chars.iter().position(|c| *c == 0).unwrap_or(chars.len());
+            let description = String::from_utf16_lossy(&chars[..terminator])
+                .trim()
+                .to_string();
+            if !description.is_empty() {
+                return Some(description);
+            }
+        }
+        None
     }
 }
 
@@ -4304,16 +4679,16 @@ fn apply_filter() {
         let old_visible = crate::runtime::lock(&PK_VISIBLE).clone();
         let old_top = SendMessageW(
             list,
-            windows::Win32::UI::Controls::LVM_GETTOPINDEX,
+            windows::Win32::UI::WindowsAndMessaging::LB_GETTOPINDEX,
             None,
             None,
         )
         .0;
         let old_focus = SendMessageW(
             list,
-            windows::Win32::UI::Controls::LVM_GETNEXTITEM,
-            Some(WPARAM(usize::MAX)),
-            Some(LPARAM(windows::Win32::UI::Controls::LVNI_FOCUSED as isize)),
+            windows::Win32::UI::WindowsAndMessaging::LB_GETCURSEL,
+            None,
+            None,
         )
         .0;
         let key_at = |index: isize| {
@@ -4373,47 +4748,50 @@ fn apply_filter() {
 
         let _ = SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), Some(LPARAM(0)));
         PK_POPULATING.store(true, Ordering::SeqCst);
-        let _ = SendMessageW(list, LVM_DELETEALLITEMS, Some(WPARAM(0)), Some(LPARAM(0)));
-        for (index, item) in items.iter().enumerate() {
-            lv_insert(list, index, item);
+        let _ = SendMessageW(
+            list,
+            windows::Win32::UI::WindowsAndMessaging::LB_RESETCONTENT,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+        for item in items.iter() {
+            let text = wide(&item.name);
+            let _ = SendMessageW(
+                list,
+                windows::Win32::UI::WindowsAndMessaging::LB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(text.as_ptr() as isize)),
+            );
         }
         if let Some(index) = items
             .iter()
             .position(|item| focus_key.as_ref() == Some(&item.target.key()))
         {
-            use windows::Win32::UI::Controls::{
-                LIST_VIEW_ITEM_STATE_FLAGS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-            };
-            let state = LVITEMW {
-                state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_FOCUSED.0 | LVIS_SELECTED.0),
-                stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_FOCUSED.0 | LVIS_SELECTED.0),
-                ..Default::default()
-            };
-            SendMessageW(
+            let _ = SendMessageW(
                 list,
-                LVM_SETITEMSTATE,
+                windows::Win32::UI::WindowsAndMessaging::LB_SETCURSEL,
                 Some(WPARAM(index)),
-                Some(LPARAM(&state as *const _ as isize)),
+                Some(LPARAM(0)),
             );
         }
         if let Some(index) = items
             .iter()
             .position(|item| top_key.as_ref() == Some(&item.target.key()))
         {
-            let mut bounds = RECT::default();
-            SendMessageW(
+            let _ = SendMessageW(
                 list,
-                windows::Win32::UI::Controls::LVM_GETITEMRECT,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut bounds as *mut _ as isize)),
+                windows::Win32::UI::WindowsAndMessaging::LB_SETTOPINDEX,
+                Some(WPARAM(index)),
+                Some(LPARAM(0)),
             );
-            SendMessageW(
+        } else {
+            // First population (loading): no remembered position - pin the
+            // top so the scrollbar never opens mid-list.
+            let _ = SendMessageW(
                 list,
-                windows::Win32::UI::Controls::LVM_SCROLL,
+                windows::Win32::UI::WindowsAndMessaging::LB_SETTOPINDEX,
                 Some(WPARAM(0)),
-                Some(LPARAM(
-                    index as isize * (bounds.bottom - bounds.top).max(1) as isize,
-                )),
+                Some(LPARAM(0)),
             );
         }
         PK_POPULATING.store(false, Ordering::SeqCst);
@@ -4440,96 +4818,100 @@ fn apply_filter() {
     }
 }
 
-unsafe fn lv_insert(list: HWND, index: usize, item: &PickItem) {
-    unsafe {
-        use windows::Win32::UI::Controls::{LVIF_TEXT, LVITEMW};
-        let mut name = wide(&item.name);
-        let mut entry = LVITEMW {
-            mask: LVIF_TEXT,
-            iItem: index as i32,
-            pszText: windows::core::PWSTR(name.as_mut_ptr()),
-            cchTextMax: 0,
-            ..Default::default()
-        };
-        let _ = SendMessageW(
-            list,
-            LVM_INSERTITEMW,
-            Some(WPARAM(0)),
-            Some(LPARAM(&mut entry as *mut _ as isize)),
-        );
-        for (column, value) in [(1i32, &item.description), (2, &item.count.to_string())] {
-            let mut wide_value = wide(value);
-            let mut cell = LVITEMW {
-                iItem: index as i32,
-                iSubItem: column,
-                pszText: windows::core::PWSTR(wide_value.as_mut_ptr()),
-                ..Default::default()
-            };
-            let _ = SendMessageW(
-                list,
-                LVM_SETITEMTEXTW,
-                Some(WPARAM(index)),
-                Some(LPARAM(&mut cell as *mut _ as isize)),
-            );
-        }
-        let selected = crate::runtime::lock(&PK_SELECTED);
-        let checked = selected.iter().any(|t| t.key() == item.target.key());
-        lv_set_check(list, index, checked);
-    }
-}
-
-unsafe fn lv_set_check(list: HWND, index: usize, checked: bool) {
-    unsafe {
-        use windows::Win32::UI::Controls::{
-            LIST_VIEW_ITEM_STATE_FLAGS, LVIS_STATEIMAGEMASK, LVITEMW,
-        };
-        let state: u32 = if checked { 2 << 12 } else { 1 << 12 };
-        let mut entry = LVITEMW {
-            state: LIST_VIEW_ITEM_STATE_FLAGS(state),
-            stateMask: LVIS_STATEIMAGEMASK,
-            ..Default::default()
-        };
-        let _ = SendMessageW(
-            list,
-            LVM_SETITEMSTATE,
-            Some(WPARAM(index)),
-            Some(LPARAM(&mut entry as *mut _ as isize)),
-        );
-    }
-}
-
-unsafe fn lv_is_checked(list: HWND, index: usize) -> bool {
-    unsafe {
-        let state = SendMessageW(
-            list,
-            LVM_GETITEMSTATE,
-            Some(WPARAM(index)),
-            Some(LPARAM(
-                windows::Win32::UI::Controls::LVIS_STATEIMAGEMASK.0 as isize,
-            )),
-        )
-        .0 as u32;
-        state & 0x0000_F000 == 2 << 12
-    }
-}
-
 /// Reads checkbox states back into the selection (Go captureSelection).
-unsafe fn capture_selection() {
+/// Toggles one visible row's check in PK_SELECTED (the single source of
+/// truth now that rows are painted, not state-imaged), with the per-rule
+/// process limit enforced on add.
+unsafe fn toggle_picker_row(pk: HWND, index: usize) {
     unsafe {
-        let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
         let visible = crate::runtime::lock(&PK_VISIBLE).clone();
-        let mut selected: Vec<auto::ProcessTarget> = crate::runtime::lock(&PK_SELECTED)
-            .iter()
-            .filter(|t| !visible.iter().any(|item| item.target.key() == t.key()))
-            .cloned()
-            .collect();
-        for (index, item) in visible.iter().enumerate() {
-            if lv_is_checked(list, index) {
-                selected.push(item.target.clone());
-            }
+        let Some(item) = visible.get(index) else {
+            return;
+        };
+        let target = item.target.clone();
+        let mut selected = crate::runtime::lock(&PK_SELECTED);
+        if let Some(pos) = selected.iter().position(|t| t.key() == target.key()) {
+            selected.remove(pos);
+        } else if selected.len() < auto::MAX_PROCESSES_PER_RULE {
+            selected.push(target);
+        } else {
+            drop(selected);
+            set_text(
+                get_dlg_item(pk, PK_STATUS),
+                &fill_template(
+                    &t_pub("process_picker_limit"),
+                    &[&auto::MAX_PROCESSES_PER_RULE.to_string()],
+                ),
+            );
+            return;
         }
-        *crate::runtime::lock(&PK_SELECTED) = auto::normalize_targets(selected);
-        sync_check_states();
+        drop(selected);
+        update_selection_status(pk);
+        update_preview(pk);
+        let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
+        let mut row = RECT::default();
+        if SendMessageW(
+            list,
+            windows::Win32::UI::WindowsAndMessaging::LB_GETITEMRECT,
+            Some(WPARAM(index)),
+            Some(LPARAM(&mut row as *mut _ as isize)),
+        )
+        .0 != 0
+        {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), Some(&row), false);
+        }
+    }
+}
+
+/// Picker listbox subclass: the whole row is the check toggle (the picker
+/// is a checklist), Space toggles the cursored row, and plain clicks keep
+/// the native cursor behavior on top.
+unsafe extern "system" fn picker_list_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    unsafe {
+        let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
+        match msg {
+            windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN
+            | windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK => {
+                let result = windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam);
+                let point = ((lparam.0 & 0xFFFF) as u16) as usize
+                    | (((lparam.0 >> 16) & 0xFFFF) as usize) << 16;
+                let hit = SendMessageW(
+                    hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::LB_ITEMFROMPOINT,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(point as isize)),
+                )
+                .0 as u32;
+                if hit & 0xFFFF_0000 == 0 {
+                    toggle_picker_row(pk, (hit & 0xFFFF) as usize);
+                }
+                return result;
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN
+                if wparam.0 == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE.0 as usize =>
+            {
+                let index = SendMessageW(
+                    hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::LB_GETCURSEL,
+                    None,
+                    None,
+                )
+                .0;
+                if index >= 0 {
+                    toggle_picker_row(pk, index as usize);
+                    return LRESULT(0);
+                }
+            }
+            _ => {}
+        }
+        windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam)
     }
 }
 
@@ -4619,9 +5001,10 @@ fn update_preview(pk: HWND) {
 }
 
 /// Column captions with sort arrows (Go headerCaption).
+/// Column captions with sort arrows, on the sort-button strip that
+/// replaced the listview header.
 fn update_header_captions(pk: HWND) {
     unsafe {
-        let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
         let (column, ascending) = *crate::runtime::lock(&PK_SORT);
         let keys = [
             "process_picker_column_process",
@@ -4633,42 +5016,32 @@ fn update_header_captions(pk: HWND) {
             if column == index as i32 {
                 caption += if ascending { "  ↑" } else { "  ↓" };
             }
-            let mut text = wide(&caption);
-            let mut column_data = windows::Win32::UI::Controls::LVCOLUMNW {
-                mask: windows::Win32::UI::Controls::LVCF_TEXT,
-                pszText: windows::core::PWSTR(text.as_mut_ptr()),
-                ..Default::default()
-            };
-            let _ = SendMessageW(
-                list,
-                LVM_SETCOLUMNW,
-                Some(WPARAM(index)),
-                Some(LPARAM(&mut column_data as *mut _ as isize)),
-            );
+            let button = get_dlg_item(pk, PK_COL_BASE + index);
+            if !button.is_invalid() {
+                let text = wide(&caption);
+                let _ = SetWindowTextW(button, windows::core::PCWSTR(text.as_ptr()));
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(button), None, false);
+            }
         }
-        let _ = pk;
     }
 }
 
 /// Go confirm: publish the checked targets back to the editor draft.
 fn picker_confirm() {
-    unsafe {
-        capture_selection();
-        let selected = crate::runtime::lock(&PK_SELECTED).clone();
-        if selected.len() > auto::MAX_PROCESSES_PER_RULE
-            || (selected.is_empty() && picker_requires_process())
-        {
-            let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
-            update_selection_status(pk);
-            return;
-        }
-        set_edit_procs(selected);
-        update_proc_summary();
-        layout_editor();
-        let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
-        clear_editor_error(ed);
-        hide_picker();
+    let selected = crate::runtime::lock(&PK_SELECTED).clone();
+    if selected.len() > auto::MAX_PROCESSES_PER_RULE
+        || (selected.is_empty() && picker_requires_process())
+    {
+        let pk = HWND(PICKER_HWND.load(Ordering::SeqCst) as *mut _);
+        update_selection_status(pk);
+        return;
     }
+    set_edit_procs(selected);
+    update_proc_summary();
+    layout_editor();
+    let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
+    clear_editor_error(ed);
+    hide_picker();
 }
 
 /// Go browseExecutable: file dialog restricted to real executables.
@@ -4771,21 +5144,6 @@ fn browse_executable(pk: HWND) {
     }
 }
 
-/// Pushes the selection back onto the visible checkboxes (Go syncCheckStates).
-unsafe fn sync_check_states() {
-    unsafe {
-        PK_POPULATING.store(true, Ordering::SeqCst);
-        let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-        let visible = crate::runtime::lock(&PK_VISIBLE).clone();
-        let selected = crate::runtime::lock(&PK_SELECTED).clone();
-        for (index, item) in visible.iter().enumerate() {
-            let checked = selected.iter().any(|t| t.key() == item.target.key());
-            lv_set_check(list, index, checked);
-        }
-        PK_POPULATING.store(false, Ordering::SeqCst);
-    }
-}
-
 unsafe extern "system" fn picker_proc(
     hwnd: HWND,
     msg: u32,
@@ -4801,11 +5159,28 @@ unsafe extern "system" fn picker_proc(
         move || unsafe {
             match msg {
                 windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                    // Painted scrollbar lanes take pointer input on the form:
+                    // report HTCLIENT so mouse messages reach lane_pointer.
+                    if crate::list_style::lane_hit(hwnd, lparam) {
+                        return LRESULT(1); // HTCLIENT
+                    }
                     // Shared blank drag (nativeform::blank_drag_hit): a
                     // HTCLIENT point no interactive child claims drags the
                     // window; never WindowFromPoint from inside a hit-test
                     // (its probe re-enters the caller and recurses).
                     crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN
+                | windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE
+                | windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP
+                | windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE
+                | windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED
+                | windows::Win32::UI::Controls::WM_MOUSELEAVE => {
+                    if crate::list_style::lane_pointer(hwnd, msg, wparam, lparam) {
+                        LRESULT(0)
+                    } else {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
                 }
                 windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
                 WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
@@ -4827,11 +5202,23 @@ unsafe extern "system" fn picker_proc(
                         PK_CONFIRM if hi == BN_CLICKED => picker_confirm(),
                         PK_CANCEL if hi == BN_CLICKED => hide_picker(),
                         PK_REFRESH if hi == BN_CLICKED => {
-                            capture_selection();
                             picker_load();
                             apply_filter();
                         }
                         PK_BROWSE if hi == BN_CLICKED => browse_executable(hwnd),
+                        code if hi == BN_CLICKED
+                            && (PK_COL_BASE..=PK_COL_BASE + 2).contains(&code) =>
+                        {
+                            let column = (code - PK_COL_BASE) as i32;
+                            let mut sort = crate::runtime::lock(&PK_SORT);
+                            if sort.0 == column {
+                                sort.1 = !sort.1;
+                            } else {
+                                *sort = (column, true);
+                            }
+                            drop(sort);
+                            apply_filter();
+                        }
                         PK_SEARCH if hi == EN_CHANGE => {
                             // Go debounces the search box by 120ms; IME
                             // composition fires EN_CHANGE per candidate, and
@@ -4839,17 +5226,40 @@ unsafe extern "system" fn picker_proc(
                             let _ = KillTimer(Some(hwnd), PK_FILTER_TIMER);
                             let _ = SetTimer(Some(hwnd), PK_FILTER_TIMER, 120, None);
                         }
+                        PK_SEARCH if hi == EN_SETFOCUS || hi == EN_KILLFOCUS => {
+                            // Focus tint swap for the card-painted well. The
+                            // scoped well rect lands a pixel short of the
+                            // ring's right/bottom edge here (the ring rides
+                            // the card edge, unlike editor wells), leaving a
+                            // stale-color seam - repaint the whole card,
+                            // synchronously, instead.
+                            let card = get_dlg_item(hwnd, PK_SEARCH_SURFACE);
+                            if !card.is_invalid() {
+                                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                    Some(card),
+                                    None,
+                                    false,
+                                );
+                                let _ = UpdateWindow(card);
+                            }
+                        }
                         _ => {}
+                    }
+                    LRESULT(0)
+                }
+                WM_MEASUREITEM => {
+                    // Owner-draw process rows: settings-row height rhythm.
+                    let measure =
+                        &mut *(lparam.0 as *mut windows::Win32::UI::Controls::MEASUREITEMSTRUCT);
+                    if measure.CtlID == PK_LIST as u32 {
+                        measure.itemHeight = s(30) as u32;
+                        return LRESULT(1);
                     }
                     LRESULT(0)
                 }
                 WM_TIMER if wparam.0 == PK_FILTER_TIMER => {
                     let _ = KillTimer(Some(hwnd), PK_FILTER_TIMER);
                     apply_filter();
-                    LRESULT(0)
-                }
-                WM_NOTIFY => {
-                    handle_picker_notify(hwnd, lparam);
                     LRESULT(0)
                 }
                 WM_APP_PICKER_DESC => {
@@ -4879,7 +5289,7 @@ unsafe extern "system" fn picker_proc(
                     let id = GetWindowLongPtrW(HWND(lparam.0 as *mut _), GWL_ID) as usize;
                     let secondary =
                         matches!(id, PK_HELPER | PK_STATUS | PK_PRIVACY | PK_PREVIEW_TITLE);
-                    let on_surface = matches!(id, PK_EMPTY | PK_PREVIEW);
+                    let on_surface = matches!(id, PK_EMPTY | PK_PREVIEW | PK_LIST);
                     let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
                     let _ = windows::Win32::Graphics::Gdi::SetTextColor(
                         hdc,
@@ -4942,149 +5352,12 @@ unsafe extern "system" fn picker_proc(
     )
 }
 
-/// Go handleNotify: checkbox changes, column sorting, label-click toggles.
-unsafe fn handle_picker_notify(hwnd: HWND, lparam: LPARAM) {
-    unsafe {
-        use windows::Win32::UI::Controls::{NMHDR, NMITEMACTIVATE, NMLISTVIEW};
-        if lparam.0 == 0 {
-            return;
-        }
-        let header = &*(lparam.0 as *const NMHDR);
-        if header.idFrom != PK_LIST
-            && header.hwndFrom.0 as isize != PK_LIST_HWND.load(Ordering::SeqCst)
-        {
-            return;
-        }
-        let code = header.code;
-        const LVN_ITEMCHANGED: u32 = 0xFFFF_FF9B; // LVN_FIRST(-100)-1
-        const LVN_COLUMNCLICK: u32 = 0xFFFF_FF94; // LVN_FIRST-8
-        const NM_CLICK: u32 = 0xFFFF_FFFE; // -2
-
-        let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-
-        if code == LVN_ITEMCHANGED {
-            if PK_POPULATING.load(Ordering::SeqCst) {
-                return;
-            }
-            let notification = &*(lparam.0 as *const NMLISTVIEW);
-            if (notification.uChanged.0 & 0x0000_0008) == 0 || notification.iItem < 0 {
-                return;
-            }
-            if notification.uNewState & 0x0000_F000 != notification.uOldState & 0x0000_F000 {
-                // Go rejects over-limit checks here (canAddSelection) and
-                // resets the row to unchecked with the limit message.
-                let visible = crate::runtime::lock(&PK_VISIBLE).clone();
-                let index = notification.iItem as usize;
-                let over_limit =
-                    notification.uNewState & 0x0000_F000 == 2 << 12 && index < visible.len() && {
-                        let selected = crate::runtime::lock(&PK_SELECTED).clone();
-                        let target = &visible[index].target;
-                        !selected.iter().any(|t| t.key() == target.key())
-                            && selected_count() >= auto::MAX_PROCESSES_PER_RULE
-                    };
-                if over_limit {
-                    // Revert the row quietly: the state write re-enters
-                    // ITEMCHANGED, so the populating guard stays held.
-                    PK_POPULATING.store(true, Ordering::SeqCst);
-                    lv_set_check(list, index, false);
-                    PK_POPULATING.store(false, Ordering::SeqCst);
-                    set_text(
-                        get_dlg_item(hwnd, PK_STATUS),
-                        &fill_template(
-                            &t_pub("process_picker_limit"),
-                            &[&auto::MAX_PROCESSES_PER_RULE.to_string()],
-                        ),
-                    );
-                    return;
-                }
-                capture_selection();
-                update_selection_status(hwnd);
-                update_preview(hwnd);
-            }
-        } else if code == LVN_COLUMNCLICK {
-            let notification = &*(lparam.0 as *const NMLISTVIEW);
-            let column = notification.iSubItem;
-            let mut sort = crate::runtime::lock(&PK_SORT);
-            if sort.0 == column {
-                sort.1 = !sort.1;
-            } else {
-                *sort = (column, true);
-            }
-            drop(sort);
-            apply_filter();
-        } else if code == NM_CLICK {
-            let notification = &*(lparam.0 as *const NMITEMACTIVATE);
-            // Go nmClick: run a sub-item hit test at the click point and
-            // toggle manually only for plain label hits; state-icon and
-            // subitem hits belong to the native checkbox machinery.
-            const LVHT_ONITEMSTATEICON: u32 = 0x0008;
-            const LVHT_ONITEMLABEL: u32 = 0x0004;
-            if notification.iItem < 0 {
-                return;
-            }
-            let mut hit = windows::Win32::UI::Controls::LVHITTESTINFO {
-                pt: notification.ptAction,
-                iItem: -1,
-                iSubItem: -1,
-                ..Default::default()
-            };
-            let _ = SendMessageW(
-                list,
-                LVM_SUBITEMHITTEST,
-                Some(WPARAM(0)),
-                Some(LPARAM(&mut hit as *mut _ as isize)),
-            );
-            if hit.iItem != notification.iItem
-                || hit.iSubItem != 0
-                || hit.flags.0 & LVHT_ONITEMSTATEICON != 0
-                || hit.flags.0 & LVHT_ONITEMLABEL == 0
-            {
-                return;
-            }
-            // Toggling by clicking the label keeps the checkbox affordance
-            // discoverable (Go nmClick handler).
-            let index = notification.iItem as usize;
-            let visible = crate::runtime::lock(&PK_VISIBLE).clone();
-            if index >= visible.len() {
-                return;
-            }
-            let checked = lv_is_checked(list, index);
-            let target = &visible[index].target;
-            let can_add = checked
-                || crate::runtime::lock(&PK_SELECTED)
-                    .iter()
-                    .any(|t| t.key() == target.key())
-                || selected_count() < auto::MAX_PROCESSES_PER_RULE;
-            if !can_add {
-                set_text(
-                    get_dlg_item(hwnd, PK_STATUS),
-                    &fill_template(
-                        &t_pub("process_picker_limit"),
-                        &[&auto::MAX_PROCESSES_PER_RULE.to_string()],
-                    ),
-                );
-                return;
-            }
-            lv_set_check(list, index, !checked);
-            capture_selection();
-            update_selection_status(hwnd);
-            update_preview(hwnd);
-        }
-    }
-}
-
 // ===== Devtools + theme hooks ===============================================
 
 pub fn refresh_theme() {
     refresh_tooltips();
-    let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-    if !list.is_invalid() && unsafe { IsWindow(Some(list)) }.as_bool() {
-        unsafe {
-            apply_list_theme(list);
-            apply_state_images(list);
-        }
-        present_control(list);
-    }
+    // Picker list colors flow through WM_CTLCOLORLISTBOX and the owner-draw
+    // row painter - nothing theme-specific to push into the control.
 }
 
 fn refresh_tooltips() {
@@ -5172,58 +5445,6 @@ pub fn dpi_changed(hwnd: HWND) {
                     layout_editor();
                 }
             }
-        }
-    }
-    if hwnd.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
-        unsafe {
-            let list = HWND(PK_LIST_HWND.load(Ordering::SeqCst) as *mut _);
-            let mut client = RECT::default();
-            let _ = GetClientRect(list, &mut client);
-            // Native ListView still reserves its system scrollbar extent while
-            // processing row updates, even though our client bar replaces it.
-            let native_bar = windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(
-                SM_CXVSCROLL,
-                windows::Win32::UI::HiDpi::GetDpiForWindow(list),
-            );
-            let available = (client.right - client.left - s(14) - native_bar).max(3);
-            let mut count_width = s(82);
-            let dc = windows::Win32::Graphics::Gdi::GetDC(Some(list));
-            if !dc.is_invalid() {
-                use windows::Win32::Graphics::Gdi::*;
-                let old = SelectObject(dc, HGDIOBJ(form_font_body().0));
-                let mut label: Vec<u16> = t_pub("process_picker_column_instances")
-                    .encode_utf16()
-                    .collect();
-                let mut measured = RECT::default();
-                DrawTextW(
-                    dc,
-                    &mut label,
-                    &mut measured,
-                    DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-                );
-                SelectObject(dc, old);
-                ReleaseDC(Some(list), dc);
-                // Both label margins plus the independent sort arrow and gap.
-                count_width = count_width.max(measured.right + s(36));
-            }
-            let count_width = count_width.min(available / 3);
-            let name_width = (available - count_width) * 250 / 560;
-            for (column, width) in [
-                name_width,
-                available - count_width - name_width,
-                count_width,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                SendMessageW(
-                    list,
-                    windows::Win32::UI::Controls::LVM_SETCOLUMNWIDTH,
-                    Some(WPARAM(column)),
-                    Some(LPARAM(width as isize)),
-                );
-            }
-            apply_state_images(list);
         }
     }
 }
@@ -5338,6 +5559,7 @@ const MANAGER_TEXTS: &[(usize, &str)] = &[
 ];
 
 const EDITOR_TEXTS: &[(usize, &str)] = &[
+    (ED_BASIC_TITLE, "automation_basics"),
     (ED_TRIGGER_TITLE, "automation_trigger_conditions"),
     (ED_OPTIONS_TITLE, "automation_action_options"),
     (ED_NAME_LBL, "automation_name"),

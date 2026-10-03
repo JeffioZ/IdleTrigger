@@ -819,9 +819,12 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 /// One snapshot of running processes: lowercase executable names, plus the
-/// set of PIDs per name for on-demand path resolution.
+/// set of PIDs per name for on-demand path resolution. `display` keeps the
+/// first-seen original-case spelling per name so UI surfaces can match Task
+/// Manager while every lookup stays case-insensitive.
 pub struct Snapshot {
     names: BTreeSet<String>,
+    display: BTreeMap<String, String>,
     pids_by_name: Vec<(String, u32)>,
 }
 
@@ -830,6 +833,7 @@ impl Snapshot {
         unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
             let mut names = BTreeSet::new();
+            let mut display = BTreeMap::new();
             let mut pids_by_name = Vec::new();
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -846,6 +850,7 @@ impl Snapshot {
                     ))
                 .then_some(Snapshot {
                     names,
+                    display,
                     pids_by_name,
                 });
             }
@@ -856,9 +861,11 @@ impl Snapshot {
                         .iter()
                         .position(|c| *c == 0)
                         .unwrap_or(entry.szExeFile.len());
-                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                    let original = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                    let name = original.to_lowercase();
                     if !name.is_empty() {
                         names.insert(name.clone());
+                        display.entry(name.clone()).or_insert(original);
                         pids_by_name.push((name, entry.th32ProcessID));
                     }
                     if let Err(err) = windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(
@@ -879,6 +886,7 @@ impl Snapshot {
             let _ = CloseHandle(snapshot);
             Some(Snapshot {
                 names,
+                display,
                 pids_by_name,
             })
         }
@@ -887,6 +895,11 @@ impl Snapshot {
     /// Lowercase executable names currently running.
     pub fn names(&self) -> &BTreeSet<String> {
         &self.names
+    }
+
+    /// Original-case spelling for a lowercase name (falls back to the key).
+    pub fn display_of<'a>(&'a self, lower: &'a str) -> &'a str {
+        self.display.get(lower).map_or(lower, String::as_str)
     }
 
     /// (lowercase name, pid) pairs for grouping and self-exclusion.
@@ -1093,6 +1106,7 @@ executable = "missing.exe"
         let snapshot = || {
             Some(Snapshot {
                 names: BTreeSet::new(),
+                display: BTreeMap::new(),
                 pids_by_name: vec![],
             })
         };
@@ -1203,6 +1217,7 @@ executable = "app.exe"
             } else {
                 BTreeSet::new()
             },
+            display: BTreeMap::new(),
             pids_by_name: vec![],
         };
         let key = rule.processes[0].key();
@@ -1243,6 +1258,7 @@ executable = "app.exe"
     fn path_condition_checks_every_same_name_instance() {
         let snapshot = Snapshot {
             names: BTreeSet::from(["app.exe".into()]),
+            display: BTreeMap::new(),
             pids_by_name: vec![
                 ("app.exe".into(), 1),
                 ("app.exe".into(), 2),
