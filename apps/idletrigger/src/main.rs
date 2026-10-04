@@ -670,7 +670,9 @@ fn main() {
         // script, which carries no foreground rights — SW_SHOW then leaves
         // the panel visible but unfocused. Ask once; a normal launch (or a
         // script that did grant rights) activates, otherwise it stays as-is.
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd(&PANEL));
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd(&PANEL));
+        }
         selfupdate::on_panel_shown();
         refresh_update_button();
     }
