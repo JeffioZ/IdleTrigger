@@ -27,6 +27,17 @@
 <p align="center"><sub>Adapts to Windows light/dark mode and display DPI.<br>
 Native controls support keyboard navigation and preserve edits when display DPI changes.</sub></p>
 
+<p align="center"><img src="docs/images/panel-en-light.png" alt="IdleTrigger control panel in English light mode" width="420"></p>
+
+<details>
+<summary>More themes and languages</summary>
+
+| English dark | Simplified Chinese light | Simplified Chinese dark |
+| --- | --- | --- |
+| <img src="docs/images/panel-en-dark.png" alt="IdleTrigger control panel in English dark mode" width="260"> | <img src="docs/images/panel-zh-light.png" alt="IdleTrigger control panel in Simplified Chinese light mode" width="260"> | <img src="docs/images/panel-zh-dark.png" alt="IdleTrigger control panel in Simplified Chinese dark mode" width="260"> |
+
+</details>
+
 Left-click the tray icon for quick controls, then open **Settings** for all persistent preferences.
 
 ## ✨ At a Glance

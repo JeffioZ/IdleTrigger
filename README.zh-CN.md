@@ -27,6 +27,17 @@
 <p align="center"><sub>适配 Windows 深浅色与显示器 DPI。<br>
 支持键盘导航，切换显示器 DPI 时保留正在编辑的内容。</sub></p>
 
+<p align="center"><img src="docs/images/panel-zh-light.png" alt="IdleTrigger 简体中文浅色控制浮层" width="420"></p>
+
+<details>
+<summary>更多主题与语言</summary>
+
+| 简体中文深色 | 英文浅色 | 英文深色 |
+| --- | --- | --- |
+| <img src="docs/images/panel-zh-dark.png" alt="IdleTrigger 简体中文深色控制浮层" width="260"> | <img src="docs/images/panel-en-light.png" alt="IdleTrigger 英文浅色控制浮层" width="260"> | <img src="docs/images/panel-en-dark.png" alt="IdleTrigger 英文深色控制浮层" width="260"> |
+
+</details>
+
 左键托盘图标使用快捷控制，需要调整长期生效的选项时打开“设置”。
 
 ## ✨ 核心能力
