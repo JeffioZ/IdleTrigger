@@ -1004,7 +1004,7 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
              }} catch {{ Start-Sleep -Milliseconds 500; $i++ }}\n\
            }}\n\
            if (-not $replaced) {{ throw 'unable to replace executable' }}\n\
-           $process = Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -PassThru\n\
+           $process = Start-Process -FilePath $dst -ArgumentList '--updated' -WorkingDirectory (Split-Path -Parent $dst) -PassThru\n\
            Start-Sleep -Seconds 3\n\
            if (-not $process.HasExited -and (Test-Path -LiteralPath $old)) {{ Remove-Item -LiteralPath $old -Force }}\n\
          }} catch {{\n\
@@ -1724,6 +1724,9 @@ mod tests {
         assert!(script.contains("[System.IO.File]::Replace($new, $dst, $old, $true)"));
         assert!(script.contains("Get-FileHash -Algorithm SHA256"));
         assert!(script.contains("Start-Process -FilePath $dst"));
+        // The restarted process must know WHY it was started: the --updated
+        // flag drives the forced-foreground claim on the first panel show.
+        assert!(script.contains("-ArgumentList '--updated'"));
         assert!(script.contains(REPLACE_ERROR_LOG));
         assert!(!script.contains("Move-Item -LiteralPath $dst -Destination $old"));
     }

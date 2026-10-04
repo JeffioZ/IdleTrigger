@@ -497,10 +497,16 @@ fn main() {
     }));
     let mut start_minimized = false;
     let mut startup_delay = 0u64;
+    // Set by the update replace script: this launch follows an update
+    // restart, so the panel may claim the foreground against the background
+    // script's lack of foreground rights.
+    let mut relaunched_by_update = false;
     let mut cli_args: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
         if arg == "--minimized" {
             start_minimized = true;
+        } else if arg == "--updated" {
+            relaunched_by_update = true;
         } else if let Some(v) = arg.strip_prefix("--delay=") {
             startup_delay = v.parse().unwrap_or(0).clamp(0, 60);
         } else {
@@ -666,12 +672,17 @@ fn main() {
     if !start_minimized || !tray_alive {
         // Atomic first presentation: no light flash in dark mode.
         FirstFrameGate::begin(hwnd(&PANEL)).reveal();
-        // After an update restart the new process is spawned by the replace
-        // script, which carries no foreground rights — SW_SHOW then leaves
-        // the panel visible but unfocused. Ask once; a normal launch (or a
-        // script that did grant rights) activates, otherwise it stays as-is.
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd(&PANEL));
+        if relaunched_by_update {
+            // The replace script is a background process without foreground
+            // rights, so its child cannot simply ask for the foreground. The
+            // classic thread-input attach lifts the foreground lock for one
+            // request: attach our UI thread to the current foreground
+            // window's input queue, take the foreground, detach.
+            force_foreground(hwnd(&PANEL));
+        } else {
+            let _ = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd(&PANEL))
+            };
         }
         selfupdate::on_panel_shown();
         refresh_update_button();
@@ -3129,6 +3140,39 @@ fn active_modal_window() -> Option<HWND> {
         .rev()
         .chain([settings_ui::theme_hwnd()])
         .find(|window| !window.is_invalid() && unsafe { IsWindowVisible(*window).as_bool() })
+}
+
+/// Claims the foreground for the update-restart launch path. The plain
+/// SetForegroundWindow is denied there: the process was spawned by the
+/// background replace script and inherits no foreground rights. Sharing the
+/// current foreground window's input queue for the duration of one request
+/// is the documented workaround for exactly this lock; the queues are
+/// detached again immediately whether or not the claim succeeded.
+fn force_foreground(target: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+    unsafe {
+        if SetForegroundWindow(target).as_bool() {
+            return; // Foreground rights were granted after all.
+        }
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() || foreground == target {
+            return;
+        }
+        let mut foreground_pid = 0u32;
+        let foreground_thread = GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
+        let this_thread = GetCurrentThreadId();
+        if foreground_thread == 0 || foreground_thread == this_thread {
+            return;
+        }
+        if AttachThreadInput(this_thread, foreground_thread, true).as_bool() {
+            let _ = SetForegroundWindow(target);
+            let _ = BringWindowToTop(target);
+            let _ = AttachThreadInput(this_thread, foreground_thread, false);
+        }
+    }
 }
 
 fn toggle_panel() {
