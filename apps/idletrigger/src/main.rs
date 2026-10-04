@@ -255,9 +255,6 @@ static LBL_POWER_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_AUTOMATION_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_THEME_SCHEDULE: AtomicIsize = AtomicIsize::new(0);
 static WARN_TEXT: AtomicIsize = AtomicIsize::new(0);
-// Whether the on-demand update row below the footer buttons currently
-// occupies its extra zone at the panel's bottom.
-static UPDATE_ROW_SHOWN: AtomicBool = AtomicBool::new(false);
 
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
 static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -669,6 +666,11 @@ fn main() {
     if !start_minimized || !tray_alive {
         // Atomic first presentation: no light flash in dark mode.
         FirstFrameGate::begin(hwnd(&PANEL)).reveal();
+        // After an update restart the new process is spawned by the replace
+        // script, which carries no foreground rights — SW_SHOW then leaves
+        // the panel visible but unfocused. Ask once; a normal launch (or a
+        // script that did grant rights) activates, otherwise it stays as-is.
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd(&PANEL));
         selfupdate::on_panel_shown();
         refresh_update_button();
     }
@@ -851,10 +853,9 @@ unsafe extern "system" fn hidden_proc(
                         MB_OK | MB_ICONINFORMATION,
                     );
                 }
-                // Tray-originated check found a newer release: open the same
-                // one-click confirm the panel's update link uses (the panel
-                // itself stays hidden).
-                if selfupdate::take_tray_update_prompt() {
+                // An explicit check (tray menu or the settings button) found a
+                // newer release: open the one-click confirm by itself.
+                if selfupdate::take_update_prompt() {
                     update_prompt_and_begin();
                 }
                 theme_engine::finish_manual_switch();
@@ -1830,9 +1831,8 @@ fn create_windows() {
         let _dpi = dpi::Scope::window(panel);
         let font = make_font(14, 400);
         let subtitle_font = make_font(12, 600);
-        // Always created compact: the update row is added on demand by
-        // sync_update_row when the first refresh finds an update.
-        UPDATE_ROW_SHOWN.store(false, Ordering::SeqCst);
+        // Created compact: sync_update_row grows the panel on demand by
+        // comparing the live client height with the phase's demand.
         let mut frame = RECT {
             left: 0,
             top: 0,
@@ -3181,22 +3181,34 @@ fn sync_update_row() {
             | selfupdate::Phase::Ready(_)
             | selfupdate::Phase::Downloading { .. }
     );
-    if UPDATE_ROW_SHOWN.swap(want, Ordering::SeqCst) == want {
-        return;
-    }
+    // Self-healing height sync: compare the CURRENT client height against
+    // the height the phase demands instead of remembering the last intent.
+    // Reopening the panel runs viewport::fit_work_area, which resets the
+    // window to the viewport's recorded content height — a remembered flag
+    // would skip the re-grow and drop the update row onto the footer.
+    let zone = LINK_BOX_H + 2 * LABEL_GAP;
+    let target = if want {
+        PANEL_CLIENT_HEIGHT + zone - PAD
+    } else {
+        PANEL_CLIENT_HEIGHT
+    };
     unsafe {
         let panel = hwnd(&PANEL);
+        let mut client = RECT::default();
+        if panel.is_invalid() || GetClientRect(panel, &mut client).is_err() {
+            return;
+        }
+        if client.bottom - client.top == scale(target) {
+            return; // Already at the demanded height.
+        }
         // The link row centers in a tight zone between the footer buttons
         // and the panel's bottom border: LABEL_GAP above the link, LINK_BOX_H
         // for the link, LABEL_GAP below. The zone REPLACES the footer's
         // trailing PAD (counting both double-books 12px and pushes the link
-        // 20px off the buttons), so the grow delta is zone − PAD.
-        let zone = LINK_BOX_H + 2 * LABEL_GAP;
-        let dy = if want {
-            scale(zone - PAD)
-        } else {
-            -scale(zone - PAD)
-        };
+        // 20px off the buttons), so the grow delta is zone − PAD. The panel
+        // anchors at its bottom edge, so the window grows or shrinks UPWARD
+        // and the footer buttons never move.
+        let dy = scale(target) - (client.bottom - client.top);
         let mut window = RECT::default();
         if GetWindowRect(panel, &mut window).is_ok() {
             let _ = SetWindowPos(
@@ -3208,6 +3220,10 @@ fn sync_update_row() {
                 (window.bottom - window.top) + dy,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            // Keep the viewport's recorded content height in step, or the
+            // next show's fit_work_area resets the panel to the old height
+            // again (the original overlap bug).
+            crate::viewport::fit(panel);
         }
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(panel), None, true);
     }

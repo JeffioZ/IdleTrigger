@@ -1828,7 +1828,7 @@ fn on_update_check_button() {
         crate::selfupdate::Phase::Available(_) | crate::selfupdate::Phase::Ready(_) => {
             crate::update_prompt_and_begin();
         }
-        _ => crate::selfupdate::manual_check(),
+        _ => crate::selfupdate::manual_check_prompting(),
     }
     refresh_update_status();
 }

@@ -106,18 +106,19 @@ pub(crate) fn take_feedback() -> Option<String> {
     lock(&FEEDBACK).take()
 }
 
-/// A manual check was started from the tray menu: the panel stays hidden,
-/// so the "update available" answer must arrive as a standalone confirm
-/// dialog (drained by the UI thread) instead of the panel's update row.
-/// Consumed exactly once by whichever check finishes while it is set —
-/// including an in-flight auto check the tray click landed on.
-static TRAY_CHECK: AtomicBool = AtomicBool::new(false);
-static TRAY_PROMPT: AtomicBool = AtomicBool::new(false);
+/// An explicit check (tray menu or the settings button) is waiting for its
+/// answer: when the round that finishes while this is latched finds a newer
+/// release, the UI thread opens the one-click confirm dialog automatically
+/// instead of leaving the user to click a caption that merely changed.
+/// Consumed exactly once — including by an in-flight auto check the click
+/// landed on.
+static PROMPT_AFTER_CHECK: AtomicBool = AtomicBool::new(false);
+static UPDATE_PROMPT_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Queued request for the UI thread to open the one-click update confirm
 /// (the same dialog the panel's update link opens).
-pub(crate) fn take_tray_update_prompt() -> bool {
-    TRAY_PROMPT.swap(false, Ordering::SeqCst)
+pub(crate) fn take_update_prompt() -> bool {
+    UPDATE_PROMPT_PENDING.swap(false, Ordering::SeqCst)
 }
 
 /// The update link's click payload: the target version (release notes live
@@ -167,13 +168,23 @@ pub(crate) fn manual_check() {
     spawn_check(true);
 }
 
+/// Settings-button check: when the round this starts finds a newer release,
+/// the one-click confirm opens by itself — the user's click already said
+/// "check", so a caption that merely changed to "Update to vX" forces a
+/// second click for no reason. Callers keep ignoring clicks while a check
+/// or download is already running.
+pub(crate) fn manual_check_prompting() {
+    PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
+    manual_check();
+}
+
 /// Tray-menu "Check for updates": the panel is NOT shown. Every outcome
 /// arrives as a standalone dialog — up to date / failure via the existing
 /// feedback and error boxes, "update available" via the update confirm. If
-/// a check is already running, the request still latches (TRAY_CHECK) and
-/// that in-flight round answers it.
+/// a check is already running, the request still latches and that in-flight
+/// round answers it.
 pub(crate) fn manual_check_from_tray() {
-    TRAY_CHECK.store(true, Ordering::SeqCst);
+    PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
     if is_busy() {
         return;
     }
@@ -196,8 +207,8 @@ fn spawn_check(manual: bool) {
         });
     if spawned.is_err() {
         MANUAL_REQUESTED.store(false, Ordering::SeqCst);
-        if TRAY_CHECK.swap(false, Ordering::SeqCst) {
-            // The tray user is waiting on a dialog answer.
+        if PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst) {
+            // The explicit-check user is waiting on a dialog answer.
             *lock(&FEEDBACK) = Some(crate::t_pub("update_err_network"));
         }
         crate::log_line("self-update: failed to spawn the check thread");
@@ -252,7 +263,7 @@ fn run_check(manual: bool) {
     #[cfg(feature = "devtools")]
     if crate::devtools::UPDATE_PREVIEW.load(Ordering::SeqCst) {
         preview_inject();
-        TRAY_CHECK.store(false, Ordering::SeqCst);
+        PROMPT_AFTER_CHECK.store(false, Ordering::SeqCst);
         notify_ui(true);
         return;
     }
@@ -265,8 +276,8 @@ fn run_check(manual: bool) {
             *lock(&PHASE) = Phase::Idle;
             // A latched tray request gets its dialog answer even when the
             // round itself was an auto check the click landed on.
-            let tray_answer = TRAY_CHECK.swap(false, Ordering::SeqCst);
-            if manual || tray_answer {
+            let explicit_answer = PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst);
+            if manual || explicit_answer {
                 *lock(&FEEDBACK) = Some(crate::t_args("update_up_to_date", &[crate::APP_VERSION]));
             }
         }
@@ -277,16 +288,16 @@ fn run_check(manual: bool) {
                 *phase = Phase::Available(version.clone());
             }
             drop(phase);
-            // Tray answer for "update available": the standalone confirm.
-            if TRAY_CHECK.swap(false, Ordering::SeqCst) {
-                TRAY_PROMPT.store(true, Ordering::SeqCst);
+            // Explicit check found a newer release: queue the confirm.
+            if PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst) {
+                UPDATE_PROMPT_PENDING.store(true, Ordering::SeqCst);
             }
         }
         Err(error) => {
             crate::log_line(&format!("self-update: check failed: {error}"));
             *lock(&PHASE) = fallback_phase();
-            let tray_answer = TRAY_CHECK.swap(false, Ordering::SeqCst);
-            if manual || tray_answer {
+            let explicit_answer = PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst);
+            if manual || explicit_answer {
                 // Timeouts/transport errors/HTTP rejections all land here
                 // (WinHTTP bounds each phase: 5s connect, 8s receive), so an
                 // explicit check never hangs the button. Failure surfaces as
