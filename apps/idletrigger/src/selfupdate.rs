@@ -1071,12 +1071,28 @@ fn cleanup_applied_update_in(dir: &Path, running_version: &str, exe_old: Option<
         // still-running retry window; the next round rewrites the marker.
         return false;
     }
+    // Conservative cleanup: delete ONLY the files this updater itself wrote,
+    // then drop the folder when that leaves it empty. A user's own "update"
+    // folder beside the EXE keeps every unrelated file — std::fs::remove_dir
+    // refuses non-empty directories, which is exactly the guard we want.
+    for name in [
+        ASSET_NAME,
+        &format!("{ASSET_NAME}.part"),
+        READY_FILE,
+        &format!("{READY_FILE}.new"),
+        REPLACE_SCRIPT,
+        REPLACE_ERROR_LOG,
+    ] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    // The marker goes last; an unknown leftover file simply keeps the folder.
+    let _ = std::fs::remove_file(&marker);
     if dir.exists()
-        && let Err(error) = std::fs::remove_dir_all(dir)
+        && let Err(_error) = std::fs::remove_dir(dir)
     {
-        crate::log_line(&format!(
-            "self-update: removing the update staging folder failed: {error}"
-        ));
+        // Non-empty (files we did not create) or a busy handle: keeping the
+        // empty-ish folder behind is harmless and never worth a scary log.
+        crate::log_line("self-update: staging folder kept; it holds files we did not create");
     }
     if let Some(old) = exe_old
         && old.exists()
@@ -1751,10 +1767,25 @@ mod tests {
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", Some(&old)));
         let match_old = old.parent().unwrap().to_path_buf();
 
+        // A user's own file inside a folder named "update" must survive the
+        // cleanup: only updater-written files are removed, and the folder is
+        // dropped solely when that leaves it empty.
+        let dir = temp("userfile");
+        std::fs::write(dir.join(ASSET_NAME), b"new").unwrap();
+        std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.2.3").unwrap();
+        let user_file = dir.join("my-notes.txt");
+        std::fs::write(&user_file, b"keep me").unwrap();
+        assert!(cleanup_applied_update_in(&dir, "1.2.3", None));
+        assert!(!dir.join(ASSET_NAME).exists());
+        assert!(!dir.join(PENDING_APPLY_MARKER).exists());
+        assert!(user_file.exists());
+        assert!(dir.exists());
+
         let _ = std::fs::remove_dir_all(&mismatch_dir);
         let _ = std::fs::remove_dir_all(&mismatch_old);
         let _ = std::fs::remove_dir_all(&match_old);
         let _ = std::fs::remove_dir_all(&nomarker_dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
