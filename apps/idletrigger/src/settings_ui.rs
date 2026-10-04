@@ -315,6 +315,11 @@ pub fn devtools_select_page(page: i32) {
     }
     PAGE.store(page, Ordering::SeqCst);
     apply_dependent_states(hwnd);
+    // Mirror the tab-click tail: visibility lands via SWP_NOREDRAW, so the
+    // swap needs an explicit present before a capture reads the window DC.
+    if unsafe { IsWindowVisible(hwnd).as_bool() } {
+        crate::present_layout(hwnd);
+    }
 }
 
 fn create() {
@@ -886,13 +891,14 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         );
         // Manual check button: caption follows the updater phase (检查更新 →
         // 检查中… → 更新到 vX → 下载更新 N%), drawn on the card surface.
-        // Wider than the footer buttons: the phase captions ("Update to
-        // v9.9.9") must not wrap inside draw_button_label's word-break.
+        // Wider than the footer buttons: the phase captions ("Check for
+        // updates", "Downloading 100%") must not wrap inside
+        // draw_button_label's word-break on wide-Latin system fonts.
         push_button(
             hwnd,
             ID_APP_UPDATE_CHECK,
             &t_pub("menu_check_updates"),
-            (ROW_RIGHT - 132, 298, 132, BTN_H),
+            (ROW_RIGHT - 164, 298, 164, BTN_H),
         );
         // The about block is one quiet row, not a card: a 40px face around
         // a single link read as filler chrome.
