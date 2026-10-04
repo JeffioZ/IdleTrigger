@@ -61,7 +61,7 @@ pub fn request() -> Option<(f64, f64)> {
         .spawn(|| {
             // Reset outside the caught body: a panic must not leave the
             // locator stuck in "querying" forever.
-            let _panicked = crate::runtime::catch_and_log("ip-location", || {
+            let _ = crate::runtime::catch_and_log("ip-location", || {
                 let _ = resolve();
             });
             QUERYING.store(false, Ordering::SeqCst);
@@ -79,6 +79,7 @@ pub fn request() -> Option<(f64, f64)> {
     {
         LAST_FAILURE.store(now_secs(), Ordering::SeqCst);
         QUERYING.store(false, Ordering::SeqCst);
+        crate::log_line("ip locate: worker thread could not start");
     }
     None
 }
@@ -122,105 +123,102 @@ fn cached_location() -> Option<Location> {
 
 fn fetch_ipwho() -> Option<Location> {
     use windows::Win32::Networking::WinHttp::{
-        URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-        WINHTTP_INTERNET_SCHEME_HTTPS, WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl,
-        WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpReadData,
-        WinHttpReceiveResponse, WinHttpSendRequest,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+        WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+        WinHttpSendRequest, WinHttpSetTimeouts,
     };
     use windows::core::PCWSTR;
 
+    // RAII close for the three WinHTTP handles: no early-return path can
+    // leak (the manual close cascade this replaced had four copies).
+    struct Guard(*mut core::ffi::c_void);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = windows::Win32::Networking::WinHttp::WinHttpCloseHandle(self.0);
+            }
+        }
+    }
+    // Failures used to vanish silently and left "IP lookup failed" without a
+    // cause. They are throttled (30-minute retry), so one log line each is
+    // safe and makes the settings-page status diagnosable.
+    let fail = |what: String| crate::log_line(&format!("ip locate: {what}"));
+
     unsafe {
-        let session = WinHttpOpen(
-            PCWSTR(wide("IdleTrigger/1.0").as_ptr()),
+        let agent = wide(&format!("IdleTrigger/{}", crate::APP_VERSION));
+        let session = Guard(WinHttpOpen(
+            PCWSTR(agent.as_ptr()),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
             0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        if windows::Win32::Networking::WinHttp::WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000)
-            .is_err()
-        {
-            let _ = WinHttpCloseHandle(session);
-            return None;
-        }
-        let url_wide: Vec<u16> = "https://ipwho.is/".encode_utf16().collect();
-        let mut parts = URL_COMPONENTS {
-            dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
-            dwHostNameLength: u32::MAX,
-            ..Default::default()
-        };
-        if WinHttpCrackUrl(&url_wide, 0, &mut parts).is_err()
-            || parts.lpszHostName.is_null()
-            || parts.dwHostNameLength == 0
-        {
-            let _ = WinHttpCloseHandle(session);
-            return None;
-        }
-        let host = String::from_utf16_lossy(std::slice::from_raw_parts(
-            parts.lpszHostName.0,
-            parts.dwHostNameLength as usize,
         ));
-        let connect = WinHttpConnect(session, PCWSTR(wide(&host).as_ptr()), parts.nPort, 0);
-        if connect.is_null() {
-            let _ = WinHttpCloseHandle(session);
+        if session.0.is_null() {
+            fail("WinHttpOpen failed".into());
             return None;
         }
-        let flags = if parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS {
-            WINHTTP_FLAG_SECURE
-        } else {
-            windows::Win32::Networking::WinHttp::WINHTTP_OPEN_REQUEST_FLAGS(0)
-        };
-        let request = WinHttpOpenRequest(
-            connect,
+        if let Err(err) = WinHttpSetTimeouts(session.0, 5000, 5000, 5000, 5000) {
+            fail(format!("WinHttpSetTimeouts failed: {err}"));
+            return None;
+        }
+        // The endpoint is a compile-time constant: no URL cracking needed.
+        let connect = Guard(WinHttpConnect(
+            session.0,
+            PCWSTR(wide("ipwho.is").as_ptr()),
+            443, // HTTPS default port; the endpoint is a fixed constant
+            0,
+        ));
+        if connect.0.is_null() {
+            fail("WinHttpConnect failed".into());
+            return None;
+        }
+        let request = Guard(WinHttpOpenRequest(
+            connect.0,
             PCWSTR(wide("GET").as_ptr()),
             PCWSTR(wide("/").as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
             std::ptr::null(),
-            flags,
-        );
-        if request.is_null() {
-            let _ = WinHttpCloseHandle(connect);
-            let _ = WinHttpCloseHandle(session);
+            WINHTTP_FLAG_SECURE,
+        ));
+        if request.0.is_null() {
+            fail("WinHttpOpenRequest failed".into());
             return None;
         }
-
-        let ok = WinHttpSendRequest(request, None, None, 0, 0, 0).is_ok()
-            && WinHttpReceiveResponse(request, std::ptr::null_mut()).is_ok();
-        if !ok {
-            let _ = WinHttpCloseHandle(request);
-            let _ = WinHttpCloseHandle(connect);
-            let _ = WinHttpCloseHandle(session);
+        if let Err(err) = WinHttpSendRequest(request.0, None, None, 0, 0, 0) {
+            fail(format!("request send failed: {err}"));
+            return None;
+        }
+        if let Err(err) = WinHttpReceiveResponse(request.0, std::ptr::null_mut()) {
+            fail(format!("request receive failed: {err}"));
             return None;
         }
 
         let mut status: u32 = 0;
         let mut status_size = size_of::<u32>() as u32;
-        if windows::Win32::Networking::WinHttp::WinHttpQueryHeaders(
-            request,
-            windows::Win32::Networking::WinHttp::WINHTTP_QUERY_STATUS_CODE
-                | windows::Win32::Networking::WinHttp::WINHTTP_QUERY_FLAG_NUMBER,
+        if WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             PCWSTR::null(),
             Some((&mut status as *mut u32).cast()),
             &mut status_size,
             std::ptr::null_mut(),
         )
         .is_err()
-            || status != 200
         {
-            let _ = WinHttpCloseHandle(request);
-            let _ = WinHttpCloseHandle(connect);
-            let _ = WinHttpCloseHandle(session);
+            fail("status query failed".into());
+            return None;
+        }
+        if status != 200 {
+            fail(format!("HTTP {status}"));
             return None;
         }
         let mut body = Vec::new();
         let mut complete = false;
         loop {
             let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
+            if WinHttpQueryDataAvailable(request.0, &mut available).is_err() {
                 break;
             }
             if available == 0 {
@@ -228,30 +226,24 @@ fn fetch_ipwho() -> Option<Location> {
                 break;
             }
             if available as usize > 64 * 1024 - body.len() {
+                fail("response exceeded the 64 KiB cap".into());
                 break;
             }
             let mut chunk = vec![0u8; available as usize];
             let mut read: u32 = 0;
-            if WinHttpReadData(request, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
+            if WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
                 || read == 0
             {
                 break;
             }
             chunk.truncate(read as usize);
             body.extend_from_slice(&chunk);
-            if body.len() > 64 * 1024 {
-                break; // sanity cap
-            }
         }
-        let _ = WinHttpCloseHandle(request);
-        let _ = WinHttpCloseHandle(connect);
-        let _ = WinHttpCloseHandle(session);
-
-        if complete {
-            parse_ipwho(&String::from_utf8_lossy(&body))
-        } else {
-            None
+        if !complete {
+            fail("response read ended early".into());
+            return None;
         }
+        parse_ipwho(&String::from_utf8_lossy(&body))
     }
 }
 

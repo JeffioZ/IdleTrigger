@@ -3,6 +3,7 @@ name = "idletrigger"
 description = "Lightweight native Windows power automation tray utility"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

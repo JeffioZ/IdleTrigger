@@ -106,6 +106,20 @@ pub(crate) fn take_feedback() -> Option<String> {
     lock(&FEEDBACK).take()
 }
 
+/// A manual check was started from the tray menu: the panel stays hidden,
+/// so the "update available" answer must arrive as a standalone confirm
+/// dialog (drained by the UI thread) instead of the panel's update row.
+/// Consumed exactly once by whichever check finishes while it is set —
+/// including an in-flight auto check the tray click landed on.
+static TRAY_CHECK: AtomicBool = AtomicBool::new(false);
+static TRAY_PROMPT: AtomicBool = AtomicBool::new(false);
+
+/// Queued request for the UI thread to open the one-click update confirm
+/// (the same dialog the panel's update link opens).
+pub(crate) fn take_tray_update_prompt() -> bool {
+    TRAY_PROMPT.swap(false, Ordering::SeqCst)
+}
+
 /// The update link's click payload: the target version (release notes live
 /// on the release page, opened from the panel's notes link).
 pub(crate) fn pending_update_version() -> Option<String> {
@@ -153,6 +167,20 @@ pub(crate) fn manual_check() {
     spawn_check(true);
 }
 
+/// Tray-menu "Check for updates": the panel is NOT shown. Every outcome
+/// arrives as a standalone dialog — up to date / failure via the existing
+/// feedback and error boxes, "update available" via the update confirm. If
+/// a check is already running, the request still latches (TRAY_CHECK) and
+/// that in-flight round answers it.
+pub(crate) fn manual_check_from_tray() {
+    TRAY_CHECK.store(true, Ordering::SeqCst);
+    if is_busy() {
+        return;
+    }
+    MANUAL_REQUESTED.store(true, Ordering::SeqCst);
+    spawn_check(true);
+}
+
 /// Single spawn site for checks: run_check owns the BUSY gate, so a losing
 /// thread exits immediately without disturbing the winner. A failed spawn
 /// clears the manual flag — a stuck flag would disable auto checks forever.
@@ -168,6 +196,10 @@ fn spawn_check(manual: bool) {
         });
     if spawned.is_err() {
         MANUAL_REQUESTED.store(false, Ordering::SeqCst);
+        if TRAY_CHECK.swap(false, Ordering::SeqCst) {
+            // The tray user is waiting on a dialog answer.
+            *lock(&FEEDBACK) = Some(crate::t_pub("update_err_network"));
+        }
         crate::log_line("self-update: failed to spawn the check thread");
     }
 }
@@ -197,26 +229,30 @@ pub(crate) fn begin_update() {
         });
 }
 
+/// RAII release of the update BUSY flag: whichever flow holds the slot
+/// clears it on drop, including through a panic unwind.
+struct BusyGuard;
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::Release);
+    }
+}
+
 /// One silent check: atom discovery → prerelease filter → semver compare.
 /// Never dialogs on failure; the phase just falls back to what is known.
 /// `manual` (tray menu) additionally answers "already up to date".
 fn run_check(manual: bool) {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            BUSY.store(false, Ordering::Release);
-        }
-    }
     if BUSY.swap(true, Ordering::SeqCst) {
         MANUAL_REQUESTED.store(false, Ordering::SeqCst);
         return;
     }
     MANUAL_REQUESTED.store(false, Ordering::SeqCst);
-    let _reset = Reset;
+    let _reset = BusyGuard;
 
     #[cfg(feature = "devtools")]
     if crate::devtools::UPDATE_PREVIEW.load(Ordering::SeqCst) {
         preview_inject();
+        TRAY_CHECK.store(false, Ordering::SeqCst);
         notify_ui(true);
         return;
     }
@@ -227,9 +263,11 @@ fn run_check(manual: bool) {
         Ok(None) => {
             *lock(&KNOWN_UPDATE) = None;
             *lock(&PHASE) = Phase::Idle;
-            if manual {
-                *lock(&FEEDBACK) =
-                    Some(crate::t_pub("update_up_to_date").replacen("%s", crate::APP_VERSION, 1));
+            // A latched tray request gets its dialog answer even when the
+            // round itself was an auto check the click landed on.
+            let tray_answer = TRAY_CHECK.swap(false, Ordering::SeqCst);
+            if manual || tray_answer {
+                *lock(&FEEDBACK) = Some(crate::t_args("update_up_to_date", &[crate::APP_VERSION]));
             }
         }
         Ok(Some(version)) => {
@@ -238,11 +276,17 @@ fn run_check(manual: bool) {
             if !matches!(&*phase, Phase::Ready(ready) if *ready == version) {
                 *phase = Phase::Available(version.clone());
             }
+            drop(phase);
+            // Tray answer for "update available": the standalone confirm.
+            if TRAY_CHECK.swap(false, Ordering::SeqCst) {
+                TRAY_PROMPT.store(true, Ordering::SeqCst);
+            }
         }
         Err(error) => {
             crate::log_line(&format!("self-update: check failed: {error}"));
             *lock(&PHASE) = fallback_phase();
-            if manual {
+            let tray_answer = TRAY_CHECK.swap(false, Ordering::SeqCst);
+            if manual || tray_answer {
                 // Timeouts/transport errors/HTTP rejections all land here
                 // (WinHTTP bounds each phase: 5s connect, 8s receive), so an
                 // explicit check never hangs the button. Failure surfaces as
@@ -259,16 +303,10 @@ fn run_check(manual: bool) {
 /// Download (unless already staged), verify and request the exit. One confirm
 /// covers the whole tail — no second click before the restart.
 fn apply_flow(version: String) {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            BUSY.store(false, Ordering::Release);
-        }
-    }
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _reset = Reset;
+    let _reset = BusyGuard;
 
     let outcome = (|| -> Result<(), String> {
         if lock(&PHASE).clone() != Phase::Ready(version.clone()) {
@@ -315,16 +353,10 @@ fn preview_inject() {
 /// (it never exits or replaces anything).
 #[cfg(feature = "devtools")]
 fn preview_apply(version: String) {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            BUSY.store(false, Ordering::Release);
-        }
-    }
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _reset = Reset;
+    let _reset = BusyGuard;
 
     if lock(&PHASE).clone() != Phase::Ready(version.clone()) {
         *lock(&PHASE) = Phase::Downloading {
@@ -344,20 +376,13 @@ fn preview_apply(version: String) {
         *lock(&PHASE) = Phase::Ready(version);
         notify_ui(true);
     }
-    *lock(&FEEDBACK) = Some(
-        "预览模式：真实流程将在这里退出并替换 EXE，重启后完成更新（未执行任何系统操作）。"
-            .to_string(),
-    );
+    *lock(&FEEDBACK) = Some(crate::t_pub("update_preview_feedback"));
     notify_ui(true);
 }
-
 /// The phase a failed round falls back to: a verified staged update stays
 /// ready (offline install), else the known newer version, else idle.
 fn fallback_phase() -> Phase {
-    if let Some((version, sha256)) = ready_state()
-        && version != crate::APP_VERSION
-        && verify_staged(&staged_path(), &sha256).is_ok()
-    {
+    if let Some((version, _)) = verified_ready() {
         return Phase::Ready(version);
     }
     match &*lock(&KNOWN_UPDATE) {
@@ -370,13 +395,21 @@ fn stamp_cooldown() {
     *lock(&COOLDOWN_UNTIL) = Some(Instant::now() + CHECK_COOLDOWN);
 }
 
+/// A staged update that verifies against its recorded SHA-256 and differs
+/// from the running build (shared by the failure fallback and the startup
+/// restore).
+fn verified_ready() -> Option<(String, String)> {
+    let (version, sha256) = ready_state()?;
+    if version == crate::APP_VERSION || verify_staged(&staged_path(), &sha256).is_err() {
+        return None;
+    }
+    Some((version, sha256))
+}
+
 /// Restores the Ready phase for a staged update found at startup so the next
 /// panel show offers "restart and update" without waiting for a fresh check.
 pub(crate) fn restore_ready_phase() {
-    if let Some((version, sha256)) = ready_state()
-        && version != crate::APP_VERSION
-        && verify_staged(&staged_path(), &sha256).is_ok()
-    {
+    if let Some((version, _)) = verified_ready() {
         *lock(&PHASE) = Phase::Ready(version);
     }
 }
@@ -683,11 +716,15 @@ fn is_prerelease_tag(tag: &str) -> bool {
 }
 
 /// First stable tag in atom order (newest release first); prerelease tags
-/// are skipped so an unswitched rc never reports "update available".
+/// are skipped so an unswitched rc never reports "update available", and
+/// tags that do not parse as semver are skipped too — a stray non-release
+/// tag ("nightly", "demo") must never pose as an update, since
+/// compare_versions would degrade to a string comparison that can rank it
+/// above the running version.
 fn latest_stable_tag(tags: &[String]) -> Option<String> {
     tags.iter()
         .map(|tag| tag.trim_start_matches('v').to_string())
-        .find(|tag| !is_prerelease_tag(tag))
+        .find(|tag| !is_prerelease_tag(tag) && parse_semver(tag).is_some())
 }
 
 /// Parses the tag list from a GitHub releases.atom page (newest first). Tags
@@ -767,16 +804,24 @@ fn ready_state() -> Option<(String, String)> {
     ))
 }
 
-fn write_ready(version: &str, sha256: &str) {
+fn write_ready(version: &str, sha256: &str) -> Result<(), String> {
     let document = serde_json::json!({
         "version": version,
         "sha256": sha256,
     });
-    let _ = std::fs::create_dir_all(update_dir());
-    let _ = std::fs::write(
-        update_dir().join(READY_FILE),
-        serde_json::to_string(&document).unwrap_or_default(),
-    );
+    std::fs::create_dir_all(update_dir()).map_err(|_| crate::t_pub("update_err_dir"))?;
+    // Write-then-rename: a crash mid-write must not leave a truncated
+    // ready.json — that would strand the verified staged file as an orphan
+    // reporting "no update pending" until the next successful round.
+    let target = update_dir().join(READY_FILE);
+    let temp = update_dir().join(format!("{READY_FILE}.new"));
+    std::fs::write(&temp, serde_json::to_string(&document).unwrap_or_default())
+        .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
+    if let Err(error) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(crate::t_args("update_err_write", &[&error.to_string()]));
+    }
+    Ok(())
 }
 
 /// Existence + size floor + MZ header + SHA-256: the staged file must prove
@@ -821,24 +866,21 @@ fn download_staged(meta: &ReleaseMeta, version: &str) -> Result<(), String> {
         }
         notify_ui(false);
     };
-    let result = http_download(&meta.url, &part, MAX_EXE_BYTES, &mut progress);
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&part);
-        return Err(error);
-    }
+    // http_download already removed the half-written .part on failure.
+    http_download(&meta.url, &part, MAX_EXE_BYTES, &mut progress)?;
     if let Err(error) = verify_staged(&part, &meta.sha256) {
         let _ = std::fs::remove_file(&part);
         return Err(error);
     }
+    // rename replaces an existing target on Windows, so no pre-delete:
+    // deleting first would open a staged-file-less window a crash could
+    // turn into a lost update.
     let staged = dir.join(ASSET_NAME);
-    if staged.exists() {
-        let _ = std::fs::remove_file(&staged);
-    }
     if let Err(error) = std::fs::rename(&part, &staged) {
         let _ = std::fs::remove_file(&part);
         return Err(error.to_string());
     }
-    write_ready(version, &meta.sha256);
+    write_ready(version, &meta.sha256)?;
     crate::log_line(&format!(
         "self-update: {version} downloaded and verified, ready to apply"
     ));
@@ -999,6 +1041,11 @@ pub(crate) fn cleanup_on_startup() {
         // Downloads never resume across runs; a leftover .part is junk.
         let _ = std::fs::remove_file(&part);
     }
+    // A crash between the writability probe's write and remove leaves this
+    // marker file beside the EXE; reclaim it with the other leftovers.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_file_name(".idletrigger-update-probe"));
+    }
     let exe_old = std::env::current_exe().ok().map(|exe| {
         let mut old = exe.into_os_string();
         old.push(".old");
@@ -1094,24 +1141,30 @@ impl Drop for HandleGuard {
     }
 }
 
-/// One-shot GET that buffers the body (size-capped) and captures the response
-/// headers as lowercase name/value pairs. Redirects are followed by default,
-/// which releases/download needs to reach the CDN.
-fn http_get(
+/// One connected GET request with its handle chain: session → URL crack →
+/// connect → open → send → receive → status query. Shared by the buffered
+/// GET and the streamed download, whose WinHTTP setup is identical; the
+/// guards keep session and connection alive for as long as the request.
+struct OpenRequest {
+    _session: HandleGuard,
+    _connect: HandleGuard,
+    request: HandleGuard,
+    status: u16,
+}
+
+fn open_get_request(
     url: &str,
     timeouts: (i32, i32, i32, i32),
-    max_bytes: usize,
-) -> Result<HttpResponse, String> {
+    network_error: &dyn Fn(String) -> String,
+) -> Result<OpenRequest, String> {
     use windows::Win32::Networking::WinHttp::{
         URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
         WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen,
-        WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData,
-        WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+        WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReceiveResponse, WinHttpSendRequest,
+        WinHttpSetTimeouts,
     };
     use windows::core::PCWSTR;
-
-    let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
 
     unsafe {
         let agent = format!("IdleTrigger/{}", crate::APP_VERSION);
@@ -1203,12 +1256,34 @@ fn http_get(
             std::ptr::null_mut(),
         )
         .map_err(|error| network_error(error.to_string()))?;
+        Ok(OpenRequest {
+            _session: session,
+            _connect: connect,
+            request,
+            status: status as u16,
+        })
+    }
+}
 
-        let headers = query_headers_block(request.0, network_error)?;
+/// One-shot GET that buffers the body (size-capped) and captures the response
+/// headers as lowercase name/value pairs. Redirects are followed by default,
+/// which releases/download needs to reach the CDN.
+fn http_get(
+    url: &str,
+    timeouts: (i32, i32, i32, i32),
+    max_bytes: usize,
+) -> Result<HttpResponse, String> {
+    use windows::Win32::Networking::WinHttp::{WinHttpQueryDataAvailable, WinHttpReadData};
+
+    let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
+    let opened = open_get_request(url, timeouts, &network_error)?;
+    let request = opened.request.0;
+    unsafe {
+        let headers = query_headers_block(request, &network_error)?;
         let mut body = Vec::new();
         loop {
             let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request.0, &mut available).is_err() {
+            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
                 return Err(network_error("WinHttpQueryDataAvailable failed".into()));
             }
             if available == 0 {
@@ -1219,7 +1294,7 @@ fn http_get(
             }
             let mut chunk = vec![0u8; available as usize];
             let mut read: u32 = 0;
-            if WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
+            if WinHttpReadData(request, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
                 || read == 0
             {
                 return Err(network_error("WinHttpReadData failed".into()));
@@ -1231,7 +1306,7 @@ fn http_get(
             return Err(crate::t_pub("update_err_oversize"));
         }
         Ok(HttpResponse {
-            status: status as u16,
+            status: opened.status,
             headers,
             body,
         })
@@ -1241,7 +1316,7 @@ fn http_get(
 /// Reads the whole raw header block once and splits it into lowercase pairs.
 fn query_headers_block(
     request: *mut core::ffi::c_void,
-    network_error: impl Fn(String) -> String,
+    network_error: &dyn Fn(String) -> String,
 ) -> Result<Vec<(String, String)>, String> {
     use windows::Win32::Networking::WinHttp::{
         WINHTTP_QUERY_RAW_HEADERS_CRLF, WinHttpQueryHeaders,
@@ -1288,119 +1363,23 @@ fn http_download(
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), String> {
     use windows::Win32::Networking::WinHttp::{
-        URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-        WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_CONTENT_LENGTH,
-        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpCrackUrl,
-        WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders,
-        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+        WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER, WinHttpQueryDataAvailable,
+        WinHttpQueryHeaders, WinHttpReadData,
     };
     use windows::core::PCWSTR;
 
     let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
+    let opened = open_get_request(url, DOWNLOAD_TIMEOUTS, &network_error)?;
+    let request = opened.request.0;
+    if opened.status != 200 {
+        return Err(t_http_error(opened.status));
+    }
     let result = unsafe {
-        let agent = format!("IdleTrigger/{}", crate::APP_VERSION);
-        let session = HandleGuard(WinHttpOpen(
-            PCWSTR(crate::wide(&agent).as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
-        if session.0.is_null() {
-            return Err(network_error("WinHttpOpen failed".into()));
-        }
-        WinHttpSetTimeouts(
-            session.0,
-            DOWNLOAD_TIMEOUTS.0,
-            DOWNLOAD_TIMEOUTS.1,
-            DOWNLOAD_TIMEOUTS.2,
-            DOWNLOAD_TIMEOUTS.3,
-        )
-        .map_err(|error| network_error(error.to_string()))?;
-
-        let url_wide: Vec<u16> = url.encode_utf16().collect();
-        let mut parts = URL_COMPONENTS {
-            dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
-            dwHostNameLength: u32::MAX,
-            dwUrlPathLength: u32::MAX,
-            dwExtraInfoLength: u32::MAX,
-            ..Default::default()
-        };
-        WinHttpCrackUrl(&url_wide, 0, &mut parts)
-            .map_err(|error| network_error(error.to_string()))?;
-        if parts.lpszHostName.is_null() || parts.dwHostNameLength == 0 {
-            return Err(network_error("invalid URL".into()));
-        }
-        let host = String::from_utf16_lossy(std::slice::from_raw_parts(
-            parts.lpszHostName.0,
-            parts.dwHostNameLength as usize,
-        ));
-        let mut request_path = String::new();
-        if !parts.lpszUrlPath.is_null() && parts.dwUrlPathLength > 0 {
-            request_path.push_str(&String::from_utf16_lossy(std::slice::from_raw_parts(
-                parts.lpszUrlPath.0,
-                parts.dwUrlPathLength as usize,
-            )));
-        }
-        if !parts.lpszExtraInfo.is_null() && parts.dwExtraInfoLength > 0 {
-            request_path.push_str(&String::from_utf16_lossy(std::slice::from_raw_parts(
-                parts.lpszExtraInfo.0,
-                parts.dwExtraInfoLength as usize,
-            )));
-        }
-        if request_path.is_empty() {
-            request_path.push('/');
-        }
-        let connect = HandleGuard(WinHttpConnect(
-            session.0,
-            PCWSTR(crate::wide(&host).as_ptr()),
-            parts.nPort,
-            0,
-        ));
-        if connect.0.is_null() {
-            return Err(network_error("WinHttpConnect failed".into()));
-        }
-        let flags = if parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS {
-            WINHTTP_FLAG_SECURE
-        } else {
-            WINHTTP_OPEN_REQUEST_FLAGS(0)
-        };
-        let request = HandleGuard(WinHttpOpenRequest(
-            connect.0,
-            PCWSTR(crate::wide("GET").as_ptr()),
-            PCWSTR(crate::wide(&request_path).as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            flags,
-        ));
-        if request.0.is_null() {
-            return Err(network_error("WinHttpOpenRequest failed".into()));
-        }
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0)
-            .map_err(|error| network_error(error.to_string()))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut())
-            .map_err(|error| network_error(error.to_string()))?;
-
-        let mut status: u32 = 0;
-        let mut status_size = std::mem::size_of::<u32>() as u32;
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast()),
-            &mut status_size,
-            std::ptr::null_mut(),
-        )
-        .map_err(|error| network_error(error.to_string()))?;
-        if status != 200 {
-            return Err(t_http_error(status as u16));
-        }
         let mut total: u64 = 0;
         let mut total_size: u32 = 0;
         let mut total_size_bytes = std::mem::size_of::<u32>() as u32;
         if WinHttpQueryHeaders(
-            request.0,
+            request,
             WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
             PCWSTR::null(),
             Some((&mut total_size as *mut u32).cast()),
@@ -1415,11 +1394,12 @@ fn http_download(
             }
         }
 
-        let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+        let mut file = std::fs::File::create(path)
+            .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
         let mut done: u64 = 0;
         loop {
             let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request.0, &mut available).is_err() {
+            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
                 return Err(network_error("WinHttpQueryDataAvailable failed".into()));
             }
             if available == 0 {
@@ -1430,17 +1410,19 @@ fn http_download(
             }
             let mut chunk = vec![0u8; available as usize];
             let mut read: u32 = 0;
-            if WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
+            if WinHttpReadData(request, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
                 || read == 0
             {
                 return Err(network_error("WinHttpReadData failed".into()));
             }
             chunk.truncate(read as usize);
-            file.write_all(&chunk).map_err(|error| error.to_string())?;
+            file.write_all(&chunk)
+                .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
             done += read as u64;
             progress(done, total);
         }
-        file.flush().map_err(|error| error.to_string())?;
+        file.flush()
+            .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
         Ok(())
     };
     if result.is_err() {
@@ -1740,6 +1722,7 @@ mod tests {
         std::fs::write(&staged, b"new").unwrap();
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", None));
         assert!(staged.exists());
+        let nomarker_dir = dir;
 
         // Marker mismatch (replacement failed or rolled back): keep staging,
         // backup and marker for the retry window.
@@ -1752,6 +1735,8 @@ mod tests {
         assert!(dir.join(ASSET_NAME).exists());
         assert!(dir.join(PENDING_APPLY_MARKER).exists());
         assert!(old.exists());
+        let mismatch_dir = dir;
+        let mismatch_old = old.parent().unwrap().to_path_buf();
 
         // Matching marker (running == target): reclaim everything, idempotent.
         let dir = temp("match");
@@ -1764,6 +1749,12 @@ mod tests {
         assert!(!dir.exists());
         assert!(!old.exists());
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", Some(&old)));
+        let match_old = old.parent().unwrap().to_path_buf();
+
+        let _ = std::fs::remove_dir_all(&mismatch_dir);
+        let _ = std::fs::remove_dir_all(&mismatch_old);
+        let _ = std::fs::remove_dir_all(&match_old);
+        let _ = std::fs::remove_dir_all(&nomarker_dir);
     }
 
     #[test]

@@ -506,7 +506,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
             }
             popup_tests::dialog(
                 &t("automation_delete_title"),
-                &t("automation_delete_confirm").replace("%s", &baseline[0].name),
+                &crate::t_args("automation_delete_confirm", &[&baseline[0].name]),
                 IDNO,
                 IDNO,
                 folder.join(format!("{language}-delete-no-{dark}.bmp")),

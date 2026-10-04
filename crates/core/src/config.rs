@@ -111,7 +111,9 @@ impl Config {
         ) {
             self.idle_action = "lock".into();
         }
-        self.idle_timeout_minutes = self.idle_timeout_minutes.clamp(1, 7 * 24 * 60);
+        self.idle_timeout_minutes = self
+            .idle_timeout_minutes
+            .clamp(1, crate::automation::MAX_IDLE_MINUTES);
         // System actions always carry a cancellable countdown: the idle path
         // shares the automation rules' minimum instead of allowing 0 (silent).
         self.idle_warning_seconds = self
@@ -468,7 +470,16 @@ fn save_candidate(
             .unwrap_or_default();
         let array = toml_edit::Array::from_iter(config.theme_wallpapers.iter().cloned());
         if existing != array.to_string() {
-            document["theme_wallpapers"] = toml_edit::Item::Value(toml_edit::Value::Array(array));
+            let mut value = toml_edit::Value::Array(array);
+            // Carry the old decor over (set_value parity): an inline comment
+            // after the array must survive a content change.
+            if let Some(old) = document
+                .get("theme_wallpapers")
+                .and_then(toml_edit::Item::as_value)
+            {
+                *value.decor_mut() = old.decor().clone();
+            }
+            document["theme_wallpapers"] = toml_edit::Item::Value(value);
         }
     }
     set_str(
@@ -522,6 +533,17 @@ fn save_candidate(
     }
     result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod embedded_template_tests {
+    use super::TEMPLATE;
+    #[test]
+    fn embedded_template_parses() {
+        TEMPLATE
+            .parse::<toml_edit::DocumentMut>()
+            .expect("embedded template must parse");
+    }
 }
 
 #[cfg(test)]

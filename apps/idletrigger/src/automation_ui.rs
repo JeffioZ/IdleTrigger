@@ -291,7 +291,7 @@ fn edit_toggle(ed: HWND, id: usize) {
 const MGR_PAD: i32 = 18;
 const MGR_TITLE_Y: i32 = 16; // formEdgePadding
 const MGR_TEXT_H: i32 = 18;
-const MGR_TITLE_H: i32 = 24; // page-title row (settings header parity) // formTextHeight
+const MGR_TITLE_H: i32 = 24; // page-title row (settings header parity)
 const MGR_LIST_Y: i32 = MGR_TITLE_Y + MGR_TITLE_H + 12;
 const MGR_LIST_H: i32 = 240;
 const MGR_STATUS_Y: i32 = MGR_LIST_Y + MGR_LIST_H + 8;
@@ -474,17 +474,17 @@ fn fill_template(template: &str, values: &[&str]) -> String {
 
 fn action_label(value: &str) -> String {
     let key = match value {
-        "stay_awake" => "automation_action_stay_awake",
-        "pause_stay_awake" => "automation_action_pause_stay_awake",
-        "enable_idle_monitor" => "automation_action_enable_idle",
-        "pause_idle_monitor" => "automation_action_pause_idle",
-        "lock" => "menu_lock",
-        "sleep" => "menu_sleep",
-        "hibernate" => "menu_hibernate",
-        "shutdown" => "menu_shutdown",
-        "restart" => "menu_restart",
-        "screen_off" => "menu_action_screen_off",
-        "logoff" => "menu_action_logoff",
+        auto::ACTION_STAY_AWAKE => "automation_action_stay_awake",
+        auto::ACTION_PAUSE_STAY_AWAKE => "automation_action_pause_stay_awake",
+        auto::ACTION_ENABLE_IDLE => "automation_action_enable_idle",
+        auto::ACTION_PAUSE_IDLE => "automation_action_pause_idle",
+        auto::ACTION_LOCK => "menu_lock",
+        auto::ACTION_SLEEP => "menu_sleep",
+        auto::ACTION_HIBERNATE => "menu_hibernate",
+        auto::ACTION_SHUTDOWN => "menu_shutdown",
+        auto::ACTION_RESTART => "menu_restart",
+        auto::ACTION_SCREEN_OFF => "menu_action_screen_off",
+        auto::ACTION_LOGOFF => "menu_action_logoff",
         _ => return value.to_string(),
     };
     t_pub(key)
@@ -492,17 +492,17 @@ fn action_label(value: &str) -> String {
 
 fn trigger_label(value: &str) -> String {
     let key = match value {
-        "process_running" => "trigger_process_running",
-        "process_started" => "trigger_process_started",
-        "process_exited" => "trigger_process_exited",
-        "time_window" => "trigger_time_window",
-        "once" => "trigger_once",
-        "daily" => "trigger_daily",
-        "weekly" => "trigger_weekly",
-        "session_locked" => "trigger_session_locked",
-        "session_unlocked" => "trigger_session_unlocked",
-        "on_resume" => "trigger_on_resume",
-        "battery_below" => "trigger_battery_below",
+        auto::TRIGGER_PROCESS_RUNNING => "trigger_process_running",
+        auto::TRIGGER_PROCESS_STARTED => "trigger_process_started",
+        auto::TRIGGER_PROCESS_EXITED => "trigger_process_exited",
+        auto::TRIGGER_TIME_WINDOW => "trigger_time_window",
+        auto::TRIGGER_ONCE => "trigger_once",
+        auto::TRIGGER_DAILY => "trigger_daily",
+        auto::TRIGGER_WEEKLY => "trigger_weekly",
+        auto::TRIGGER_SESSION_LOCKED => "trigger_session_locked",
+        auto::TRIGGER_SESSION_UNLOCKED => "trigger_session_unlocked",
+        auto::TRIGGER_ON_RESUME => "trigger_on_resume",
+        auto::TRIGGER_BATTERY_BELOW => "trigger_battery_below",
         _ => return value.to_string(),
     };
     t_pub(key)
@@ -510,16 +510,16 @@ fn trigger_label(value: &str) -> String {
 
 fn logic_label(value: &str) -> String {
     let key = match value {
-        "any" => "automation_process_any",
-        "all" => "automation_process_all",
-        "none" => "automation_process_none",
+        auto::LOGIC_ANY => "automation_process_any",
+        auto::LOGIC_ALL => "automation_process_all",
+        auto::LOGIC_NONE => "automation_process_none",
         _ => return value.to_string(),
     };
     t_pub(key)
 }
 
 fn blocked_label(value: &str) -> String {
-    t_pub(if value == "wait" {
+    t_pub(if value == auto::BLOCKED_WAIT {
         "automation_blocked_wait"
     } else {
         "automation_blocked_skip"
@@ -529,45 +529,45 @@ fn blocked_label(value: &str) -> String {
 fn action_keys() -> Vec<&'static str> {
     // Go actions[] order: state actions first, then system actions.
     vec![
-        "stay_awake",
-        "pause_stay_awake",
-        "enable_idle_monitor",
-        "pause_idle_monitor",
-        "lock",
-        "sleep",
-        "hibernate",
-        "shutdown",
-        "restart",
-        "screen_off",
-        "logoff",
+        auto::ACTION_STAY_AWAKE,
+        auto::ACTION_PAUSE_STAY_AWAKE,
+        auto::ACTION_ENABLE_IDLE,
+        auto::ACTION_PAUSE_IDLE,
+        auto::ACTION_LOCK,
+        auto::ACTION_SLEEP,
+        auto::ACTION_HIBERNATE,
+        auto::ACTION_SHUTDOWN,
+        auto::ACTION_RESTART,
+        auto::ACTION_SCREEN_OFF,
+        auto::ACTION_LOGOFF,
     ]
 }
 
 /// Go setTriggerOptions: triggers are filtered by the selected action type.
 pub fn trigger_keys_for(action: &str) -> Vec<&'static str> {
     if auto::is_state_action(action) {
-        vec!["process_running", "time_window"]
+        vec![auto::TRIGGER_PROCESS_RUNNING, auto::TRIGGER_TIME_WINDOW]
     } else {
         vec![
-            "once",
-            "daily",
-            "weekly",
-            "process_started",
-            "process_exited",
-            "session_locked",
-            "session_unlocked",
-            "on_resume",
-            "battery_below",
+            auto::TRIGGER_ONCE,
+            auto::TRIGGER_DAILY,
+            auto::TRIGGER_WEEKLY,
+            auto::TRIGGER_PROCESS_STARTED,
+            auto::TRIGGER_PROCESS_EXITED,
+            auto::TRIGGER_SESSION_LOCKED,
+            auto::TRIGGER_SESSION_UNLOCKED,
+            auto::TRIGGER_ON_RESUME,
+            auto::TRIGGER_BATTERY_BELOW,
         ]
     }
 }
 
 fn logic_keys() -> Vec<&'static str> {
-    vec!["any", "all", "none"]
+    vec![auto::LOGIC_ANY, auto::LOGIC_ALL, auto::LOGIC_NONE]
 }
 
 fn blocked_keys() -> Vec<&'static str> {
-    vec!["skip", "wait"]
+    vec![auto::BLOCKED_SKIP, auto::BLOCKED_WAIT]
 }
 
 // ===== Choice wrappers ======================================================
@@ -584,7 +584,7 @@ fn choice_select(parent: HWND, id: usize, value: &str) {
 fn fill_action_choice(parent: HWND) {
     let mut rows = vec![ChoiceItem::header(&t_pub("automation_action_group_state"))];
     for key in action_keys() {
-        if key == "lock" {
+        if key == auto::ACTION_LOCK {
             rows.push(ChoiceItem::header(&t_pub("automation_action_group_system")));
         }
         rows.push(ChoiceItem::option(key, &action_label(key)));
@@ -810,10 +810,9 @@ pub fn ensure_created() {
             MGR_TEXT_H,
         );
 
-        // Button row: Go 116/116/116/192 grid (the wide one toggles).
-        // MGR_TOGGLE's caption is state-managed (enable/disable wording);
-        // the registry covers the static captions.
-        // Button row spans the content width exactly (3 x 130 + 230 + 3 x
+        // Button row: MGR_TOGGLE's caption is state-managed (enable/disable
+        // wording); the registry covers the static captions.
+        // The row spans the content width exactly (3 x 130 + 230 + 3 x
         // 8 = 644): no dead strip to the right of the actions.
         for (index, (id, label_key)) in [
             (MGR_NEW, caption_key(MANAGER_TEXTS, MGR_NEW)),
@@ -1057,7 +1056,7 @@ fn refresh_list() {
             t_pub("automation_no_upcoming")
         } else {
             match crate::automation::next_scheduled() {
-                Some(next) => t_pub("automation_next_format").replace("%s", &next),
+                Some(next) => crate::t_args("automation_next_format", &[&next]),
                 None => t_pub("automation_no_upcoming"),
             }
         };
@@ -1121,7 +1120,7 @@ fn rule_summary(rule: &auto::Rule) -> String {
             &t_pub("automation_summary_process_exited"),
             &[&action, &count],
         ),
-        "time_window" => fill_template(
+        auto::TRIGGER_TIME_WINDOW => fill_template(
             &t_pub("automation_summary_time_window"),
             &[
                 &action,
@@ -1130,12 +1129,14 @@ fn rule_summary(rule: &auto::Rule) -> String {
                 &day_summary(&rule.days),
             ],
         ),
-        "once" => fill_template(
+        auto::TRIGGER_ONCE => fill_template(
             &t_pub("automation_summary_once"),
             &[&action, &rule.date, &rule.time],
         ),
-        "daily" => fill_template(&t_pub("automation_summary_daily"), &[&action, &rule.time]),
-        "weekly" => fill_template(
+        auto::TRIGGER_DAILY => {
+            fill_template(&t_pub("automation_summary_daily"), &[&action, &rule.time])
+        }
+        auto::TRIGGER_WEEKLY => fill_template(
             &t_pub("automation_summary_weekly"),
             &[&action, &day_summary(&rule.days), &rule.time],
         ),
@@ -1144,7 +1145,7 @@ fn rule_summary(rule: &auto::Rule) -> String {
             fill_template(&t_pub("automation_summary_session_unlocked"), &[&action])
         }
         "on_resume" => fill_template(&t_pub("automation_summary_on_resume"), &[&action]),
-        "battery_below" => fill_template(
+        auto::TRIGGER_BATTERY_BELOW => fill_template(
             &t_pub("automation_summary_battery"),
             &[&action, &rule.battery_level.to_string()],
         ),
@@ -1200,7 +1201,7 @@ fn edit_selected() {
 }
 
 /// Go idToggle: flip the selected rule's enabled flag and republish.
-fn toggle_selected(mgr: HWND) {
+fn toggle_selected() {
     let Some(idx) = selected_index() else {
         return;
     };
@@ -1213,7 +1214,6 @@ fn toggle_selected(mgr: HWND) {
     if let Err(err) = save_rules_to_config(&base, rules) {
         crate::warn_dialog("", &err);
     }
-    let _ = mgr;
 }
 
 /// Go idDelete: confirm, then remove the selected rule.
@@ -1227,7 +1227,7 @@ fn delete_selected(mgr: HWND) {
         return;
     };
 
-    let body = t_pub("automation_delete_confirm").replace("%s", &rule.name);
+    let body = crate::t_args("automation_delete_confirm", &[&rule.name]);
     if !confirm_dialog(mgr, &t_pub("automation_delete_title"), &body) {
         return;
     }
@@ -1298,7 +1298,7 @@ unsafe extern "system" fn mgr_proc(
                         }
                         MGR_EDIT if hi == BN_CLICKED => edit_selected(),
                         MGR_DELETE if hi == BN_CLICKED => delete_selected(hwnd),
-                        MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(hwnd),
+                        MGR_TOGGLE if hi == BN_CLICKED => toggle_selected(),
                         MGR_LIST if hi == LBN_DBLCLK => edit_selected(),
                         MGR_LIST if hi == LBN_SELCHANGE => {
                             let rules = crate::runtime::lock(&MGR_DISPLAYED_RULES).clone();
@@ -1588,10 +1588,6 @@ fn install_time_edit(edit: HWND) {
         );
     }
 }
-
-fn call_time_edit_old(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
-}
 /// Go normalizeTimeEditRune: ASCII/full-width digits and colons map to the
 /// small editing grammar; everything else is rejected.
 fn time_edit_rune(unit: u32) -> Option<char> {
@@ -1694,29 +1690,31 @@ unsafe extern "system" fn time_edit_proc(
                     TIME_EDIT_SUBCLASS,
                 );
             }
-            call_time_edit_old(hwnd, msg, wparam, lparam)
+            unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
         }
         0x0102 if wparam.0 >= 0x20 => {
             // WM_CHAR: block anything outside the time grammar.
             if time_edit_rune(wparam.0 as u32).is_none() {
                 return LRESULT(0);
             }
-            let result = call_time_edit_old(hwnd, msg, wparam, lparam);
+            let result =
+                unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) };
             time_edit_normalize(hwnd, false);
             result
         }
         0x0302 => {
             // WM_PASTE: normalize whatever landed.
-            let result = call_time_edit_old(hwnd, msg, wparam, lparam);
+            let result =
+                unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) };
             time_edit_normalize(hwnd, false);
             result
         }
         0x0008 => {
             // WM_KILLFOCUS: pad the hour and settle the format.
             time_edit_normalize(hwnd, true);
-            call_time_edit_old(hwnd, msg, wparam, lparam)
+            unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
         }
-        _ => call_time_edit_old(hwnd, msg, wparam, lparam),
+        _ => unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) },
     }
 }
 
@@ -2320,7 +2318,7 @@ fn default_rule() -> auto::Rule {
         id: format!("rule-{now:x}"),
         name: String::new(),
         enabled: true,
-        action: "stay_awake".into(),
+        action: auto::ACTION_STAY_AWAKE.into(),
         trigger: "process_running".into(),
         time: next_hour,
         end_time: two_hours,
@@ -2332,12 +2330,12 @@ fn default_rule() -> auto::Rule {
             "thu".into(),
             "fri".into(),
         ],
-        process_logic: "any".into(),
+        process_logic: auto::LOGIC_ANY.into(),
         processes: Vec::new(),
         keep_screen_on: false,
         idle_minutes: auto::DEFAULT_IDLE_MINUTES,
         warning_seconds: auto::DEFAULT_WARNING_SECONDS,
-        blocked_policy: "skip".into(),
+        blocked_policy: auto::BLOCKED_SKIP.into(),
         max_wait_minutes: 60,
         battery_level: 0,
     }
@@ -2495,20 +2493,25 @@ fn validate_draft(ed: HWND, draft: &auto::Rule) -> Option<(usize, String)> {
     if needs_process && draft.processes.is_empty() {
         return Some((ED_CHOOSE, t("automation_error_process_required")));
     }
-    if trigger == "once" && !parse_date(&draft.date) {
+    if trigger == auto::TRIGGER_ONCE && !parse_date(&draft.date) {
         return Some((ED_DATE, t("automation_error_date")));
     }
-    if matches!(trigger, "once" | "daily" | "weekly" | "time_window") && !parse_time(&draft.time) {
+    if matches!(
+        trigger,
+        auto::TRIGGER_ONCE | auto::TRIGGER_DAILY | auto::TRIGGER_WEEKLY | auto::TRIGGER_TIME_WINDOW
+    ) && !parse_time(&draft.time)
+    {
         return Some((ED_TIME, t("automation_error_time")));
     }
-    if trigger == "time_window" && !parse_time(&draft.end_time) {
+    if trigger == auto::TRIGGER_TIME_WINDOW && !parse_time(&draft.end_time) {
         return Some((ED_END_TIME, t("automation_error_end_time")));
     }
-    if matches!(trigger, "weekly" | "time_window") && draft.days.is_empty() {
+    if matches!(trigger, auto::TRIGGER_WEEKLY | auto::TRIGGER_TIME_WINDOW) && draft.days.is_empty()
+    {
         return Some((ED_DAYS_MON, t("automation_error_days")));
     }
     if draft.action == "enable_idle_monitor"
-        && (draft.idle_minutes <= 0 || draft.idle_minutes > 7 * 24 * 60)
+        && (draft.idle_minutes <= 0 || draft.idle_minutes > auto::MAX_IDLE_MINUTES)
     {
         return Some((ED_IDLE_MIN, t("automation_error_idle_minutes")));
     }
@@ -2521,8 +2524,8 @@ fn validate_draft(ed: HWND, draft: &auto::Rule) -> Option<(usize, String)> {
         && !draft.processes.is_empty()
         && trigger != "process_started"
         && trigger != "process_exited"
-        && draft.blocked_policy == "wait"
-        && (draft.max_wait_minutes <= 0 || draft.max_wait_minutes > 7 * 24 * 60)
+        && draft.blocked_policy == auto::BLOCKED_WAIT
+        && (draft.max_wait_minutes <= 0 || draft.max_wait_minutes > auto::MAX_IDLE_MINUTES)
     {
         return Some((ED_MAX_WAIT, t("automation_error_max_wait")));
     }
@@ -2764,7 +2767,7 @@ pub fn layout_editor() {
         };
 
         match trigger.as_str() {
-            "once" => row_fields(
+            auto::TRIGGER_ONCE => row_fields(
                 &mut place,
                 ED_DATE_LBL,
                 ED_DATE,
@@ -2772,20 +2775,20 @@ pub fn layout_editor() {
                 ED_TIME,
                 &mut y,
             ),
-            "daily" => {
+            auto::TRIGGER_DAILY => {
                 place(ED_TIME_LBL, ED_PAD, y, column_w, ED_LABEL_H);
                 y += ED_LABEL_H + ED_LABEL_GAP;
                 place(ED_TIME, ED_PAD, y, column_w, ED_FIELD_H);
                 y += ED_FIELD_H + ED_RELATED_GAP;
             }
-            "weekly" => {
+            auto::TRIGGER_WEEKLY => {
                 place(ED_TIME_LBL, ED_PAD, y, column_w, ED_LABEL_H);
                 y += ED_LABEL_H + ED_LABEL_GAP;
                 place(ED_TIME, ED_PAD, y, column_w, ED_FIELD_H);
                 y += ED_FIELD_H + ED_RELATED_GAP;
                 y = layout_weekdays(&mut place, y, content_w);
             }
-            "time_window" => {
+            auto::TRIGGER_TIME_WINDOW => {
                 row_fields(
                     &mut place,
                     ED_TIME_LBL,
@@ -2796,7 +2799,7 @@ pub fn layout_editor() {
                 );
                 y = layout_weekdays(&mut place, y, content_w);
             }
-            "battery_below" => {
+            auto::TRIGGER_BATTERY_BELOW => {
                 set_text(
                     get_dlg_item(ed, ED_BATTERY_LBL),
                     &t_pub("automation_battery_level"),
@@ -2824,11 +2827,11 @@ pub fn layout_editor() {
         y += ED_LABEL_H + ED_LABEL_GAP;
         match trigger.as_str() {
             "process_exited" => {
-                choice_select(ed, ED_LOGIC, "none");
+                choice_select(ed, ED_LOGIC, auto::LOGIC_NONE);
                 place(ED_CHOOSE, ED_PAD, y, content_w, ED_FIELD_H);
             }
             "process_started" => {
-                choice_select(ed, ED_LOGIC, "any");
+                choice_select(ed, ED_LOGIC, auto::LOGIC_ANY);
                 place(ED_CHOOSE, ED_PAD, y, content_w, ED_FIELD_H);
             }
             _ => {
@@ -2875,7 +2878,7 @@ pub fn layout_editor() {
         let options_top = y;
         y += crate::layout::CARD_PAD_Y;
         match action.as_str() {
-            "stay_awake" => {
+            auto::ACTION_STAY_AWAKE => {
                 // Full row width: the switch row parks its pill at the right
                 // edge, so a checkbox-width control would slide the pill
                 // over its own label.
@@ -2900,7 +2903,7 @@ pub fn layout_editor() {
                 if has_procs && trigger != "process_started" && trigger != "process_exited" {
                     y += ED_RELATED_GAP;
                     place(ED_BLOCKED_LBL, ED_PAD, y, column_w, ED_LABEL_H);
-                    let waiting = choice_value(ed, ED_BLOCKED) == "wait";
+                    let waiting = choice_value(ed, ED_BLOCKED) == auto::BLOCKED_WAIT;
                     if waiting {
                         place(
                             ED_MAX_LBL,
@@ -3021,7 +3024,7 @@ fn layout_weekdays(
 
 /// Time label text per trigger (Go automationTimeLabelKey).
 fn time_label_text(trigger: &str) -> String {
-    let key = if trigger == "time_window" {
+    let key = if trigger == auto::TRIGGER_TIME_WINDOW {
         "automation_time"
     } else {
         "automation_execution_time"
@@ -3036,7 +3039,7 @@ fn update_proc_summary() {
     let text = if count == 0 {
         t_pub("automation_no_processes")
     } else {
-        t_pub("automation_process_count").replace("%d", &count.to_string())
+        crate::t_args("automation_process_count", &[&count.to_string()])
     };
     set_text(get_dlg_item(ed, ED_PROC_SUMMARY), &text);
 }
@@ -3095,7 +3098,7 @@ fn process_details() -> String {
     let mut lines = Vec::new();
     for target in &targets {
         let name = described_target(target);
-        if !target.path.is_empty() && target.kind == "path" {
+        if !target.path.is_empty() && target.kind == auto::MATCH_PATH {
             lines.push(fill_template(
                 &t_pub("automation_process_detail_path"),
                 &[&name, &target.path],
@@ -3113,7 +3116,7 @@ fn process_details() -> String {
 #[cfg(all(test, feature = "devtools"))]
 pub(crate) fn test_process_details_fixture() -> String {
     set_edit_procs(vec![auto::ProcessTarget {
-        kind: "name".into(),
+        kind: auto::MATCH_NAME.into(),
         executable: "IdleTrigger-audit.exe".into(),
         path: String::new(),
     }]);
@@ -4402,8 +4405,8 @@ unsafe fn register_picker_class(instance: windows::Win32::Foundation::HMODULE) {
     }
 }
 
-/// Custom checkbox state images (Go applyStateImages): the same glyph style
-// Each refresh owns its result. Workers never mutate the visible model.
+/// Each refresh owns its result: workers never mutate the visible model,
+/// and a generation bump in invalidate_picker discards every in-flight load.
 static PK_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 type PickerResult = (usize, bool, Result<Vec<PickItem>, String>);
 static PK_RESULT: Mutex<Option<PickerResult>> = Mutex::new(None);
@@ -4474,7 +4477,7 @@ fn picker_load() {
                                     .any(|(n, pid)| n == *name && *pid != std::process::id())
                         })
                         .map(|name| auto::ProcessTarget {
-                            kind: "name".into(),
+                            kind: auto::MATCH_NAME.into(),
                             executable: snapshot.display_of(name).to_string(),
                             path: String::new(),
                         })
@@ -4494,7 +4497,7 @@ fn picker_load() {
                             .get(&target.key())
                             .cloned()
                             .unwrap_or_default();
-                        let name = if target.kind == "path" {
+                        let name = if target.kind == auto::MATCH_PATH {
                             target.path.clone()
                         } else {
                             target.executable.clone()
@@ -4513,7 +4516,7 @@ fn picker_load() {
                         if PK_GENERATION.load(Ordering::SeqCst) != generation {
                             return Ok(items);
                         }
-                        let path = if item.target.kind == "path" {
+                        let path = if item.target.kind == auto::MATCH_PATH {
                             Some(item.target.path.clone())
                         } else {
                             snapshot.path_of(&item.target.executable.to_lowercase())
@@ -4702,7 +4705,7 @@ fn apply_filter() {
         let mut items = crate::runtime::lock(&PK_ITEMS).clone();
         for target in crate::runtime::lock(&PK_SELECTED).iter() {
             if !items.iter().any(|item| item.target.key() == target.key()) {
-                let name = if target.kind == "path" {
+                let name = if target.kind == auto::MATCH_PATH {
                     target.path.clone()
                 } else {
                     target.executable.clone()
@@ -4975,7 +4978,7 @@ fn update_preview(pk: HWND) {
         } else {
             for target in &selected {
                 let name = &described_target(target);
-                let label = if target.kind == "path" {
+                let label = if target.kind == auto::MATCH_PATH {
                     fill_template(&t_pub("process_picker_preview_path"), &[name, &target.path])
                 } else {
                     fill_template(&t_pub("process_picker_preview_name"), &[name])
@@ -5000,9 +5003,8 @@ fn update_preview(pk: HWND) {
     }
 }
 
-/// Column captions with sort arrows (Go headerCaption).
-/// Column captions with sort arrows, on the sort-button strip that
-/// replaced the listview header.
+/// Column captions with sort arrows (Go headerCaption), on the sort-button
+/// strip that replaced the listview header.
 fn update_header_captions(pk: HWND) {
     unsafe {
         let (column, ascending) = *crate::runtime::lock(&PK_SORT);
@@ -5112,7 +5114,7 @@ fn browse_executable(pk: HWND) {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let target = auto::ProcessTarget {
-            kind: "path".into(),
+            kind: auto::MATCH_PATH.into(),
             executable,
             path: path.clone(),
         };
@@ -5120,7 +5122,8 @@ fn browse_executable(pk: HWND) {
         let mut selected: Vec<auto::ProcessTarget> = crate::runtime::lock(&PK_SELECTED)
             .iter()
             .filter(|t| {
-                !(t.kind == "name" && t.executable.eq_ignore_ascii_case(&target.executable))
+                !(t.kind == auto::MATCH_NAME
+                    && t.executable.eq_ignore_ascii_case(&target.executable))
             })
             .cloned()
             .collect();
@@ -5478,8 +5481,8 @@ pub fn devtools_seed_demo_rule() {
         id: "devtools-demo".into(),
         name: "演示任务".into(),
         enabled: true,
-        action: "lock".into(),
-        trigger: "time_window".into(),
+        action: auto::ACTION_LOCK.into(),
+        trigger: auto::TRIGGER_TIME_WINDOW.into(),
         time: "09:00".into(),
         end_time: "18:00".into(),
         date: String::new(),
@@ -5499,8 +5502,8 @@ pub fn devtools_seed_demo_rule() {
         id: "devtools-demo2".into(),
         name: "第二个任务".into(),
         enabled: false,
-        action: "shutdown".into(),
-        trigger: "once".into(),
+        action: auto::ACTION_SHUTDOWN.into(),
+        trigger: auto::TRIGGER_ONCE.into(),
         date: "2026-09-20".into(),
         time: "23:00".into(),
         end_time: String::new(),
@@ -5717,7 +5720,7 @@ mod surface_tests {
         // an event action with a cancellable countdown, and wait policy.
         *crate::runtime::lock(&EDIT_SESSION).as_mut().unwrap() = EditorSession {
             procs: vec![auto::ProcessTarget {
-                kind: "name".into(),
+                kind: auto::MATCH_NAME.into(),
                 executable: "app.exe".into(),
                 path: String::new(),
             }],
@@ -5726,7 +5729,7 @@ mod surface_tests {
         choice_select(ed, ED_ACTION, auto::ACTION_LOCK);
         fill_trigger_choice(ed, auto::ACTION_LOCK, auto::TRIGGER_TIME_WINDOW);
         choice_select(ed, ED_TRIGGER, auto::TRIGGER_TIME_WINDOW);
-        choice_select(ed, ED_BLOCKED, "wait");
+        choice_select(ed, ED_BLOCKED, auto::BLOCKED_WAIT);
         set_text(get_dlg_item(ed, ED_MAX_WAIT), "10");
         // Laying out without showing: the full visible path (window resize
         // plus synchronous repaint) is verified by the devtools capture

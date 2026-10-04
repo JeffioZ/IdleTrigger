@@ -1,12 +1,14 @@
 //! Day/Night theme engine: scheduled light/dark switching (fixed times or
 //! sunrise/sunset), Windows Personalize registry writes, and battery-based
-//! dark preference, asynchronous location lookup, and fullscreen pause.
+//! dark preference, asynchronous location lookup, and fullscreen pause,
+//! plus the appearance linkage — per-side wallpaper and pointer schemes
+//! with the pre-change snapshot behind the appearance-page restore.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
@@ -17,9 +19,6 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::Shell::{
     DESKTOP_WALLPAPER_POSITION, DWPOS_FILL, DesktopWallpaper, IDesktopWallpaper,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 use windows::core::PCWSTR;
 
@@ -37,15 +36,25 @@ static NOTICE: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
 /// Applies the appearance configured for the currently active side. Used
 /// right after settings save so configuration shows its effect immediately.
 pub fn apply_current_side() {
-    let dark = crate::theme::read_light_preference(APP_BREED) == Some(false)
-        || crate::theme::read_light_preference(BREED) == Some(false);
+    // Same breed resolution as the panel palette (theme::is_dark reads
+    // AppsUseLightTheme only): the app preference decides, the system value
+    // is the fallback for builds that do not write it.
+    let dark = crate::theme::read_light_preference(APP_BREED)
+        .or_else(|| crate::theme::read_light_preference(BREED))
+        == Some(false);
+    // Serialize with the engine thread's scheduled/manual switches (same
+    // THEME_OPERATION lock): a concurrent apply could otherwise capture the
+    // restore snapshot AFTER the other side's wallpaper already landed,
+    // poisoning the sticky pre-change restore point. This runs on the UI
+    // thread only right after a save, so the wait is bounded by one switch.
+    let _operation = crate::runtime::lock(&THEME_OPERATION);
     apply_appearance(dark);
 }
 
 /// Shows a short notice in the panel for a few seconds. Callers run inside
 /// the WM_REFRESH_UI chain (or refresh afterwards) — no extra refresh is
 /// posted here, one redundant full-panel repaint is one visible flicker.
-pub fn show_notice(text: String) {
+fn show_notice(text: String) {
     *crate::runtime::lock(&NOTICE) = Some((text, std::time::Instant::now()));
 }
 
@@ -105,9 +114,9 @@ use crate::wide;
 use idletrigger_core::automation::parse_hhmm;
 
 /// Local time snapshot (minutes + weekday).
-pub struct LocalTime {
-    pub minutes: i32,
-    pub absolute_minutes: i64,
+struct LocalTime {
+    minutes: i32,
+    absolute_minutes: i64,
 }
 
 fn local_time() -> LocalTime {
@@ -126,7 +135,7 @@ fn local_time() -> LocalTime {
 /// NOAA solar approximation for sunrise/sunset in minutes-from-midnight.
 /// Inputs: latitude/longitude degrees, day-of-year. Returns (sunrise, sunset).
 /// Accuracy is ±5 minutes — adequate for theme switching.
-pub fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
+fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
     if !lat.is_finite()
         || !lon.is_finite()
         || lat.abs() > 90.0
@@ -155,14 +164,18 @@ pub fn solar_times(lat: f64, lon: f64, day_of_year: i32) -> Option<(i32, i32)> {
     if hour_angle_deg.is_nan() {
         return None; // polar day/night
     }
-    let day_len_min = 4.0 * hour_angle_deg.to_degrees();
+    // Half-day offset from solar noon, in minutes (NOAA hour angle × 4):
+    // sunrise = noon − offset, sunset = noon + offset.
+    let half_day_min = 4.0 * hour_angle_deg.to_degrees();
     // Solar noon is UTC minutes; Go adds the local zone offset (incl. DST)
     // before use — without it the schedule shifts by the whole timezone.
+    // The offset is sampled once with the CURRENT DST state, so on a DST
+    // transition day the far side of the switch can be off by one hour.
     let solar_noon_utc = 720.0 - 4.0 * lon - eq_time;
     let offset = local_utc_offset_minutes() as f64;
     let solar_noon = solar_noon_utc + offset;
-    let sunrise = solar_noon - day_len_min;
-    let sunset = solar_noon + day_len_min;
+    let sunrise = solar_noon - half_day_min;
+    let sunset = solar_noon + half_day_min;
     // Clamp into the day (Go wrap loops).
     Some((
         (sunrise.round() as i32).rem_euclid(1440),
@@ -232,6 +245,9 @@ pub fn location(ip_enabled: bool) -> (f64, f64, &'static str) {
             return (lat, lon, "theme_location_timezone");
         }
         if state <= 2 {
+            // Northern-hemisphere mid-latitude guess: a UTC offset alone
+            // carries no hemisphere signal, so southern unmapped zones get
+            // inverted seasons here. Users there should enable IP location.
             return (
                 35.0,
                 (local_utc_offset_minutes() as f64 / 4.0).clamp(-180.0, 180.0),
@@ -285,7 +301,7 @@ pub fn solar_window(ip_enabled: bool) -> Option<(i32, i32)> {
     solar_times(lat, lon, day_of_year_now())
 }
 
-pub fn light_window() -> Option<(i32, i32)> {
+fn light_window() -> Option<(i32, i32)> {
     let (mode, light_str, dark_str, ip_enabled) = crate::cfg_map(|c| {
         (
             c.theme_mode.clone(),
@@ -458,27 +474,6 @@ fn apply_preferences(
     Ok(())
 }
 
-fn notify_theme() {
-    unsafe {
-        let setting = wide("ImmersiveColorSet");
-        let _ = SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            WPARAM(0),
-            LPARAM(setting.as_ptr() as isize),
-            SMTO_ABORTIFHUNG,
-            1000,
-            None,
-        );
-        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(crate::hwnd(&crate::HIDDEN)),
-            windows::Win32::UI::WindowsAndMessaging::WM_THEMECHANGED,
-            WPARAM(0),
-            LPARAM(0),
-        );
-    }
-}
-
 /// Poll target: applies the theme and updates our own follow layer.
 fn tick() {
     let generation = crate::theme_recovery::generation();
@@ -488,10 +483,13 @@ fn tick() {
     }
     // Fullscreen / presentation pause, then windowed GPU activity (Go
     // DetectThemeSwitchPause: 4 levels, GPU is the windowed-game check).
-    if crate::cfg_map(|c| c.theme_skip_fullscreen) && crate::display::foreground_is_fullscreen() {
+    // One config read feeds both probes (the GPU probe itself costs a
+    // 2×500ms sampling baseline and must never run twice per tick).
+    let skip_pause = crate::cfg_map(|c| c.theme_skip_fullscreen);
+    if skip_pause && crate::display::foreground_is_fullscreen() {
         return;
     }
-    if crate::cfg_map(|c| c.theme_skip_fullscreen) && crate::gpu_activity::foreground_gpu_active() {
+    if skip_pause && crate::gpu_activity::foreground_gpu_active() {
         crate::log_line("theme engine: paused by foreground GPU activity");
         return;
     }
@@ -517,7 +515,10 @@ fn tick() {
     });
     let Some(target) = target else { return };
 
-    // Battery-based dark preference (Go contract: battery → dark).
+    // Battery-based dark preference (Go contract: battery → dark). This
+    // deliberately outranks manual overrides and snooze: unplugging is a
+    // strong power-state signal and dark saves panel power. Re-plugging
+    // restores whatever the override/schedule dictates.
     let on_ac = crate::ON_AC.load(Ordering::SeqCst);
     let dark_on_battery = crate::cfg_map(|c| c.theme_dark_on_battery);
     let target = if !on_ac && dark_on_battery {
@@ -543,16 +544,15 @@ fn tick() {
     if crate::cfg_map(|c| c.theme_skip_fullscreen) && crate::display::foreground_is_fullscreen() {
         return;
     }
-    if !matches_target && let Err(error) = apply_windows_theme(target) {
-        crate::log_line(&format!("theme switch failed: {error}"));
-        return;
-    }
     if !matches_target {
+        if let Err(error) = apply_windows_theme(target) {
+            crate::log_line(&format!("theme switch failed: {error}"));
+            return;
+        }
         apply_appearance(target);
         crate::theme_recovery::transition_applied();
     }
     drop(operation);
-    notify_theme();
     // Let the theme-change broadcast settle before recovery finishes, but
     // stay interruptible: a queued manual switch must not wait out the full
     // window. The wake flag itself is consumed by the loop's own wait.
@@ -589,14 +589,7 @@ pub fn spawn() {
                         crate::runtime::lock(&MANUAL_REQUESTS).complete();
                         if let Err(error) = result {
                             *crate::runtime::lock(&MANUAL_ERROR) = Some(error);
-                            unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                                    Some(crate::hwnd(&crate::HIDDEN)),
-                                    crate::WM_REFRESH_UI,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                );
-                            }
+                            crate::request_update_refresh();
                         } else {
                             // Manual switches need the same broadcast set the
                             // scheduled path ends with: without WM_THEMECHANGED
@@ -631,11 +624,14 @@ fn set_manual_override(dark: bool) -> Result<(), String> {
     *crate::runtime::lock(&MANUAL_OVERRIDE) = Some((dark, expiry));
     drop(operation);
     crate::request_theme_refresh();
+    // The deadline is absolute (UTC FILETIME minutes); render the local end
+    // time the same way the snooze subtitle does.
+    let end = ((now.minutes as i64 + (expiry - now.absolute_minutes)).rem_euclid(24 * 60)) as i32;
     crate::log_line(&format!(
         "theme manual override: {} (until {:02}:{:02})",
         if dark { "dark" } else { "light" },
-        (expiry % (24 * 60)) / 60,
-        (expiry % (24 * 60)) % 60
+        end / 60,
+        end % 60
     ));
     Ok(())
 }
@@ -753,7 +749,10 @@ fn apply_appearance(dark: bool) {
 }
 
 /// Wallpaper via SPI_SETDESKWALLPAPER; the file must exist (Windows copies
-/// or converts it into the transcoded wallpaper cache).
+/// or converts it into the transcoded wallpaper cache). Flags stay 0: this
+/// path is the transient day/night linkage, deliberately NOT persisting to
+/// the user's theme ini (the restore path and the Windows default both go
+/// through IDesktopWallpaper, which does persist).
 fn apply_wallpaper(path: &str) -> Result<(), String> {
     if !std::path::Path::new(path).is_file() {
         return Err(format!("wallpaper file not found: {path}"));
@@ -1112,7 +1111,7 @@ fn take_pwstr(pw: windows::core::PWSTR) -> Option<String> {
 
 /// Captures the current wallpaper state. A setup without any per-monitor
 /// image is a solid-color background.
-pub fn snapshot_wallpaper() -> Result<String, String> {
+fn snapshot_wallpaper() -> Result<String, String> {
     let (_apartment, api) = desktop_wallpaper()?;
     unsafe {
         let count = api
@@ -1425,6 +1424,9 @@ pub fn finish_manual_switch() {
     let error = crate::runtime::lock(&MANUAL_ERROR).take();
     if let Some(error) = error {
         crate::log_line(&format!("manual theme switch failed: {error}"));
+        // The body is a raw registry error (open/verify path) surfaced as-is:
+        // translating every Win32 failure string is out of scope for a
+        // should-never-happen path; the log line above carries the detail.
         crate::warn_dialog("", &error);
     }
 }
@@ -1441,6 +1443,11 @@ pub fn repair() {
     if REPAIR_RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // On builds older than Win11 22621 there is no helper-theme round trip
+    // (full_dwm_refresh_available gates it): the repair still runs the lock,
+    // marks recovery, and ends with the five-broadcast tail, which alone
+    // fixes most follow-the-theme glitches. The completion notice therefore
+    // stays the same on those builds — the broadcast set IS the repair.
     crate::theme_recovery::changed();
     if let Err(error) = std::thread::Builder::new()
         .name("theme-repair".into())
@@ -1456,14 +1463,7 @@ pub fn repair() {
                 drop(operation);
                 crate::theme_repair::notify_theme_changed();
                 *crate::runtime::lock(&REPAIR_RESULT) = Some(result);
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                        Some(crate::hwnd(&crate::HIDDEN)),
-                        crate::WM_REFRESH_UI,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
+                crate::request_update_refresh();
             });
             // Free the button whenever the repair thread ends — success or
             // panic. The success path used to reset inside the body; the
@@ -1493,7 +1493,7 @@ pub fn finish_repair() {
     }
 }
 #[cfg(test)]
-mod solar_tests {
+mod theme_engine_tests {
     #[test]
     fn snooze_deadline_reports_only_while_active() {
         // Regression: the branches were once inverted, so an armed snooze

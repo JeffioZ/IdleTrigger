@@ -259,6 +259,22 @@ unsafe fn resize_children(parent: HWND, old: u32, new: u32) {
     }
 }
 
+/// Shared relayout tail after a scale change: re-derive runtime-placed
+/// children, re-read the title-bar icons at the new scale, and force one
+/// full repaint (both the text-scale and the DPI handlers end here).
+unsafe fn finish_rescale(hwnd: HWND) {
+    unsafe {
+        crate::automation_ui::dpi_changed(hwnd);
+        crate::set_window_icons_pub(hwnd);
+        let _ = RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
+        );
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
@@ -298,14 +314,7 @@ unsafe extern "system" fn window_proc(
                 frame.bottom - frame.top,
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
-            crate::automation_ui::dpi_changed(hwnd);
-            crate::set_window_icons_pub(hwnd);
-            let _ = RedrawWindow(
-                Some(hwnd),
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
-            );
+            finish_rescale(hwnd);
             return LRESULT(0);
         }
         if msg == WM_DPICHANGED && lp.0 != 0 {
@@ -331,14 +340,7 @@ unsafe extern "system" fn window_proc(
                 rect.bottom - rect.top,
                 SWP_NOACTIVATE | SWP_NOZORDER,
             );
-            crate::automation_ui::dpi_changed(hwnd);
-            crate::set_window_icons_pub(hwnd);
-            let _ = RedrawWindow(
-                Some(hwnd),
-                None,
-                None,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
-            );
+            finish_rescale(hwnd);
             return LRESULT(0);
         }
         if msg == WM_NCDESTROY {

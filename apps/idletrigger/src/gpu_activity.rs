@@ -45,13 +45,14 @@ pub fn foreground_gpu_active() -> bool {
     }
 }
 
-fn matches_engine(name: &str, pid: u32) -> bool {
-    name.starts_with(&format!("pid_{pid}_"))
-        && (name.ends_with("engtype_3D") || name.ends_with("engtype_Graphics"))
+fn matches_engine(name: &str, prefix: &str) -> bool {
+    name.starts_with(prefix) && (name.ends_with("engtype_3D") || name.ends_with("engtype_Graphics"))
 }
 
 unsafe fn utilization(counter: PDH_HCOUNTER, pid: u32) -> f64 {
     unsafe {
+        // One prefix allocation per pass, not one per counter instance.
+        let prefix = format!("pid_{pid}_");
         let mut size = 0;
         let mut count = 0;
         if PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None)
@@ -95,7 +96,7 @@ unsafe fn utilization(counter: PDH_HCOUNTER, pid: u32) -> f64 {
             let Some(len) = chars.iter().position(|c| *c == 0) else {
                 continue;
             };
-            if matches_engine(&String::from_utf16_lossy(&chars[..len]), pid) {
+            if matches_engine(&String::from_utf16_lossy(&chars[..len]), &prefix) {
                 let value = item.FmtValue.Anonymous.doubleValue;
                 if value.is_finite() && value >= 0.0 {
                     total += value;
@@ -129,17 +130,18 @@ mod tests {
     use super::*;
     #[test]
     fn engine_matches_whole_pid_and_supported_engine() {
+        let prefix = "pid_12_";
         assert!(matches_engine(
             "pid_12_luid_0x0_phys_0_eng_1_engtype_3D",
-            12
+            prefix
         ));
         assert!(!matches_engine(
             "pid_123_luid_0x0_phys_0_eng_1_engtype_3D",
-            12
+            prefix
         ));
         assert!(!matches_engine(
             "pid_12_luid_0x0_phys_0_eng_1_engtype_Copy",
-            12
+            prefix
         ));
     }
 }

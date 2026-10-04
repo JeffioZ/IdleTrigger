@@ -225,6 +225,23 @@ fn with_map<R>(f: impl FnOnce(&mut HashMap<isize, Tracked>) -> R) -> R {
     f(guard.get_or_insert_with(HashMap::new))
 }
 
+/// Whether the point of a mouse message lands in the control's hover/click
+/// column (switch rows: the pill strip). Column 0 means the whole control.
+/// Both hover and click use this so the pill draws, tips, and commits
+/// exactly where it hits.
+fn in_hover_column(key: isize, lparam: LPARAM) -> bool {
+    with_map(|m| match m.get(&key) {
+        Some(t) if t.hover_column > 0 => {
+            // Mouse messages carry client coordinates.
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let mut rect = RECT::default();
+            let known = unsafe { GetClientRect(HWND(key as *mut _), &mut rect).is_ok() };
+            known && x >= rect.right - t.hover_column
+        }
+        _ => true,
+    })
+}
+
 /// Restricts a tracked control's hover state to its right-edge column of
 /// `physical_width` px (switch rows: the pill). Call after `track`.
 pub fn set_hover_column(control: HWND, physical_width: i32) {
@@ -435,18 +452,7 @@ unsafe extern "system" fn tracked_proc(
                 // Column-tracked controls (switch rows) hover only inside
                 // their right-edge pill column; crossing out of it clears
                 // hover, so the pill never keeps a stale hover ring.
-                let in_column = with_map(|m| {
-                    match m.get(&key) {
-                        Some(t) if t.hover_column > 0 => {
-                            // WM_MOUSEMOVE carries client coordinates.
-                            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                            let mut rect = RECT::default();
-                            GetClientRect(hwnd, &mut rect).is_ok()
-                                && x >= rect.right - t.hover_column
-                        }
-                        _ => true,
-                    }
-                });
+                let in_column = in_hover_column(key, lparam);
                 let (changed, paints) = with_map(|m| {
                     let mut changed = false;
                     if let Some(t) = m.get_mut(&key)
@@ -472,14 +478,7 @@ unsafe extern "system" fn tracked_proc(
                 // creates no dead zone - behaviorally the control is only
                 // as wide as its pill. No HTTRANSPARENT routing here (that
                 // re-entered the parent hit-test chain and crashed).
-                let in_column = with_map(|m| match m.get(&key) {
-                    Some(t) if t.hover_column > 0 => {
-                        let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                        let mut rect = RECT::default();
-                        GetClientRect(hwnd, &mut rect).is_ok() && x >= rect.right - t.hover_column
-                    }
-                    _ => true,
-                });
+                let in_column = in_hover_column(key, lparam);
                 if !in_column {
                     let mut pt = windows::Win32::Foundation::POINT {
                         x: (lparam.0 & 0xFFFF) as i16 as i32,

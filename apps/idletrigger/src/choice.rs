@@ -158,14 +158,14 @@ pub fn set_items(button: HWND, items: &[(String, String)]) {
     set_rows(button, &rows);
 }
 
-/// Menu-trigger items: flyout rows for a button whose caption never
-/// changes and never draws the dropdown caret. Rows, caption retention,
-/// and caret suppression commit in ONE registry write with no intermediate
-/// repaint - a split write let the old dropdown look flash for a frame.
-pub fn set_menu_items(button: HWND, items: &[(String, String, bool)]) {
+/// Shared caption-preserving row replacement for action menus: the trigger
+/// keeps its name while the rows commit (the set_rows latch would otherwise
+/// overwrite it). `menu` marks the menu-trigger grammar (no caption follow,
+/// no dropdown caret).
+fn set_action_items(button: HWND, items: &[(String, String, bool)], menu: bool) {
     // set_rows latches the first row's caption while registering (standard
     // dropdown behavior) - capture the caption first and restore it after,
-    // exactly the set_items_danger pattern, so the trigger keeps its name.
+    // so the trigger keeps its name.
     let mut caption = [0u16; 256];
     unsafe {
         GetWindowTextW(button, &mut caption);
@@ -185,38 +185,24 @@ pub fn set_menu_items(button: HWND, items: &[(String, String, bool)]) {
         .and_then(|map| map.get_mut(&(button.0 as isize)))
     {
         data.update_caption = false;
-        data.menu = true;
+        data.menu = menu;
     }
     unsafe {
         let _ = SetWindowTextW(button, PCWSTR(caption.as_ptr()));
     }
 }
 
+/// Menu-trigger items: flyout rows for a button whose caption never
+/// changes and never draws the dropdown caret. Rows, caption retention,
+/// and caret suppression commit in ONE registry write with no intermediate
+/// repaint - a split write let the old dropdown look flash for a frame.
+pub fn set_menu_items(button: HWND, items: &[(String, String, bool)]) {
+    set_action_items(button, items, true);
+}
+
 /// Item list with per-row danger styling (Go quick-actions menu).
 pub fn set_items_danger(button: HWND, items: &[(String, String, bool)]) {
-    let mut caption = [0u16; 256];
-    unsafe {
-        GetWindowTextW(button, &mut caption);
-    }
-    let rows: Vec<ChoiceItem> = items
-        .iter()
-        .map(|(v, l, d)| ChoiceItem {
-            value: v.clone(),
-            label: l.clone(),
-            danger: *d,
-            header: false,
-        })
-        .collect();
-    set_rows(button, &rows);
-    if let Some(data) = choices()
-        .as_mut()
-        .and_then(|map| map.get_mut(&(button.0 as isize)))
-    {
-        data.update_caption = false;
-    }
-    unsafe {
-        let _ = SetWindowTextW(button, PCWSTR(caption.as_ptr()));
-    }
+    set_action_items(button, items, false);
 }
 
 /// Full row model replacement (options + danger + headers).
@@ -885,8 +871,7 @@ unsafe fn scrollbar_pointer(hwnd: HWND, msg: u32, lp: LPARAM) -> bool {
             WM_MOUSEMOVE if drag >= 0 => {
                 let travel = track.bottom - track.top - (thumb.bottom - thumb.top);
                 if travel > 0 {
-                    let next = ((y - drag - track.top).clamp(0, travel) as i64 * max as i64
-                        / travel as i64) as i32;
+                    let next = crate::list_style::drag_position(y - drag, track.top, travel, max);
                     let current = choices()
                         .as_ref()
                         .and_then(|m| m.get(&OPEN_BUTTON.load(Ordering::SeqCst)))

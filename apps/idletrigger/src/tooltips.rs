@@ -70,41 +70,12 @@ pub fn create_for_panel(panel: HWND) {
         // The WS_EX_TOPMOST style from creation keeps the tip above other
         // windows; nothing further to do here.
 
-        // (control id, i18n key) pairs — Go tooltips.go mapping plus the
-        // segmented control, chip strips, and header action links. Status
-        // statics are added after this loop with their live text.
-        let tools = [
-            (crate::IDC_NOSLEEP, "tip_nosleep"),
-            (crate::IDC_IDLE, "tip_idle"),
-            (crate::IDC_NOSLEEP_TIMED_30M, "tip_nosleep_timed_presets"),
-            (crate::IDC_NOSLEEP_TIMED_1H, "tip_nosleep_timed_presets"),
-            (crate::IDC_NOSLEEP_TIMED_2H, "tip_nosleep_timed_presets"),
-            (crate::IDC_NOSLEEP_TIMED_CANCEL, "tip_nosleep_timed_cancel"),
-            (crate::IDC_AUTOMATION, "tip_automation_master"),
-            (crate::IDC_MANAGE_BUTTON, "tip_automation"),
-            (crate::IDC_THEME_ENABLE, "tip_theme"),
-            (crate::IDC_THEME_SWITCH, "tip_theme_switch"),
-            (crate::IDC_THEME_SNOOZE_30M, "tip_theme_snooze_presets"),
-            (crate::IDC_THEME_SNOOZE_1H, "tip_theme_snooze_presets"),
-            (crate::IDC_THEME_SNOOZE_MORNING, "tip_theme_snooze_presets"),
-            (crate::IDC_THEME_SNOOZE_CANCEL, "tip_theme_snooze_cancel"),
-            (crate::IDC_THEME_REPAIR, "tip_theme_repair"),
-            (crate::IDC_SYSTEM_BUTTON, "tip_quick_actions"),
-            (crate::IDC_SETTINGS_BUTTON, "tip_settings"),
-            (crate::IDC_EXIT_BUTTON, "tip_exit"),
-        ];
-        for (id, key) in tools {
-            add_tool(panel, id, &crate::t_pub(key));
-        }
-        // Status lines draw with an end ellipsis; their tooltips carry the
-        // full untruncated text (kept current by refresh_all). Starting
-        // empty keeps the tool dormant until the first refresh fills it.
-        for id in [
-            crate::IDC_POWER_SUMMARY,
-            crate::IDC_AUTOMATION_SUMMARY,
-            crate::IDC_THEME_SCHEDULE,
-        ] {
-            add_tool(panel, id, &crate::status_line_text(id));
+        // (control id, caption source) pairs — Go tooltips.go mapping plus
+        // the segmented control, chip strips, and header action links. ONE
+        // table drives both the initial registration and every per-second
+        // refresh, so the two sites cannot drift apart.
+        for (id, source) in TOOLS {
+            add_tool(panel, id, &source.render());
         }
     }
 }
@@ -160,22 +131,119 @@ pub fn retheme() {
     }
 }
 
-/// A tool's caption source: either a plain i18n key or an already-rendered
-/// string (stateful tooltips compose their text at call time). Replaces the
-/// old `starts_with("tip_")` guesswork.
-enum TipText {
+/// A panel tool's caption source: a plain i18n key, or one of the stateful
+/// tips that compose their text at call time (Go mixing of static keys and
+/// per-render strings). Replaces the old `starts_with("tip_")` guesswork.
+enum TipSource {
     Key(&'static str),
-    Text(String),
+    State(fn() -> String),
 }
 
-impl TipText {
+impl TipSource {
     fn render(self) -> String {
         match self {
-            TipText::Key(key) => crate::t_pub(key),
-            TipText::Text(text) => text,
+            TipSource::Key(key) => crate::t_pub(key),
+            TipSource::State(render) => render(),
         }
     }
 }
+
+fn state_power_tip_on() -> String {
+    state_power_tip(true)
+}
+
+fn state_power_tip_off() -> String {
+    state_power_tip(false)
+}
+
+fn toggle_automation_tip() -> String {
+    toggle_state_tip(crate::IDC_AUTOMATION, "tip_automation_master")
+}
+
+fn toggle_theme_tip() -> String {
+    toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")
+}
+
+// The power summary line is compact on the panel; its tooltip carries the
+// verbose overview. The other status lines draw with an end ellipsis and
+// their tooltips carry the full untruncated live text.
+fn status_power_summary() -> String {
+    crate::power_overview_verbose()
+}
+
+fn status_automation_summary() -> String {
+    crate::status_line_text(crate::IDC_AUTOMATION_SUMMARY)
+}
+
+fn status_theme_schedule() -> String {
+    crate::status_line_text(crate::IDC_THEME_SCHEDULE)
+}
+
+/// Every panel tool: control id plus its caption source. Action buttons
+/// describe what they do; only real toggles carry the enabled/disabled
+/// state line.
+const TOOLS: [(usize, TipSource); 21] = [
+    (
+        crate::IDC_POWER_SUMMARY,
+        TipSource::State(status_power_summary),
+    ),
+    (crate::IDC_NOSLEEP, TipSource::State(state_power_tip_on)),
+    (crate::IDC_IDLE, TipSource::State(state_power_tip_off)),
+    (
+        crate::IDC_AUTOMATION,
+        TipSource::State(toggle_automation_tip),
+    ),
+    (
+        crate::IDC_AUTOMATION_SUMMARY,
+        TipSource::State(status_automation_summary),
+    ),
+    (
+        crate::IDC_SYSTEM_BUTTON,
+        TipSource::Key("tip_quick_actions"),
+    ),
+    (crate::IDC_SETTINGS_BUTTON, TipSource::Key("tip_settings")),
+    (crate::IDC_THEME_ENABLE, TipSource::State(toggle_theme_tip)),
+    (
+        crate::IDC_THEME_SCHEDULE,
+        TipSource::State(status_theme_schedule),
+    ),
+    (crate::IDC_THEME_SWITCH, TipSource::Key("tip_theme_switch")),
+    (crate::IDC_THEME_REPAIR, TipSource::Key("tip_theme_repair")),
+    (crate::IDC_MANAGE_BUTTON, TipSource::Key("tip_automation")),
+    (crate::IDC_EXIT_BUTTON, TipSource::Key("tip_exit")),
+    (
+        crate::IDC_NOSLEEP_TIMED_30M,
+        TipSource::Key("tip_nosleep_timed_presets"),
+    ),
+    (
+        crate::IDC_NOSLEEP_TIMED_1H,
+        TipSource::Key("tip_nosleep_timed_presets"),
+    ),
+    (
+        crate::IDC_NOSLEEP_TIMED_2H,
+        TipSource::Key("tip_nosleep_timed_presets"),
+    ),
+    (
+        crate::IDC_NOSLEEP_TIMED_CANCEL,
+        TipSource::Key("tip_nosleep_timed_cancel"),
+    ),
+    (
+        crate::IDC_THEME_SNOOZE_30M,
+        TipSource::Key("tip_theme_snooze_presets"),
+    ),
+    (
+        crate::IDC_THEME_SNOOZE_1H,
+        TipSource::Key("tip_theme_snooze_presets"),
+    ),
+    (
+        crate::IDC_THEME_SNOOZE_MORNING,
+        TipSource::Key("tip_theme_snooze_presets"),
+    ),
+    (
+        crate::IDC_THEME_SNOOZE_CANCEL,
+        TipSource::Key("tip_theme_snooze_cancel"),
+    ),
+];
 
 /// Updates every tool's text (language change / runtime state change).
 /// Called every second from `refresh_status`, so the final rendered text of
@@ -206,78 +274,11 @@ pub fn refresh_all(panel: HWND) {
                 Some(LPARAM(width)),
             );
         }
-        const TOOL_COUNT: usize = 21;
-        let tools: [(usize, TipText); TOOL_COUNT] = [
-            (
-                crate::IDC_POWER_SUMMARY,
-                TipText::Text(crate::power_overview_verbose()),
-            ),
-            (crate::IDC_NOSLEEP, TipText::Text(state_power_tip(true))),
-            (crate::IDC_IDLE, TipText::Text(state_power_tip(false))),
-            (
-                crate::IDC_AUTOMATION,
-                TipText::Text(toggle_state_tip(
-                    crate::IDC_AUTOMATION,
-                    "tip_automation_master",
-                )),
-            ),
-            (
-                crate::IDC_AUTOMATION_SUMMARY,
-                TipText::Text(crate::status_line_text(crate::IDC_AUTOMATION_SUMMARY)),
-            ),
-            (crate::IDC_SYSTEM_BUTTON, TipText::Key("tip_quick_actions")),
-            (crate::IDC_SETTINGS_BUTTON, TipText::Key("tip_settings")),
-            (
-                crate::IDC_THEME_ENABLE,
-                TipText::Text(toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")),
-            ),
-            (
-                crate::IDC_THEME_SCHEDULE,
-                TipText::Text(crate::status_line_text(crate::IDC_THEME_SCHEDULE)),
-            ),
-            // Action buttons describe what they do; only real toggles carry
-            // the enabled/disabled state line.
-            (crate::IDC_THEME_SWITCH, TipText::Key("tip_theme_switch")),
-            (crate::IDC_THEME_REPAIR, TipText::Key("tip_theme_repair")),
-            (crate::IDC_MANAGE_BUTTON, TipText::Key("tip_automation")),
-            (crate::IDC_EXIT_BUTTON, TipText::Key("tip_exit")),
-            (
-                crate::IDC_NOSLEEP_TIMED_30M,
-                TipText::Key("tip_nosleep_timed_presets"),
-            ),
-            (
-                crate::IDC_NOSLEEP_TIMED_1H,
-                TipText::Key("tip_nosleep_timed_presets"),
-            ),
-            (
-                crate::IDC_NOSLEEP_TIMED_2H,
-                TipText::Key("tip_nosleep_timed_presets"),
-            ),
-            (
-                crate::IDC_NOSLEEP_TIMED_CANCEL,
-                TipText::Key("tip_nosleep_timed_cancel"),
-            ),
-            (
-                crate::IDC_THEME_SNOOZE_30M,
-                TipText::Key("tip_theme_snooze_presets"),
-            ),
-            (
-                crate::IDC_THEME_SNOOZE_1H,
-                TipText::Key("tip_theme_snooze_presets"),
-            ),
-            (
-                crate::IDC_THEME_SNOOZE_MORNING,
-                TipText::Key("tip_theme_snooze_presets"),
-            ),
-            (
-                crate::IDC_THEME_SNOOZE_CANCEL,
-                TipText::Key("tip_theme_snooze_cancel"),
-            ),
-        ];
+        const TOOL_COUNT: usize = TOOLS.len();
         static LAST: std::sync::Mutex<[Option<String>; TOOL_COUNT]> =
             std::sync::Mutex::new([const { None }; TOOL_COUNT]);
         let mut last = crate::runtime::lock(&LAST);
-        for (slot, (id, source)) in tools.into_iter().enumerate() {
+        for (slot, (id, source)) in TOOLS.into_iter().enumerate() {
             let text = source.render();
             if last[slot].as_deref() == Some(text.as_str()) {
                 continue;

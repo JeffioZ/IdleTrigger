@@ -467,11 +467,11 @@ use windows::Win32::Graphics::Gdi::{
     DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
 };
 
-/// Rounded surface with a 1px border; falls back to GDI RoundRect when the
-/// GDI+ path is unavailable (Go DrawSurface).
-pub fn draw_surface(hdc: HDC, bounds: &RECT, background: u32, fill: u32, border: u32, radius: i32) {
-    fill_rect(hdc, bounds, background);
-    let fallback = || unsafe {
+/// GDI fallback rounded shape: a solid fill with a 1px pen border. The
+/// answer when the GDI+ path is unavailable (session start, GDI+ failure);
+/// callers decide whether a dirty partial GDI+ fill must be cleared first.
+fn round_rect_gdi(hdc: HDC, bounds: &RECT, fill: u32, border: u32, radius: i32) {
+    unsafe {
         let brush = CreateSolidBrush(COLORREF(fill));
         let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(border));
         if brush.is_invalid() || pen.is_invalid() {
@@ -498,16 +498,22 @@ pub fn draw_surface(hdc: HDC, bounds: &RECT, background: u32, fill: u32, border:
         SelectObject(hdc, old_brush);
         let _ = DeleteObject(HGDIOBJ(pen.0));
         let _ = DeleteObject(HGDIOBJ(brush.0));
-    };
+    }
+}
+
+/// Rounded surface with a 1px border; falls back to GDI RoundRect when the
+/// GDI+ path is unavailable (Go DrawSurface).
+pub fn draw_surface(hdc: HDC, bounds: &RECT, background: u32, fill: u32, border: u32, radius: i32) {
+    fill_rect(hdc, bounds, background);
     match fill_rounded_rect(hdc, bounds, radius, fill, border) {
         DrawResult::Completed => {}
         // Mid-fill failure may have written partial pixels: clear them, then
         // still draw the GDI fallback like Go instead of leaving a hole.
         DrawResult::MayBeDirty => {
             fill_rect(hdc, bounds, background);
-            fallback();
+            round_rect_gdi(hdc, bounds, fill, border, radius);
         }
-        DrawResult::NotStarted => fallback(),
+        DrawResult::NotStarted => round_rect_gdi(hdc, bounds, fill, border, radius),
     }
 }
 
@@ -542,43 +548,15 @@ pub fn draw_field(
         }
     }
     fill_rect(hdc, bounds, background);
-    let fallback = || unsafe {
-        let brush = CreateSolidBrush(COLORREF(fill));
-        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(border));
-        if brush.is_invalid() || pen.is_invalid() {
-            if !brush.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(brush.0));
-            }
-            if !pen.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(pen.0));
-            }
-            return;
-        }
-        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
-        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-        let _ = RoundRect(
-            hdc,
-            bounds.left,
-            bounds.top,
-            bounds.right,
-            bounds.bottom,
-            (radius * 2).max(2),
-            (radius * 2).max(2),
-        );
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-    };
     match fill_rounded_rect_impl(hdc, bounds, radius, fill, border, exclude) {
         DrawResult::Completed => {}
         // Mid-fill failure may have written partial pixels: clear them, then
         // still draw the GDI fallback like Go instead of leaving a hole.
         DrawResult::MayBeDirty => {
             fill_rect(hdc, bounds, background);
-            fallback();
+            round_rect_gdi(hdc, bounds, fill, border, radius);
         }
-        DrawResult::NotStarted => fallback(),
+        DrawResult::NotStarted => round_rect_gdi(hdc, bounds, fill, border, radius),
     }
 }
 
@@ -714,9 +692,9 @@ pub fn draw_switch(
                 ring,
                 (track_h / 2 - 1).max(1),
             );
-            rounded_shape_gdi_fallback(hdc, &thumb, ink, thumb_radius);
+            round_rect_gdi(hdc, &thumb, ink, ink, thumb_radius);
         }
-        DrawResult::NotStarted => rounded_shape_gdi_fallback(hdc, &thumb, ink, thumb_radius),
+        DrawResult::NotStarted => round_rect_gdi(hdc, &thumb, ink, ink, thumb_radius),
     }
     if state.focused && !state.disabled {
         let grow = sp(2, scale);
@@ -727,39 +705,6 @@ pub fn draw_switch(
             bottom: track.bottom + grow,
         };
         draw_focus_frame(hdc, &frame, p.focus);
-    }
-}
-
-/// GDI fallback that draws ONLY the rounded shape (no square pre-fill —
-/// its corners would poke past the pill track's rounded ends).
-fn rounded_shape_gdi_fallback(hdc: HDC, bounds: &RECT, color: u32, radius: i32) {
-    unsafe {
-        let brush = CreateSolidBrush(COLORREF(color));
-        let pen = CreatePen(PEN_STYLE(PS_SOLID.0), 1, COLORREF(color));
-        if brush.is_invalid() || pen.is_invalid() {
-            if !brush.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(brush.0));
-            }
-            if !pen.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(pen.0));
-            }
-            return;
-        }
-        let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
-        let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-        let _ = RoundRect(
-            hdc,
-            bounds.left,
-            bounds.top,
-            bounds.right,
-            bounds.bottom,
-            (radius * 2).max(2),
-            (radius * 2).max(2),
-        );
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-        let _ = DeleteObject(HGDIOBJ(brush.0));
     }
 }
 
@@ -921,7 +866,15 @@ pub fn draw_button_danger(
         text = p.disabled_text;
     }
     if state.focused && !state.disabled {
-        border = p.danger_focus;
+        // Over the filled danger states the pale danger ink reads (it is
+        // contrast-tested against danger_bg/pressed); at rest on the neutral
+        // surface it would nearly vanish, so the standard focus ink takes
+        // over (WCAG 2.2 focus-appearance — same rule as draw_exit_button).
+        border = if state.hovered || state.pressed {
+            p.danger_focus
+        } else {
+            p.focus
+        };
     }
     draw_surface(hdc, bounds, background, fill, border, radius);
     draw_button_label(hdc, bounds, font, label, text, false, 10, 10);
@@ -1139,7 +1092,13 @@ pub fn draw_menu_option(
         text = p.disabled_text;
     }
     if state.focused && !state.disabled {
-        border = if danger { p.danger_focus } else { p.focus };
+        // Same quiet-danger focus rule as draw_button_danger: the pale
+        // danger ring only reads over the filled hover/press states.
+        border = if danger && (state.hovered || state.pressed) {
+            p.danger_focus
+        } else {
+            p.focus
+        };
     }
     draw_surface(hdc, bounds, background, fill, border, radius);
     let use_font = if selected && !selected_font.is_invalid() {
@@ -1214,12 +1173,11 @@ pub fn draw_text_link(
             &mut text_bounds,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
-        let chars: Vec<u16> = label.encode_utf16().collect();
         let mut size = SIZE::default();
         // The underline appears only on approach: at rest the link reads
         // as colored text (Fluent link grammar).
         if (state.hovered || state.pressed)
-            && GetTextExtentPoint32W(hdc, &chars, &mut size).as_bool()
+            && GetTextExtentPoint32W(hdc, &text, &mut size).as_bool()
         {
             let underline_y = bounds.top + (bounds.bottom - bounds.top + size.cy) / 2;
             let pen = CreatePen(PEN_STYLE(PS_SOLID.0), sp(1, scale).max(1), COLORREF(color));

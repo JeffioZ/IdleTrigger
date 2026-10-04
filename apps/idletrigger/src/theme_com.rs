@@ -22,7 +22,7 @@ unsafe impl Interface for ThemeManager {
     const IID: GUID = GUID::from_u128(0xc1e8c83e_845d_4d95_81db_e283fdffc000);
 }
 #[repr(C)]
-pub struct ThemeManagerVtbl {
+struct ThemeManagerVtbl {
     base: IUnknown_Vtbl,
     init: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
     unused4: [usize; 7],
@@ -114,6 +114,9 @@ impl Session {
     }
     pub fn restore(&self) -> windows::core::Result<()> {
         // Preserve wallpaper, cursor, desktop icons, sounds and screensaver.
+        // select(original_index): the trailing arguments follow Auto Dark
+        // Mode's Select call shape — commit flag 1, the section-ignore
+        // flags, and a zero reserved tail.
         unsafe {
             (self.manager.vtable().select)(
                 self.manager.as_raw(),

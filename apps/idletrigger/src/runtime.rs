@@ -205,7 +205,10 @@ pub(crate) fn save_automation_rules(
             if err == "automation_changed_external" {
                 crate::t_pub(&err)
             } else {
-                err
+                // Structural diagnostics stay in English (distinguishable
+                // from user-facing text), but ride a localized lead-in so
+                // the dialog is not half untranslated.
+                crate::t_args("automation_save_failed", &[&err])
             }
         })
     })

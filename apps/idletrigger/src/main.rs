@@ -552,7 +552,7 @@ fn main() {
             return;
         }
         Err(err) => {
-            warn_dialog("", &t_pub("error_single_instance").replace("%s", &err));
+            warn_dialog("", &crate::t_args("error_single_instance", &[&err]));
             return;
         }
     };
@@ -851,6 +851,12 @@ unsafe extern "system" fn hidden_proc(
                         MB_OK | MB_ICONINFORMATION,
                     );
                 }
+                // Tray-originated check found a newer release: open the same
+                // one-click confirm the panel's update link uses (the panel
+                // itself stays hidden).
+                if selfupdate::take_tray_update_prompt() {
+                    update_prompt_and_begin();
+                }
                 theme_engine::finish_manual_switch();
                 theme_engine::finish_repair();
                 automation::show_save_errors();
@@ -916,25 +922,21 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY => {
+                // Index into system::HOTKEY_IDS so the dispatch cannot drift
+                // from the registration order in system::bindings().
                 let id = wparam.0 as u32;
-                match id {
-                    10 => {
-                        log_line("hotkey: sleep");
-                        execute_system_action("sleep");
-                    }
-                    11 => {
-                        log_line("hotkey: lock");
-                        execute_system_action("lock");
-                    }
-                    12 => {
-                        log_line("hotkey: toggle stay awake");
-                        on_toggle(IDC_NOSLEEP);
-                    }
-                    13 => {
-                        log_line("hotkey: manual theme switch");
-                        theme_engine::manual_switch();
-                    }
-                    _ => {}
+                if id == system::HOTKEY_IDS[0] {
+                    log_line("hotkey: sleep");
+                    execute_system_action("sleep");
+                } else if id == system::HOTKEY_IDS[1] {
+                    log_line("hotkey: lock");
+                    execute_system_action("lock");
+                } else if id == system::HOTKEY_IDS[2] {
+                    log_line("hotkey: toggle stay awake");
+                    on_toggle(IDC_NOSLEEP);
+                } else if id == system::HOTKEY_IDS[3] {
+                    log_line("hotkey: manual theme switch");
+                    theme_engine::manual_switch();
                 }
                 LRESULT(0)
             }
@@ -1156,7 +1158,6 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             id,
             IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION | IDC_THEME_ENABLE
         ) {
-            // Right-aligned pill switches for label-left rows.
             // Right-aligned pill switches for label-left rows.
             let mut state = nativeform::control_state(item.control, item.state);
             state.active = toggle_value(id);
@@ -1543,16 +1544,14 @@ unsafe extern "system" fn panel_proc(
                         if let Ok(id) = choice::value(button).parse::<usize>()
                             && (900..=904).contains(&id)
                         {
-                            execute_system_action(
-                                ["lock", "sleep", "hibernate", "shutdown", "restart"][id - 900],
-                            );
+                            execute_system_action(system::QUICK_MENU_ACTIONS[id - 900]);
                         }
                     } else {
                         show_system_controls_menu(hwnd_);
                     }
                 } else if (900..=904).contains(&code) {
                     // Quick-action rows committed from the choice popup.
-                    let action = ["lock", "sleep", "hibernate", "shutdown", "restart"][code - 900];
+                    let action = system::QUICK_MENU_ACTIONS[code - 900];
                     log_line(&format!("quick action: {action}"));
                     execute_system_action(action);
                 }
@@ -2440,7 +2439,7 @@ fn register_class(
 }
 
 /// Shared resource icons are cached by Windows for each theme and size.
-pub fn set_window_icons(hwnd_: HWND, _instance: windows::Win32::Foundation::HMODULE) {
+pub fn set_window_icons(hwnd_: HWND, instance: windows::Win32::Foundation::HMODULE) {
     use windows::Win32::UI::WindowsAndMessaging::{LR_DEFAULTCOLOR, LoadImageW};
     // Go WindowIcons parity: the title bar uses the theme-specific tray icon
     // mark (resource 3 dark strokes on light captions, 4 light on dark).
@@ -2448,7 +2447,7 @@ pub fn set_window_icons(hwnd_: HWND, _instance: windows::Win32::Foundation::HMOD
     unsafe {
         for (kind, size) in [(0usize, 16), (1, 32)] {
             if let Ok(icon) = LoadImageW(
-                Some(_instance.into()),
+                Some(instance.into()),
                 PCWSTR(resource as *const u16),
                 windows::Win32::UI::WindowsAndMessaging::IMAGE_ICON,
                 scale(size),
@@ -2855,7 +2854,7 @@ fn build_tray_tooltip(
     if enabled_count > 0 {
         lines.push(line(
             "tooltip_automation",
-            t("status_automation_count").replace("%d", &enabled_count.to_string()),
+            crate::t_args("status_automation_count", &[&enabled_count.to_string()]),
         ));
     }
     lines.join("\n")
@@ -3145,10 +3144,12 @@ fn toggle_panel() {
 }
 
 /// Tray menu "Check for Updates": explicit user intent, so it ignores the
-/// auto-check switch and cooldown; shows the panel and answers the outcome.
+/// auto-check switch and cooldown. The panel stays hidden — every outcome
+/// arrives as a standalone dialog (up to date / failure / the one-click
+/// update confirm), and a confirmed download runs headless until the
+/// verified restart (or a failure dialog).
 pub fn tray_check_update() {
-    show_panel();
-    selfupdate::manual_check();
+    selfupdate::manual_check_from_tray();
 }
 
 /// The update action's phase-dependent caption, shared by the panel link and
@@ -3158,7 +3159,7 @@ pub(crate) fn update_action_caption() -> String {
         // Available and Ready share one caption: a single confirm always
         // runs the whole tail (download if needed → apply → restart).
         selfupdate::Phase::Available(version) | selfupdate::Phase::Ready(version) => {
-            t_pub("panel_update_caption").replace("%s", &version)
+            crate::t_args("panel_update_caption", &[&version])
         }
         selfupdate::Phase::Downloading { percent, .. } => {
             t_args("panel_update_downloading", &[&percent.to_string()])
@@ -3698,13 +3699,14 @@ fn refresh_status() {
     let automation = if rule_count == 0 {
         t("automation_overview_empty")
     } else if !automation_on {
-        t("automation_overview_paused").replace("%d", &rule_count.to_string())
+        crate::t_args("automation_overview_paused", &[&rule_count.to_string()])
     } else {
         match automation::next_scheduled() {
-            Some(next) => t("automation_overview_next")
-                .replace("%d", &enabled_count.to_string())
-                .replace("%s", &next),
-            None => t("automation_overview_enabled").replace("%d", &enabled_count.to_string()),
+            Some(next) => crate::t_args(
+                "automation_overview_next",
+                &[&enabled_count.to_string(), &next],
+            ),
+            None => crate::t_args("automation_overview_enabled", &[&enabled_count.to_string()]),
         }
     };
 
@@ -4091,9 +4093,7 @@ fn update_warning_text(seconds: i32) {
         "menu_action_{}",
         crate::runtime::lock(&WARN_ACTION).clone()
     ));
-    let text = t("msg_idle_warning")
-        .replace("%s", &action)
-        .replace("%d", &seconds.to_string());
+    let text = t_args("msg_idle_warning", &[&action, &seconds.to_string()]);
     set_text(&WARN_TEXT, &text);
 }
 
@@ -4173,10 +4173,7 @@ pub fn execute_system_action(action: &str) {
 }
 
 fn try_system_action(action: &str) -> Result<(), String> {
-    if !matches!(
-        action,
-        "lock" | "sleep" | "hibernate" | "shutdown" | "restart" | "screen_off" | "logoff"
-    ) {
+    if !system::SYSTEM_ACTIONS.contains(&action) {
         return Err(format!("unsupported system action: {action}"));
     }
     #[cfg(feature = "devtools")]

@@ -16,7 +16,7 @@ impl I18n {
     /// `lang` must already be resolved to `"en"` or `"zh-CN"`.
     pub fn load(lang: &str) -> I18n {
         let text = if lang == "zh-CN" { ZH_CN } else { EN };
-        let map = parse_flat(text).unwrap_or_default();
+        let (map, _) = parse_flat(text).unwrap_or_default();
         I18n { map }
     }
 
@@ -26,16 +26,21 @@ impl I18n {
     }
 }
 
-fn parse_flat(text: &str) -> Option<HashMap<String, String>> {
+fn parse_flat(text: &str) -> Option<(HashMap<String, String>, usize)> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
     let mut map = HashMap::with_capacity(object.len());
+    let mut non_strings = 0usize;
     for (key, val) in object {
         if let Some(text) = val.as_str() {
             map.insert(key.clone(), text.to_string());
+        } else {
+            // Locale files are flat string maps; anything else would have
+            // its keys silently fall back to the key name at lookup time.
+            non_strings += 1;
         }
     }
-    Some(map)
+    Some((map, non_strings))
 }
 
 /// Substitute the locale's ordered string/integer slots in one pass. Values
@@ -82,8 +87,10 @@ mod tests {
     }
     #[test]
     fn locale_keys_and_placeholder_order_match() {
-        let en = parse_flat(EN).unwrap();
-        let zh = parse_flat(ZH_CN).unwrap();
+        let (en, en_non_strings) = parse_flat(EN).unwrap();
+        let (zh, zh_non_strings) = parse_flat(ZH_CN).unwrap();
+        assert_eq!(en_non_strings, 0, "en.json must be a flat string map");
+        assert_eq!(zh_non_strings, 0, "zh-CN.json must be a flat string map");
         assert_eq!(en.len(), zh.len());
         let placeholders = |text: &str| {
             text.as_bytes()

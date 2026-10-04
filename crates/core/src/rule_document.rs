@@ -92,6 +92,11 @@ fn encoded(rule: &Rule) -> Result<Table, String> {
 
 /// Refuse stale edits, retain invalid untouched entries, and patch only the
 /// fields changed by the user. Unrecognized keys belong to the user.
+///
+/// `proposed` must already be normalized (pass it through `prepare_rules`
+/// first, as the editor does): `base` is compared against the normalized
+/// decode of the document, so raw proposals would read as a permanent
+/// external change.
 pub fn update(document: &mut DocumentMut, base: &[Rule], proposed: &[Rule]) -> Result<(), String> {
     let existing = tables(document)?;
     let (current, existing_issues) = decode(&existing);

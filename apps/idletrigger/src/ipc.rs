@@ -273,11 +273,8 @@ pub fn run_cli(args: &[String]) -> i32 {
             let mut screen = false;
             let mut timed: Option<u64> = None;
             let mut valid = matches!(mode, "on" | "off" | "toggle" | "status");
-            let mut flags = if rest.is_empty() {
-                rest.iter()
-            } else {
-                rest[1..].iter()
-            };
+            // Skip the mode token itself; an empty rest iterates nothing.
+            let mut flags = rest.iter().skip(1);
             while valid && let Some(flag) = flags.next() {
                 match flag.as_str() {
                     "--screen" | "-s" => screen = true,
@@ -340,7 +337,7 @@ pub fn run_cli(args: &[String]) -> i32 {
                         console_println(&crate::t_pub("msg_autostart_enabled"));
                         0
                     } else {
-                        console_println("autostart enable failed");
+                        console_println(&crate::t_pub("cli_autostart_enable_failed"));
                         1
                     }
                 }
@@ -349,16 +346,17 @@ pub fn run_cli(args: &[String]) -> i32 {
                         console_println(&crate::t_pub("msg_autostart_disabled"));
                         0
                     } else {
-                        console_println("autostart disable failed");
+                        console_println(&crate::t_pub("cli_autostart_disable_failed"));
                         1
                     }
                 }
                 "status" => {
-                    console_println(if crate::system::autostart_is_enabled() {
-                        "enabled"
+                    let state = if crate::system::autostart_is_enabled() {
+                        crate::t_pub("cli_autostart_enabled")
                     } else {
-                        "disabled"
-                    });
+                        crate::t_pub("cli_autostart_disabled")
+                    };
+                    console_println(&state);
                     0
                 }
                 _ => {

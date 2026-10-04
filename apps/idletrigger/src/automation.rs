@@ -138,7 +138,23 @@ impl ProcessTracker {
             .map(|t| (t.key(), t))
             .collect();
         self.targets.retain(|key, _| targets.contains_key(key));
-        let snapshot = snapshot?;
+        let Some(snapshot) = snapshot else {
+            // A whole-snapshot failure is not evidence of absence — the same
+            // contract as the per-target uncertain hold. Keep every target's
+            // last known presence so one failed Toolhelp round cannot drop
+            // stay-awake overrides or record scheduled actions as skipped.
+            // Targets never observed yet read as absent (the startup
+            // baseline has not confirmed them).
+            return Some(
+                targets
+                    .keys()
+                    .map(|key| {
+                        let known = self.targets.get(key).and_then(|p| p.known);
+                        (key.clone(), known.unwrap_or(false))
+                    })
+                    .collect(),
+            );
+        };
         let mut observations = BTreeMap::new();
         for (key, target) in targets {
             let entry = self.targets.entry(key.clone()).or_default();
@@ -210,7 +226,8 @@ pub fn reload_rules() {
             )
         }
     };
-    *crate::runtime::lock(&ISSUES) = issues.clone();
+    let issue_count = issues.len();
+    *crate::runtime::lock(&ISSUES) = issues;
     let enabled = crate::cfg_map(|c| c.automation_enabled);
     let mut active = crate::runtime::lock(&ACTIVE_RULES);
     active.retain(|rule| {
@@ -237,7 +254,7 @@ pub fn reload_rules() {
     crate::log_line(&format!(
         "automation rules loaded: {} ({} issues)",
         crate::runtime::lock(&RULES).len(),
-        issues.len()
+        issue_count
     ));
 }
 
@@ -469,8 +486,13 @@ fn publish_overrides(state: auto::EffectiveState) {
 }
 fn request_refresh() {
     unsafe {
+        let hidden = crate::hwnd(&crate::HIDDEN);
+        // Same recipient check as fire_event: a null HWND cannot deliver.
+        if hidden.is_invalid() {
+            return;
+        }
         let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(crate::hwnd(&crate::HIDDEN)),
+            Some(hidden),
             crate::WM_REFRESH_UI,
             windows::Win32::Foundation::WPARAM(0),
             windows::Win32::Foundation::LPARAM(0),
@@ -746,7 +768,8 @@ fn day_matches(rule: &auto::Rule, now: &LocalNow) -> bool {
         auto::TRIGGER_DAILY => true,
         auto::TRIGGER_WEEKLY => rule
             .days
-            .contains(&auto::weekday_key(now.weekday).to_string()),
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(auto::weekday_key(now.weekday))),
         _ => false,
     }
 }
@@ -786,14 +809,6 @@ fn target_present(target: &auto::ProcessTarget, snapshot: &Snapshot) -> Option<b
         auto::MATCH_PATH => snapshot.matches_path(target, query_process_path),
         _ => Some(snapshot.names().contains(&target.executable.to_lowercase())),
     }
-}
-
-fn normalize(path: &str) -> String {
-    let mut cleaned = path.replace('/', "\\").to_lowercase();
-    while cleaned.ends_with('\\') && cleaned.len() > 3 {
-        cleaned.pop();
-    }
-    cleaned
 }
 
 fn evaluate_logic(rule: &auto::Rule, present: &BTreeMap<String, bool>) -> bool {
@@ -844,15 +859,13 @@ impl Snapshot {
             );
             if let Err(err) = &first {
                 let _ = CloseHandle(snapshot);
-                return (err.code()
-                    == windows::core::HRESULT::from_win32(
-                        windows::Win32::Foundation::ERROR_NO_MORE_FILES.0,
-                    ))
-                .then_some(Snapshot {
-                    names,
-                    display,
-                    pids_by_name,
-                });
+                // ERROR_NO_MORE_FILES from the FIRST call is not "zero
+                // processes" (a Windows session always has some); treating it
+                // as an empty snapshot would judge every name target absent
+                // and fire process-exited rules. Any first-call failure is
+                // reported as a failed snapshot, never as an empty one.
+                crate::log_line(&format!("automation: process snapshot failed: {err}"));
+                return None;
             }
             {
                 loop {
@@ -913,9 +926,11 @@ impl Snapshot {
             .filter(|(name, pid)| {
                 *pid != std::process::id()
                     && name.eq_ignore_ascii_case(&target.executable)
-                    && (target.kind != "path"
-                        || query_process_path(*pid)
-                            .is_some_and(|p| normalize(&p) == normalize(&target.path)))
+                    && (target.kind != auto::MATCH_PATH
+                        || query_process_path(*pid).is_some_and(|p| {
+                            auto::normalize_path(&p).to_lowercase()
+                                == auto::normalize_path(&target.path).to_lowercase()
+                        }))
             })
             .count() as u32
     }
@@ -925,7 +940,7 @@ impl Snapshot {
         target: &auto::ProcessTarget,
         resolve: impl Fn(u32) -> Option<String>,
     ) -> Option<bool> {
-        let expected = normalize(&target.path);
+        let expected = auto::normalize_path(&target.path).to_lowercase();
         let mut same_name = false;
         let mut unresolvable = false;
         let mut matched = false;
@@ -936,7 +951,7 @@ impl Snapshot {
             same_name = true;
             match resolve(*pid) {
                 Some(path) => {
-                    if normalize(&path) == expected {
+                    if auto::normalize_path(&path).to_lowercase() == expected {
                         matched = true;
                     }
                 }
@@ -1221,11 +1236,22 @@ executable = "app.exe"
             pids_by_name: vec![],
         };
         let key = rule.processes[0].key();
-        assert!(tracker.observe(&rules(&rule), None, instant).is_none());
+        // A failed whole snapshot still yields observations — the last known
+        // presence per target (absent before the first resolvable scan), so
+        // one failed Toolhelp round cannot drop stay-awake overrides.
+        let failed = tracker
+            .observe(&rules(&rule), None, instant)
+            .expect("failed snapshots fall back to last-known presence");
+        assert!(!failed[&key]);
         let known = tracker
             .observe(&rules(&rule), Some(&snapshot(true)), instant)
             .unwrap();
         assert!(!tracker.edge(&rule, known[&key])); // First successful scan is only a baseline.
+        // A failed snapshot after a confirmed observation holds it.
+        let held = tracker
+            .observe(&rules(&rule), None, instant + Duration::from_secs(1))
+            .expect("failed snapshots fall back to last-known presence");
+        assert!(held[&key]);
         let update = |tracker: &mut ProcessTracker, rule: &auto::Rule, present, seconds| {
             let known = tracker
                 .observe(
@@ -1293,8 +1319,9 @@ executable = "app.exe"
     fn unresolvable_paths_hold_presence_instead_of_exiting() {
         let mut presence = Presence::default();
         let now = std::time::Instant::now();
-        // An uncertain first observation is a conservative absent baseline
-        // (no retroactive process-start event once it resolves).
+        // An uncertain first observation seeds an absent baseline; the next
+        // resolvable scan then reads as a present edge (the target became
+        // observable, which is a legitimate process-start trigger).
         assert!(!presence.update(None, now));
         assert!(presence.update(Some(true), now));
         // Query failures are not evidence of absence: hold past the grace.

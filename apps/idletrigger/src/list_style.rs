@@ -430,23 +430,15 @@ pub unsafe fn lane_pointer(form: HWND, msg: u32, _wp: WPARAM, lp: LPARAM) -> boo
                 let rect = lane_rect(list, form);
                 let inset = px(list, 2);
                 let track_top = rect.top + inset;
-                let travel = (rect.bottom - inset)
+                let track_bottom = rect.bottom - inset;
+                let (total, page, _) = metrics(list);
+                let travel = track_bottom
                     - track_top
-                    - thumb(
-                        metrics(list).0,
-                        metrics(list).1,
-                        0,
-                        (rect.bottom - inset) - track_top,
-                        px(list, 24),
-                    )
-                    .1;
+                    - thumb(total, page, 0, track_bottom - track_top, px(list, 24)).1;
                 if travel > 0 {
-                    let (total, page, _) = metrics(list);
                     scroll_to(
                         list,
-                        ((y - offset - track_top).clamp(0, travel) as i64
-                            * (total - page).max(0) as i64
-                            / travel as i64) as i32,
+                        drag_position(y - offset, track_top, travel, total - page),
                     );
                 }
                 true
@@ -885,6 +877,14 @@ pub fn thumb(total: i32, page: i32, position: i32, height: i32, minimum: i32) ->
     (top, top + size)
 }
 
+/// Thumb-drag position mapping shared by the choice flyout, the lane strip,
+/// and the overlay bar: the pointer offset (already minus the grab offset)
+/// within the track becomes a scroll position, clamped so a drag past either
+/// end stops at that end. `max` is the last scrollable position (total-page).
+pub fn drag_position(pointer: i32, track_top: i32, travel: i32, max: i32) -> i32 {
+    (((pointer - track_top).clamp(0, travel) as i64 * max.max(0) as i64) / travel as i64) as i32
+}
+
 unsafe fn bar_geometry(bar: HWND, list: HWND) -> (RECT, RECT) {
     unsafe {
         let mut track = RECT::default();
@@ -1004,13 +1004,11 @@ unsafe extern "system" fn bar_proc(
                 if let Some(offset) = state.drag.get() {
                     let (track, thumb) = bar_geometry(hwnd, state.list);
                     let travel = track.bottom - track.top - (thumb.bottom - thumb.top);
-                    let (total, page, _) = metrics(state.list);
                     if travel > 0 {
+                        let (total, page, _) = metrics(state.list);
                         scroll_to(
                             state.list,
-                            ((y - offset - track.top).clamp(0, travel) as i64
-                                * (total - page).max(0) as i64
-                                / travel as i64) as i32,
+                            drag_position(y - offset, track.top, travel, total - page),
                         );
                     }
                 }

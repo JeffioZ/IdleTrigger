@@ -15,13 +15,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, GetMenuInfo,
     GetSystemMetrics, HICON, HMENU, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MENUINFO,
     MF_SEPARATOR, MF_STRING, MIM_STYLE, MNS_NOCHECK, PostMessageW, PostQuitMessage,
-    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetMenuInfo, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_LBUTTONUP,
-    WM_NULL, WM_RBUTTONUP,
+    RegisterWindowMessageW, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SetForegroundWindow,
+    SetMenuInfo, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 use windows::core::PCWSTR;
 
 use crate::runtime;
+use crate::wide;
 
 /// Old-style callback contract (the previous tray-icon crate used the same
 /// pre-version-4 form): lParam carries the mouse message, wParam the icon id.
@@ -136,7 +137,7 @@ pub fn set_tooltip(text: &str) -> bool {
 /// the tray tick). Only call on the UI thread.
 pub fn refresh_theme_icon() {
     let dark = crate::theme::is_dark();
-    if dark == THEME_DARK.swap(dark, Ordering::SeqCst) {
+    if dark == THEME_DARK.load(Ordering::SeqCst) {
         return;
     }
     let host = host();
@@ -147,6 +148,10 @@ pub fn refresh_theme_icon() {
         let mut nid = nid_base(host, NIF_ICON);
         nid.hIcon = icon;
         if notify(NIM_MODIFY, &nid) {
+            // Commit the marker only after the swap succeeded: a failed
+            // MODIFY (Explorer restarting) must leave the previous theme
+            // recorded so the next tick retries instead of skipping.
+            THEME_DARK.store(dark, Ordering::SeqCst);
             let old = HICON(ICON.swap(icon.0 as isize, Ordering::SeqCst) as *mut core::ffi::c_void);
             if !old.is_invalid() {
                 unsafe {
@@ -166,7 +171,12 @@ pub fn refresh_theme_icon() {
 pub fn show_context_menu(owner: HWND) {
     unsafe {
         let mut point = POINT::default();
-        let _ = GetCursorPos(&mut point);
+        if GetCursorPos(&mut point).is_err() {
+            // No cursor position (rare): fall back to the primary screen
+            // center instead of popping the menu at (0, 0).
+            point.x = GetSystemMetrics(SM_CXSCREEN) / 2;
+            point.y = GetSystemMetrics(SM_CYSCREEN) / 2;
+        }
         let Some(menu) = build_menu() else {
             return;
         };
@@ -178,22 +188,16 @@ fn host() -> HWND {
     HWND(HOST.load(Ordering::SeqCst) as *mut core::ffi::c_void)
 }
 
-/// Builds the tray menu: Open / separator / Exit. Created fresh at popup
-/// time so labels track the active language and DPI.
+/// Builds the tray menu: Open / Check for updates / separator / Exit.
+/// Created fresh at popup time so labels track the active language and DPI.
 fn build_menu() -> Option<HMENU> {
     let menu = unsafe { CreatePopupMenu() }.unwrap_or_default();
     if menu.is_invalid() {
         return None;
     }
-    let open: Vec<u16> = crate::t("menu_open_panel")
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let check: Vec<u16> = crate::t("menu_check_updates")
-        .encode_utf16()
-        .chain([0])
-        .collect();
-    let exit: Vec<u16> = crate::t("menu_exit").encode_utf16().chain([0]).collect();
+    let open = wide(&crate::t("menu_open_panel"));
+    let check = wide(&crate::t("menu_check_updates"));
+    let exit = wide(&crate::t("menu_exit"));
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN_PANEL, PCWSTR(open.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, PCWSTR(check.as_ptr()));
@@ -298,7 +302,13 @@ fn notify(cmd: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE, nid: &NOTIFYICOND
 /// semantics: i686 packs NOTIFYICONDATAW, so field references must not form.
 fn make_tip(text: &str) -> [u16; 128] {
     let mut tip = [0u16; 128];
-    for (slot, unit) in tip.iter_mut().zip(text.encode_utf16().take(127)) {
+    let mut units: Vec<u16> = text.encode_utf16().take(127).collect();
+    // Never cut inside a surrogate pair: a lone high surrogate at the end
+    // renders as one broken glyph.
+    if units.last().is_some_and(|u| (0xD800..0xDC00).contains(u)) {
+        units.pop();
+    }
+    for (slot, unit) in tip.iter_mut().zip(units) {
         *slot = unit;
     }
     tip
@@ -308,7 +318,7 @@ fn register_taskbar_created() {
     if TASKBAR_CREATED.load(Ordering::SeqCst) != 0 {
         return;
     }
-    let name: Vec<u16> = "TaskbarCreated".encode_utf16().chain([0]).collect();
+    let name = wide("TaskbarCreated");
     let message = unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) };
     TASKBAR_CREATED.store(message, Ordering::SeqCst);
 }

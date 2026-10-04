@@ -1,11 +1,35 @@
-//! Global hotkeys: Ctrl+Win+Shift+S sleep, Win+Shift+L lock,
-//! Win+Shift+N toggle Stay Awake, Win+Shift+D manual day/night switch.
+//! System integration: global hotkeys (Ctrl+Win+Shift+S sleep,
+//! Win+Shift+L lock, Win+Shift+N toggle Stay Awake, Win+Shift+D manual
+//! day/night switch), the autostart registration and its startup repair,
+//! and the cached Windows build number.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
 
 pub const HOTKEY_IDS: [u32; 4] = [10, 11, 12, 13];
+
+/// The built-in system actions this binary can execute (the whitelist
+/// behind `main::try_system_action`).
+pub const SYSTEM_ACTIONS: [&str; 7] = [
+    idletrigger_core::automation::ACTION_LOCK,
+    idletrigger_core::automation::ACTION_SLEEP,
+    idletrigger_core::automation::ACTION_HIBERNATE,
+    idletrigger_core::automation::ACTION_SHUTDOWN,
+    idletrigger_core::automation::ACTION_RESTART,
+    idletrigger_core::automation::ACTION_SCREEN_OFF,
+    idletrigger_core::automation::ACTION_LOGOFF,
+];
+
+/// Quick-menu row order (the panel's system-actions flyout). The choice
+/// rows carry indices 900+i, so this table is the id → action mapping.
+pub const QUICK_MENU_ACTIONS: [&str; 5] = [
+    idletrigger_core::automation::ACTION_LOCK,
+    idletrigger_core::automation::ACTION_SLEEP,
+    idletrigger_core::automation::ACTION_HIBERNATE,
+    idletrigger_core::automation::ACTION_SHUTDOWN,
+    idletrigger_core::automation::ACTION_RESTART,
+];
 
 struct Binding {
     vk: u16,
@@ -129,46 +153,58 @@ pub fn autostart_ensure_current() -> Result<(), String> {
             return Err(format!("open autostart: {}", opened.0));
         }
         let result = (|| {
-            let mut size = 0;
-            let name = wide(VALUE_NAME);
-            let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-            let status = RegQueryValueExW(
-                key,
-                PCWSTR(name.as_ptr()),
-                None,
-                Some(&mut kind),
-                None,
-                Some(&mut size),
-            );
-            if status == ERROR_FILE_NOT_FOUND {
+            // Ok(None) = not registered (autostart is off; nothing to do).
+            // Ok(Some(value)) = the stored command; a corrupt value (wrong
+            // type, oversized, unreadable, or not valid UTF-16) reads as an
+            // empty string, which can never equal the expected command and
+            // is therefore rewritten below instead of erroring forever.
+            let read_current = || -> Result<Option<String>, String> {
+                let mut size = 0;
+                let name = wide(VALUE_NAME);
+                let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
+                let status = RegQueryValueExW(
+                    key,
+                    PCWSTR(name.as_ptr()),
+                    None,
+                    Some(&mut kind),
+                    None,
+                    Some(&mut size),
+                );
+                if status == ERROR_FILE_NOT_FOUND {
+                    return Ok(None);
+                }
+                if status != ERROR_SUCCESS || kind != REG_SZ || size > 128 * 1024 {
+                    crate::log_line("autostart registration is damaged; rewriting it");
+                    return Ok(Some(String::new()));
+                }
+                let mut data = vec![0u8; size as usize];
+                let status = RegQueryValueExW(
+                    key,
+                    PCWSTR(name.as_ptr()),
+                    None,
+                    None,
+                    Some(data.as_mut_ptr()),
+                    Some(&mut size),
+                );
+                if status != ERROR_SUCCESS || !size.is_multiple_of(2) {
+                    crate::log_line("autostart registration is unreadable; rewriting it");
+                    return Ok(Some(String::new()));
+                }
+                data.truncate(size as usize);
+                Ok(Some(String::from_utf16_lossy(
+                    &data
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                        .take_while(|c| *c != 0)
+                        .collect::<Vec<_>>(),
+                )))
+            };
+            // Not registered: the user turned autostart off — leave it off.
+            let Some(current) = read_current()? else {
                 return Ok(());
-            }
-            if status != ERROR_SUCCESS || kind != REG_SZ || size > 128 * 1024 {
-                return Err("invalid autostart registration".into());
-            }
-            let mut data = vec![0u8; size as usize];
-            let status = RegQueryValueExW(
-                key,
-                PCWSTR(name.as_ptr()),
-                None,
-                None,
-                Some(data.as_mut_ptr()),
-                Some(&mut size),
-            );
-            if status != ERROR_SUCCESS || !size.is_multiple_of(2) {
-                return Err("could not read autostart registration".into());
-            }
-            data.truncate(size as usize);
-            let current = String::from_utf16(
-                &data
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                    .take_while(|c| *c != 0)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|e| e.to_string())?;
+            };
             let path = std::env::current_exe()
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()

@@ -500,17 +500,20 @@ fn allow_dark_for_window(hwnd: HWND, allow: bool) {
     }
 }
 
+/// uxtheme ordinal 135 (SetPreferredAppMode). Resolved once per process.
+fn preferred_app_mode() -> Option<unsafe extern "system" fn(i32) -> i32> {
+    static FN: OnceLock<Option<unsafe extern "system" fn(i32) -> i32>> = OnceLock::new();
+    *FN.get_or_init(|| unsafe {
+        let uxtheme = uxtheme()?;
+        get_proc_by_ordinal(uxtheme, 135).map(|p| std::mem::transmute(p))
+    })
+}
+
 /// uxtheme ordinal 135 (SetPreferredAppMode, 1 = AllowDark) — process-wide
 /// opt-in without which DarkMode_Explorer control classes stay light.
 fn set_preferred_app_mode_allow_dark() {
-    type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
-    static FN: OnceLock<Option<SetPreferredAppMode>> = OnceLock::new();
     static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let func = *FN.get_or_init(|| unsafe {
-        let uxtheme = uxtheme()?;
-        get_proc_by_ordinal(uxtheme, 135).map(|p| std::mem::transmute(p))
-    });
-    if let Some(func) = func
+    if let Some(func) = preferred_app_mode()
         && !CALLED.swap(true, Ordering::SeqCst)
     {
         let _ = unsafe { func(1) };
@@ -561,13 +564,7 @@ pub fn set_process_menu_theme(dark: bool) {
 /// ForceLight=3 when light) — popup menus need the exact mode, not just
 /// permission.
 fn set_preferred_app_mode_for(dark: bool) {
-    type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
-    static FN: OnceLock<Option<SetPreferredAppMode>> = OnceLock::new();
-    let func = *FN.get_or_init(|| unsafe {
-        let uxtheme = uxtheme()?;
-        get_proc_by_ordinal(uxtheme, 135).map(|p| std::mem::transmute(p))
-    });
-    if let Some(func) = func {
+    if let Some(func) = preferred_app_mode() {
         // Go forcedThemePreference: ForceDark=2 when dark, ForceLight=3 when
         // light (AllowDark=1 alone does not repaint existing menus).
         let mode = if crate::system::windows_build() < 18362 {

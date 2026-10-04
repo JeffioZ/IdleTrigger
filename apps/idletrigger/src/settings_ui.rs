@@ -149,12 +149,12 @@ const ROW_W: i32 = ROW_RIGHT - ROW_X; // 444
 const CARD_BASE: i32 = 620;
 
 const IDLE_ACTIONS: [&str; 6] = [
-    "lock",
-    "sleep",
-    "hibernate",
-    "shutdown",
-    "restart",
-    "screen_off",
+    idletrigger_core::automation::ACTION_LOCK,
+    idletrigger_core::automation::ACTION_SLEEP,
+    idletrigger_core::automation::ACTION_HIBERNATE,
+    idletrigger_core::automation::ACTION_SHUTDOWN,
+    idletrigger_core::automation::ACTION_RESTART,
+    idletrigger_core::automation::ACTION_SCREEN_OFF,
 ];
 const LANG_VALUES: [&str; 3] = ["auto", "en", "zh-CN"];
 const PROJECT_URL: &str = "https://github.com/JeffioZ/IdleTrigger";
@@ -473,7 +473,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         label(
             hwnd,
             ID_VERSION,
-            &t_pub("settings_version").replace("%s", crate::APP_VERSION),
+            &crate::t_args("settings_version", &[crate::APP_VERSION]),
             font,
             (484, 18, 168, 22),
             true,
@@ -1189,40 +1189,33 @@ unsafe fn sits_on_card(hwnd: HWND, child: HWND) -> bool {
     }
 }
 
-/// Invalidates one field's well on its hosting card. Scoped, never the
-/// whole card: a full-card repaint paints over the shared window surface
-/// and erases the pixels of every sibling sitting on the card.
-unsafe fn invalidate_well(hwnd: HWND, edit_id: i32) {
+/// Back color + erase brush for a child control: the card-face brush when
+/// the child sits inside a section card, the window background otherwise.
+/// Shared by every WM_CTLCOLOR* arm.
+unsafe fn child_back_brush(hwnd: HWND, child: HWND) -> (u32, isize) {
     unsafe {
-        let card = match edit_id {
-            ID_BATTERY_THRESH => CARD_BASE,
-            ID_IDLE_TIMEOUT | ID_WARNING_SECONDS => CARD_BASE + 1,
-            ID_LIGHT_TIME | ID_DARK_TIME => CARD_BASE + 2,
-            _ => return,
-        };
-        let card = get(hwnd, card);
-        let edit = get(hwnd, edit_id);
-        if card.is_invalid() || edit.is_invalid() {
-            return;
-        }
-        let mut edit_rect = RECT::default();
-        let mut card_rect = RECT::default();
-        if GetWindowRect(edit, &mut edit_rect).is_err()
-            || GetWindowRect(card, &mut card_rect).is_err()
-        {
-            return;
-        }
-        let (side, vertical) = (s(3), s(7));
-        let well = RECT {
-            left: edit_rect.left - card_rect.left - side,
-            top: edit_rect.top - card_rect.top - vertical,
-            right: edit_rect.right - card_rect.left + side,
-            bottom: edit_rect.bottom - card_rect.top + vertical,
-        };
-        if well.right > well.left && well.bottom > well.top {
-            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(card), Some(&well), false);
+        if sits_on_card(hwnd, child) {
+            let (light, dark) = theme::surface_brush_pairs();
+            let pair = if theme::is_dark() { dark } else { light };
+            (theme::palette().surface, pair.0.0 as isize)
+        } else {
+            (theme::bg_color(), theme::bg_brush().0 as isize)
         }
     }
+}
+
+/// Invalidates one field's well on its hosting card. Scoped, never the
+/// whole card: a full-card repaint paints over the shared window surface
+/// and erases the pixels of every sibling sitting on the card. The well
+/// geometry itself lives in nativeform (shared with the editor and picker).
+fn invalidate_well(hwnd: HWND, edit_id: i32) {
+    let card = match edit_id {
+        ID_BATTERY_THRESH => CARD_BASE,
+        ID_IDLE_TIMEOUT | ID_WARNING_SECONDS => CARD_BASE + 1,
+        ID_LIGHT_TIME | ID_DARK_TIME => CARD_BASE + 2,
+        _ => return,
+    };
+    crate::nativeform::invalidate_field_well(get(hwnd, card), get(hwnd, edit_id));
 }
 
 /// Edits hosted on each section card (by card control id): the card paints
@@ -1861,16 +1854,18 @@ fn location_status_text(ip_enabled: bool) -> String {
     if ip_enabled {
         let key = match crate::iplocate::status() {
             crate::iplocate::Status::Resolved(label) => {
-                return t_pub("settings_location_ip_resolved").replace("%s", &label);
+                return crate::t_args("settings_location_ip_resolved", &[&label]);
             }
             crate::iplocate::Status::Querying => "settings_location_ip_pending",
             crate::iplocate::Status::Failed => "settings_location_ip_failed",
             crate::iplocate::Status::NotRequested => "settings_location_ip_not_requested",
         };
-        return t_pub(key).replace("%s", &t_pub(crate::theme_engine::location(false).2));
+        return crate::t_args(key, &[&t_pub(crate::theme_engine::location(false).2)]);
     }
-    t_pub("settings_location_auto_status")
-        .replace("%s", &t_pub(crate::theme_engine::location(false).2))
+    crate::t_args(
+        "settings_location_auto_status",
+        &[&t_pub(crate::theme_engine::location(false).2)],
+    )
 }
 
 /// Preview the selected source without saving the settings draft.
@@ -2157,7 +2152,7 @@ fn validate_draft(draft: &Draft) -> Option<(i32, i32, &'static str)> {
         _ => return Some((0, ID_BATTERY_THRESH, "settings_error_battery_threshold")),
     }
     match draft.idle_timeout {
-        Some(v) if (1..=7 * 24 * 60).contains(&v) => {}
+        Some(v) if (1..=idletrigger_core::automation::MAX_IDLE_MINUTES).contains(&v) => {}
         _ => return Some((0, ID_IDLE_TIMEOUT, "settings_error_idle_timeout")),
     }
     match draft.warning {
@@ -2174,6 +2169,11 @@ fn validate_draft(draft: &Draft) -> Option<(i32, i32, &'static str)> {
         }
         if !valid_time(&draft.dark_time) {
             return Some((1, ID_DARK_TIME, "settings_error_dark_time"));
+        }
+        // Equal boundaries make the light window empty — the schedule would
+        // read as dark all day while the configuration still looks valid.
+        if draft.light_time == draft.dark_time {
+            return Some((1, ID_DARK_TIME, "settings_error_same_time"));
         }
     }
     None
@@ -2427,7 +2427,7 @@ fn save() {
             set_text(
                 hwnd,
                 ID_VALIDATION,
-                &t_pub("settings_system_apply_failed").replace("%s", &details),
+                &crate::t_args("settings_system_apply_failed", &[&details]),
             );
             return;
         }
@@ -2619,15 +2619,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 // The erase BRUSH must match the card-face field wells
                 // (draw_field inset): the brush does the actual erasing,
                 // a surface brush here painted a white band over the well.
-                let (fill, color, brush) = if disabled {
-                    let (light, dark) = theme::surface_brush_pairs();
-                    let pair = if theme::is_dark() { dark } else { light };
-                    (p.disabled_surface, p.disabled_text, pair.1)
+                let (fill, color) = if disabled {
+                    (p.disabled_surface, p.disabled_text)
                 } else {
-                    let (light, dark) = theme::surface_brush_pairs();
-                    let pair = if theme::is_dark() { dark } else { light };
-                    (p.surface, p.text, pair.0)
+                    (p.surface, p.text)
                 };
+                let (light, dark) = theme::surface_brush_pairs();
+                let pair = if theme::is_dark() { dark } else { light };
+                let brush = if disabled { pair.1 } else { pair.0 };
                 let _ = windows::Win32::Graphics::Gdi::SetTextColor(
                     hdc,
                     windows::Win32::Foundation::COLORREF(color),
@@ -2707,19 +2706,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         hdc,
                         windows::Win32::Foundation::COLORREF(text),
                     );
-                    let on_card = sits_on_card(hwnd, child_hwnd);
-                    let (light, dark) = theme::surface_brush_pairs();
-                    let card_pair = if theme::is_dark() { dark } else { light };
-                    let (bk, brush) = if on_card {
-                        (palette.surface, card_pair.0.0)
-                    } else {
-                        (theme::bg_color(), theme::bg_brush().0)
-                    };
+                    let (bk, brush) = child_back_brush(hwnd, child_hwnd);
                     let _ = windows::Win32::Graphics::Gdi::SetBkColor(
                         hdc,
                         windows::Win32::Foundation::COLORREF(bk),
                     );
-                    return LRESULT(brush as isize);
+                    return LRESULT(brush);
                 }
                 let validation = get(hwnd, ID_VALIDATION);
                 let is_error = child_hwnd == validation
@@ -2735,19 +2727,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     hdc,
                     windows::Win32::Foundation::COLORREF(color),
                 );
-                let on_card = sits_on_card(hwnd, child_hwnd);
-                let (light, dark) = theme::surface_brush_pairs();
-                let card_pair = if theme::is_dark() { dark } else { light };
-                let (bk, brush) = if on_card {
-                    (theme::palette().surface, card_pair.0.0)
-                } else {
-                    (theme::bg_color(), theme::bg_brush().0)
-                };
+                let (bk, brush) = child_back_brush(hwnd, child_hwnd);
                 let _ = windows::Win32::Graphics::Gdi::SetBkColor(
                     hdc,
                     windows::Win32::Foundation::COLORREF(bk),
                 );
-                LRESULT(brush as isize)
+                LRESULT(brush)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
                 // Shared blank drag (see nativeform::blank_drag_hit): a
@@ -2824,16 +2809,7 @@ unsafe fn draw_settings_item_impl(
     let p = theme::palette();
     let scale = crate::scale_pub(96);
     let id = item.control_id;
-    let label = unsafe {
-        let len = GetWindowTextLengthW(item.control);
-        if len <= 0 {
-            String::new()
-        } else {
-            let mut buf = vec![0u16; len as usize + 1];
-            let copied = GetWindowTextW(item.control, &mut buf);
-            String::from_utf16_lossy(&buf[..copied.max(0) as usize])
-        }
-    };
+    let label = crate::window_text(item.control);
     if (CARD_BASE..=CARD_BASE + 7).contains(&id) {
         // Section card face: rounded surface with the family hairline,
         // same grammar as the panel's cards.
@@ -2867,13 +2843,7 @@ unsafe fn draw_settings_item_impl(
                 if GetWindowRect(item.control, &mut card_rect).is_err() {
                     continue;
                 }
-                let (side, vertical) = (s(3), s(7));
-                let well = RECT {
-                    left: edit_rect.left - card_rect.left - side,
-                    top: edit_rect.top - card_rect.top - vertical,
-                    right: edit_rect.right - card_rect.left + side,
-                    bottom: edit_rect.bottom - card_rect.top + vertical,
-                };
+                let well = crate::nativeform::field_well_rect(&card_rect, &edit_rect);
                 if well.right <= well.left || well.bottom <= well.top {
                     continue;
                 }
@@ -3224,7 +3194,7 @@ pub fn refresh_language() {
     set_text(
         hwnd,
         ID_VERSION,
-        &t_pub("settings_version").replace("%s", crate::APP_VERSION),
+        &crate::t_args("settings_version", &[crate::APP_VERSION]),
     );
     // The check button's caption is phase-formatted; re-derive it in the
     // new language.
@@ -3319,6 +3289,27 @@ pub fn refresh_language() {
             );
         }
     }
+    // The notifications hint is one line in Chinese and two in English, which
+    // grows the behavior card and moves the preview button (same flow as the
+    // creation site, so the two cannot drift apart).
+    let notif_hint_h = if is_chinese() { 22 } else { 42 };
+    for (id, x, y, w, h) in [
+        (CARD_BASE + 6, CONTENT_X, 294, CARD_W, 92 + notif_hint_h),
+        (ID_NOTIFICATIONS_HINT, ROW_X, 336, ROW_W, notif_hint_h),
+        (ID_LOCK_PREVIEW, ROW_X, 336 + notif_hint_h + 6, 160, BTN_H),
+    ] {
+        unsafe {
+            let _ = SetWindowPos(
+                get(hwnd, id),
+                None,
+                s(x),
+                s(y),
+                s(w),
+                s(h),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
     let project_label = t_pub("settings_project_home_label");
     let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
     let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
@@ -3328,11 +3319,11 @@ pub fn refresh_language() {
         link_x -= 10;
     }
     for (control, x, y, w, h) in [
-        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 308, label_w, 22),
+        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 384, label_w, 22),
         (
             get(hwnd, ID_PROJECT_HOME),
             link_x,
-            308,
+            384,
             url_w.min(CONTENT_RIGHT - link_x),
             22,
         ),

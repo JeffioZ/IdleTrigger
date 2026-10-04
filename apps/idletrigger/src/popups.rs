@@ -868,11 +868,7 @@ pub(crate) fn capture_lock_preview(
     on: bool,
     path: &std::path::Path,
 ) -> std::io::Result<()> {
-    let (symbol, name) = match vk {
-        VK_CAPITAL => (if on { "AA" } else { "aa" }, "Caps Lock"),
-        VK_NUMLOCK => ("123", "Num Lock"),
-        _ => ("\u{2195}", "Scroll Lock"),
-    };
+    let (symbol, name) = lock_key_copy(vk, on);
     let text = format!(
         "{} {}",
         name,
@@ -881,6 +877,17 @@ pub(crate) fn capture_lock_preview(
     render_surface(dpi, crate::theme::is_dark(), on, symbol, &text)
         .ok_or_else(|| std::io::Error::other("card render failed"))?
         .save_preview(path)
+}
+
+/// The layered-card glyph and key name for one lock key (shared by the live
+/// notice and the devtools preview).
+fn lock_key_copy(vk: i32, on: bool) -> (&'static str, &'static str) {
+    match vk {
+        VK_CAPITAL if on => ("AA", "Caps Lock"),
+        VK_CAPITAL => ("aa", "Caps Lock"),
+        VK_NUMLOCK => ("123", "Num Lock"),
+        _ => ("\u{2195}", "Scroll Lock"),
+    }
 }
 
 pub(crate) fn client_area_animations() -> bool {
@@ -991,11 +998,7 @@ pub fn show(vk: i32, on: bool) {
             hide_notice();
             return;
         }
-        let (symbol, name) = match vk {
-            VK_CAPITAL => (if on { "AA" } else { "aa" }, "Caps Lock"),
-            VK_NUMLOCK => ("123", "Num Lock"),
-            _ => ("\u{2195}", "Scroll Lock"),
-        };
+        let (symbol, name) = lock_key_copy(vk, on);
         let text = format!(
             "{} {}",
             name,

@@ -5,6 +5,7 @@
 3. Confirm diagnostic previews, forced themes, and capture behavior are unavailable in the release build. Use a disposable test environment for real system actions and theme repair.
 4. Review changes and version before tagging. Tags follow `vMAJOR.MINOR.PATCH` with optional SemVer prerelease/build metadata. The three core components must each fit 0..65535; the fixed Windows version is `MAJOR.MINOR.PATCH.0`. ProductVersion retains the complete version, including labels and metadata.
 5. The workflow validates, builds and inspects x64/x86 artifacts, calculates checksums, and creates a **draft** release. A prerelease label also sets GitHub's prerelease flag; build metadata alone does not. Review artifacts and write concise English and Chinese notes before publishing.
+6. After the draft is created, the workflow runs the **Verify updater metadata** gate: every `SHA256SUMS.txt` line is cross-checked against the asset digests GitHub computed on upload, and a mismatch fails the release. The in-app self-updater (Settings → Application → Check for updates) treats `SHA256SUMS.txt` as its primary digest source; this gate is its integrity anchor. Do not skip or bypass a failed gate.
 
 1. 执行开发检查、双架构构建，并检查 PE 导入表中的额外运行库依赖。
 2. 验证启动、第二实例、配置保存及重载、任务编辑、进程选择、双主题语言和键盘导航，记录实际测试环境。

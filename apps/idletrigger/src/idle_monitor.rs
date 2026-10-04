@@ -101,7 +101,10 @@ impl Clock {
             show = true;
         }
         Update {
-            cancel: was_warning && (!self.warning || show),
+            // was_warning implies self.warning stayed true this round (the
+            // branch above can only enter from !self.warning), so a plain
+            // "!self.warning" alone detects the cancellation transitions.
+            cancel: was_warning && !self.warning,
             show,
         }
     }

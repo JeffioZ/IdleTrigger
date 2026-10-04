@@ -57,23 +57,9 @@ fn page_size(state: &State, client: &RECT) -> (i32, i32) {
     )
 }
 
-fn scroll_x(hwnd: HWND, position: i32) {
-    let _dpi = crate::dpi::Scope::window(hwnd);
-    unsafe {
-        let Some(state) = state(hwnd) else {
-            return;
-        };
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let page = page_size(state, &client).0;
-        let next = position.clamp(0, (state.width.get() - page).max(0));
-        let delta = state.x.replace(next) - next;
-        move_children(hwnd, state.bar.get(), delta, 0);
-        sync_horizontal(hwnd);
-    }
-}
-
-unsafe fn move_children(hwnd: HWND, horizontal: HWND, dx: i32, dy: i32) {
+/// Moves every child except the horizontal bar and scrollbar lanes by
+/// (dx, dy), then invalidates the form — shared by both scroll axes.
+unsafe fn shift_children(hwnd: HWND, bar: HWND, dx: i32, dy: i32) {
     if dx == 0 && dy == 0 {
         return;
     }
@@ -81,7 +67,7 @@ unsafe fn move_children(hwnd: HWND, horizontal: HWND, dx: i32, dy: i32) {
         let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
         while !child.is_invalid() {
             let next = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
-            if child != horizontal && !crate::list_style::is_scrollbar(child) {
+            if child != bar && !crate::list_style::is_scrollbar(child) {
                 let mut rect = RECT::default();
                 if GetWindowRect(child, &mut rect).is_ok() {
                     let mut origin = POINT {
@@ -106,6 +92,22 @@ unsafe fn move_children(hwnd: HWND, horizontal: HWND, dx: i32, dy: i32) {
     }
 }
 
+fn scroll_x(hwnd: HWND, position: i32) {
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    unsafe {
+        let Some(state) = state(hwnd) else {
+            return;
+        };
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let page = page_size(state, &client).0;
+        let next = position.clamp(0, (state.width.get() - page).max(0));
+        let delta = state.x.replace(next) - next;
+        shift_children(hwnd, state.bar.get(), delta, 0);
+        sync_horizontal(hwnd);
+    }
+}
+
 pub fn scroll_to(hwnd: HWND, position: i32) -> bool {
     unsafe {
         let Some(state) = state(hwnd) else {
@@ -117,31 +119,7 @@ pub fn scroll_to(hwnd: HWND, position: i32) -> bool {
         if delta == 0 {
             return true;
         }
-        let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
-        while !child.is_invalid() {
-            let next = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
-            if child != state.bar.get() && !crate::list_style::is_scrollbar(child) {
-                let mut rect = RECT::default();
-                if GetWindowRect(child, &mut rect).is_ok() {
-                    let mut origin = POINT {
-                        x: rect.left,
-                        y: rect.top,
-                    };
-                    let _ = ScreenToClient(hwnd, &mut origin);
-                    let _ = SetWindowPos(
-                        child,
-                        None,
-                        origin.x,
-                        origin.y + delta,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                    );
-                }
-            }
-            child = next;
-        }
-        let _ = InvalidateRect(Some(hwnd), None, true);
+        shift_children(hwnd, state.bar.get(), 0, delta);
         crate::list_style::refresh(hwnd);
         sync_horizontal(hwnd);
         true

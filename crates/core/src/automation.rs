@@ -13,6 +13,10 @@ pub const DEFAULT_IDLE_MINUTES: i32 = 30;
 /// countdown paths present one consistent default to users.
 pub const DEFAULT_WARNING_SECONDS: i32 = 30;
 pub const MIN_WARNING_SECONDS: i32 = 10;
+/// Upper bound for idle minutes and max-wait minutes: one week. Shared by
+/// the config sanitizer, the automation validator, and the UI validators so
+/// the three cannot drift apart.
+pub const MAX_IDLE_MINUTES: i32 = 7 * 24 * 60;
 pub const MAX_RULES: usize = 64;
 pub const MAX_PROCESSES_PER_RULE: usize = 64;
 
@@ -238,7 +242,7 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(rules.len());
-    let mut seen_ids: BTreeMap<String, ()> = BTreeMap::new();
+    let mut seen_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (index, mut r) in rules.into_iter().enumerate() {
         r.id = r.id.trim().to_string();
         if r.id.is_empty() {
@@ -246,11 +250,11 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         }
         let base = r.id.clone();
         let mut suffix = index + 1;
-        while seen_ids.contains_key(&r.id.to_lowercase()) {
+        while seen_ids.contains(&r.id.to_lowercase()) {
             r.id = format!("{base}-{suffix}");
             suffix += 1;
         }
-        seen_ids.insert(r.id.to_lowercase(), ());
+        seen_ids.insert(r.id.to_lowercase());
         r.name = r.name.trim().to_string();
         if r.name.is_empty() {
             r.name = r.id.clone();
@@ -261,7 +265,7 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         if !matches!(&r.blocked_policy[..], BLOCKED_SKIP | BLOCKED_WAIT) {
             r.blocked_policy = BLOCKED_SKIP.to_string();
         }
-        if r.idle_minutes <= 0 || r.idle_minutes > 7 * 24 * 60 {
+        if r.idle_minutes <= 0 || r.idle_minutes > MAX_IDLE_MINUTES {
             r.idle_minutes = DEFAULT_IDLE_MINUTES;
         }
         if is_event_action(&r.action)
@@ -271,7 +275,7 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         } else if !(0..=3600).contains(&r.warning_seconds) {
             r.warning_seconds = 0;
         }
-        if !(0..=7 * 24 * 60).contains(&r.max_wait_minutes) {
+        if !(0..=MAX_IDLE_MINUTES).contains(&r.max_wait_minutes) {
             r.max_wait_minutes = 0;
         }
         r.days = normalize_days(&r.days);
@@ -303,10 +307,11 @@ pub fn normalize_days(days: &[String]) -> Vec<String> {
     out
 }
 
-fn normalize_path(path: &str) -> String {
-    // Windows path normalization without pulling in a path crate: collapse
-    // slashes and drop trailing separators, matching filepath.Clean closely
-    // enough for stable keys.
+/// Windows path normalization without pulling in a path crate: collapse
+/// slashes and drop trailing separators, matching filepath.Clean closely
+/// enough for stable keys. Case-folding stays with the callers that need
+/// it (see `ProcessTarget::key`).
+pub fn normalize_path(path: &str) -> String {
     let mut cleaned = path.replace('/', "\\");
     while cleaned.ends_with('\\') && cleaned.len() > 3 {
         cleaned.pop();
@@ -458,21 +463,30 @@ fn validate_prepared_rule(raw: &Rule, normalized: &Rule) -> Result<(), String> {
         return Err(format!("invalid blocked_policy {:?}", raw.blocked_policy));
     }
     if raw.idle_minutes < 0
-        || raw.idle_minutes > 7 * 24 * 60
+        || raw.idle_minutes > MAX_IDLE_MINUTES
         || (raw.action == ACTION_ENABLE_IDLE && raw.idle_minutes == 0)
     {
-        return Err("idle_minutes must be between 1 and 10080".into());
+        return Err(format!(
+            "idle_minutes must be between 1 and {MAX_IDLE_MINUTES}"
+        ));
     }
     if raw.warning_seconds < 0
         || raw.warning_seconds > 3600
         || (is_event_action(&raw.action) && raw.warning_seconds < MIN_WARNING_SECONDS)
     {
-        return Err(format!(
-            "warning_seconds must be between {MIN_WARNING_SECONDS} and 3600"
-        ));
+        // State actions may disable the warning entirely (0); only event
+        // actions carry the 10-second minimum, so the message matches the
+        // domain of the action that failed.
+        return Err(if is_event_action(&raw.action) {
+            format!("warning_seconds must be between {MIN_WARNING_SECONDS} and 3600")
+        } else {
+            "warning_seconds must be between 0 and 3600".into()
+        });
     }
-    if !(0..=7 * 24 * 60).contains(&raw.max_wait_minutes) {
-        return Err("max_wait_minutes must be between 0 and 10080".into());
+    if !(0..=MAX_IDLE_MINUTES).contains(&raw.max_wait_minutes) {
+        return Err(format!(
+            "max_wait_minutes must be between 0 and {MAX_IDLE_MINUTES}"
+        ));
     }
     if raw.battery_level < 0 || raw.battery_level > 100 {
         return Err("battery_level must be between 0 and 100".into());
@@ -487,19 +501,20 @@ fn validate_prepared_rule(raw: &Rule, normalized: &Rule) -> Result<(), String> {
         && raw.blocked_policy == BLOCKED_WAIT
         && raw.max_wait_minutes == 0
     {
-        return Err("max_wait_minutes must be between 1 and 10080 when waiting".into());
+        return Err(format!(
+            "max_wait_minutes must be between 1 and {MAX_IDLE_MINUTES} when waiting"
+        ));
     }
     if raw.processes.len() > MAX_PROCESSES_PER_RULE {
         return Err(format!(
             "may contain at most {MAX_PROCESSES_PER_RULE} process targets"
         ));
     }
-    if raw.days.iter().any(|d| {
-        !matches!(
-            d.trim().to_lowercase().as_str(),
-            "sun" | "mon" | "tue" | "wed" | "thu" | "fri" | "sat"
-        )
-    }) {
+    if raw
+        .days
+        .iter()
+        .any(|d| !ALL_DAYS.contains(&d.trim().to_lowercase().as_str()))
+    {
         return Err("contains an invalid weekday".into());
     }
     for target in &raw.processes {
