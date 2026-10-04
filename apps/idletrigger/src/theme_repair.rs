@@ -271,7 +271,9 @@ fn current_accent_color() -> Option<u32> {
         );
     }
     if let Some(v) = read_registry_dword("Software\\Microsoft\\Windows\\DWM", "ColorizationColor") {
-        return Some(0xFF00_0000 | (v & 0x00FF_FFFF));
+        // Registry layout is 0xAABBGGRR; shuffle to the ARGB the theme file
+        // wants (the AccentPalette path above does the same by channel).
+        return Some(0xFF00_0000 | (v & 0xFF) << 16 | (v & 0xFF00) | (v & 0xFF_0000) >> 16);
     }
     None
 }

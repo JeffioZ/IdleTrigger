@@ -1,7 +1,8 @@
-//! Named-pipe IPC server and CLI client:
-//! tray commands (`nosleep`, `monitor`, `status`, `config:reload`) are
-//! forwarded to the running instance; direct actions (`sleep`, `lock`,
-//! `autostart`, `version`) run in-process.
+//! Named-pipe IPC server and CLI client: tray-state commands (`nosleep`,
+//! `monitor`, `status`, `config:reload`) are forwarded to the running
+//! instance; the direct system actions (`sleep`, `hibernate`, `shutdown`,
+//! `restart`, `lock`, `logoff`, `screen off`), `autostart`, and `version`
+//! run in-process.
 
 use crate::pipe::Pipe;
 use std::sync::atomic::Ordering;
@@ -21,11 +22,14 @@ fn pipe_name() -> Option<String> {
 }
 
 struct Request {
+    id: u64,
     text: String,
     deadline: Instant,
     reply: mpsc::SyncSender<String>,
 }
 static REQUESTS: Mutex<Vec<Request>> = Mutex::new(Vec::new());
+/// Identifies each queued request so a failed post removes only its own.
+static REQUEST_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Window/configuration work belongs to the UI thread. A timed-out queued
 /// request is discarded before it can mutate anything.
@@ -38,7 +42,9 @@ fn dispatch(request: String) -> String {
         return "err: UI is unavailable".into();
     }
     let (sender, receiver) = mpsc::sync_channel(1);
+    let id = REQUEST_SERIAL.fetch_add(1, Ordering::SeqCst);
     crate::runtime::lock(&REQUESTS).push(Request {
+        id,
         text: request,
         deadline: Instant::now() + Duration::from_millis(1500),
         reply: sender,
@@ -52,7 +58,10 @@ fn dispatch(request: String) -> String {
         )
     };
     if posted.is_err() {
-        crate::runtime::lock(&REQUESTS).clear();
+        // Remove only THIS request: clearing the whole queue would discard
+        // requests other threads posted successfully, whose callers would
+        // then time out on an outcome that was never dispatched.
+        crate::runtime::lock(&REQUESTS).retain(|r| r.id != id);
         return "err: UI is unavailable".into();
     }
     receiver
@@ -259,14 +268,8 @@ pub fn run_cli(args: &[String]) -> i32 {
         "shutdown" => direct_action("shutdown"),
         "restart" => direct_action("restart"),
         "lock" => direct_action("lock"),
-        "screen" => {
-            if rest.first().map(String::as_str) == Some("off") {
-                direct_action("screen_off")
-            } else {
-                console_println(&crate::t_pub("cli_usage"));
-                1
-            }
-        }
+        // arguments_valid already guaranteed rest == ["off"].
+        "screen" => direct_action("screen_off"),
         "logoff" => direct_action("logoff"),
         "nosleep" => {
             let mode = rest.first().map(String::as_str).unwrap_or("status");

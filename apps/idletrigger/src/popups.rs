@@ -4,7 +4,7 @@
 #![allow(clippy::manual_dangling_ptr)]
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
 
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
@@ -26,7 +26,6 @@ const TIMER: usize = 7;
 
 static WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static TEXT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
-static SECONDS_LEFT: AtomicI32 = AtomicI32::new(0);
 #[derive(Clone)]
 struct Countdown {
     pending: automation::PendingAction,
@@ -165,7 +164,6 @@ pub fn show_pending() {
         deadline: std::time::Instant::now()
             + std::time::Duration::from_secs(pending.seconds as u64),
     });
-    SECONDS_LEFT.store(pending.seconds, Ordering::SeqCst);
     ACTION_BUSY.store(true, Ordering::SeqCst);
     update_text(&pending, pending.seconds);
     unsafe {
@@ -317,7 +315,6 @@ fn tick() {
     if seconds == 0 {
         execute_now();
     } else {
-        SECONDS_LEFT.store(seconds as i32, Ordering::SeqCst);
         update_text(&current.pending, seconds as i32);
     }
 }
@@ -365,47 +362,54 @@ unsafe extern "system" fn action_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_CANCEL => {
-                close(true);
-                LRESULT(0)
-            }
-            WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_EXECUTE => {
-                execute_now();
-                LRESULT(0)
-            }
-            WM_CLOSE => {
-                close(true);
-                LRESULT(0)
-            }
-            WM_TIMER if wparam.0 == TIMER => {
-                tick();
-                LRESULT(0)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_DRAWITEM => draw_warning_button(lparam),
-            windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
-                erase_theme_bg(hwnd, wparam);
-                LRESULT(1)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLORSTATIC => {
-                paint_static_theme(wparam, lparam);
-                LRESULT(crate::theme::bg_brush().0 as isize)
-            }
-            WM_DESTROY => {
-                // A queued action can own the slot before this window shows
-                // it. Destroying an idle window must not release that slot.
-                if crate::runtime::lock(&CURRENT).take().is_some() {
-                    ACTION_BUSY.store(false, Ordering::SeqCst);
+    crate::guarded_proc(
+        "action-warning",
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        move || unsafe {
+            match msg {
+                WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_CANCEL => {
+                    close(true);
+                    LRESULT(0)
                 }
-                WINDOW.store(0, Ordering::SeqCst);
-                TEXT.store(0, Ordering::SeqCst);
-                crate::ACTION_WARN_HWND.store(0, Ordering::SeqCst);
-                LRESULT(0)
+                WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_EXECUTE => {
+                    execute_now();
+                    LRESULT(0)
+                }
+                WM_CLOSE => {
+                    close(true);
+                    LRESULT(0)
+                }
+                WM_TIMER if wparam.0 == TIMER => {
+                    tick();
+                    LRESULT(0)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_DRAWITEM => draw_warning_button(lparam),
+                windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
+                    erase_theme_bg(hwnd, wparam);
+                    LRESULT(1)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLORSTATIC => {
+                    paint_static_theme(wparam, lparam);
+                    LRESULT(crate::theme::bg_brush().0 as isize)
+                }
+                WM_DESTROY => {
+                    // A queued action can own the slot before this window shows
+                    // it. Destroying an idle window must not release that slot.
+                    if crate::runtime::lock(&CURRENT).take().is_some() {
+                        ACTION_BUSY.store(false, Ordering::SeqCst);
+                    }
+                    WINDOW.store(0, Ordering::SeqCst);
+                    TEXT.store(0, Ordering::SeqCst);
+                    crate::ACTION_WARN_HWND.store(0, Ordering::SeqCst);
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
+        },
+    )
 }
 
 pub fn draw_warning_button(lparam: LPARAM) -> LRESULT {
@@ -1105,7 +1109,7 @@ unsafe extern "system" fn lock_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("lock-notify", hwnd, msg, wparam, lparam, move || unsafe {
         match msg {
             // Never activate, including from active-window tracking.
             windows::Win32::UI::WindowsAndMessaging::WM_MOUSEACTIVATE => LRESULT(3),
@@ -1119,7 +1123,7 @@ unsafe extern "system" fn lock_wnd_proc(
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 /// Polls the three lock keys; posts `WM_LOCK_NOTIFY` on transitions.

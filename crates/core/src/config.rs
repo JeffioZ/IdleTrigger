@@ -182,10 +182,16 @@ pub fn load(path: &Path) -> Loaded {
             },
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => base,
-        Err(err) => Loaded {
-            load_error: Some(format!("read error: {err}")),
-            ..base
-        },
+        Err(err) => {
+            // The file exists but cannot be read (locked, permissions):
+            // keep the parse-failure semantics, not the "no file yet"
+            // template semantics — hot_reload reports the latter as
+            // "configuration file is missing", which would be wrong here.
+            let mut loaded = base;
+            loaded.load_error = Some(format!("read error: {err}"));
+            loaded.created_from_template = false;
+            loaded
+        }
     }
 }
 
@@ -309,16 +315,33 @@ fn read_config(
         theme_dark_wallpaper: as_str(document, "theme_dark_wallpaper", bad_fields)
             .unwrap_or(&defaults.theme_dark_wallpaper)
             .to_string(),
-        theme_wallpapers: document
-            .get("theme_wallpapers")
-            .and_then(toml_edit::Item::as_array)
-            .map(|array| {
-                array
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        // The library rides the same mistyped-field contract as every
+        // other field: a non-array value (or any non-string element) is
+        // recorded in bad_fields so the startup notice names it and one
+        // save rewrites the offender, instead of silently vanishing.
+        theme_wallpapers: match document.get("theme_wallpapers") {
+            Some(toml_edit::Item::Value(toml_edit::Value::Array(array))) => {
+                let mut parsed = Vec::with_capacity(array.len());
+                let mut all_strings = true;
+                for value in array.iter() {
+                    match value.as_str() {
+                        Some(path) => parsed.push(path.to_string()),
+                        None => all_strings = false,
+                    }
+                }
+                if all_strings {
+                    parsed
+                } else {
+                    bad_fields.push("theme_wallpapers".to_string());
+                    defaults.theme_wallpapers.clone()
+                }
+            }
+            Some(_) => {
+                bad_fields.push("theme_wallpapers".to_string());
+                defaults.theme_wallpapers.clone()
+            }
+            None => defaults.theme_wallpapers.clone(),
+        },
         theme_light_cursor_scheme: as_str(document, "theme_light_cursor_scheme", bad_fields)
             .unwrap_or(&defaults.theme_light_cursor_scheme)
             .to_string(),
@@ -462,8 +485,10 @@ fn save_candidate(
         &config.theme_dark_wallpaper,
     );
     {
-        // The library is rewritten as one array; unchanged content keeps the
-        // user's formatting via toml_edit's value comparison.
+        // The library is rewritten as one array. The change check compares
+        // rendered strings, so an unchanged list stored with different
+        // spacing normalizes to our formatting on the next save (a
+        // structural compare would keep the user's spacing verbatim).
         let existing = document
             .get("theme_wallpapers")
             .map(|item| item.to_string())

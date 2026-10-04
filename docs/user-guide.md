@@ -13,12 +13,12 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 ## Power management / 电源管理
 
 - **Stay Awake** prevents automatic system sleep. Display-on is a separate option. Battery restrictions pause the effective state without changing your saved switch. An optional lock pause pauses it while the workstation is locked, resuming the previous state on unlock.
-- **Timed Stay Awake** chips arm a temporary overlay for 30 minutes, 1 hour, or 2 hours without touching the saved switch; it expires automatically, a restart clears it, and any request that turns Stay Awake off drops it. The panel status line and tray tooltip show what is keeping the machine awake — which task rule, or the timed overlay with its remaining time.
+- **Timed Stay Awake** chips arm a temporary overlay for 30 minutes, 1 hour, or 2 hours without touching the saved switch; it expires automatically, a restart clears it, any request that turns Stay Awake off drops it, and clicking the armed chip again (or the cancel link on the status line) ends it early. The panel status line and tray tooltip show what is keeping the machine awake — which task rule, or the timed overlay with its remaining time.
 - **Idle Monitoring** uses Windows keyboard/mouse inactivity and starts a fresh countdown when enabled. Input, cancellation, or a changed action invalidates an existing warning. The warning countdown runs at least 10 seconds and can always cancel the action.
 - Stay Awake takes precedence when both features are requested. The panel shows the effective state after task overrides and pauses.
 - Enhanced monitoring is optional, for periodic resets of the Windows idle counter; ordinary input still resets the timer.
 
-- **保持唤醒**阻止系统自动睡眠；屏幕常亮是单独选项。电池限制暂停实际状态，不改写已保存开关。
+- **保持唤醒**阻止系统自动睡眠；屏幕常亮是单独选项。电池限制暂停实际状态，不改写已保存开关；锁定期间可选暂停，解锁后恢复原状态。
 - **限时保持唤醒**通过面板预设临时保持 30 分钟、1 小时或 2 小时，不改写已保存开关；到期自动恢复，重启后消失，任何关闭保持唤醒的请求都会同时取消限时，再次点击已选预设或状态行的取消链接可提前结束。面板状态行与托盘 tooltip 会说明当前是谁在阻止睡眠——任务规则，或限时及其剩余时间。
 - **空闲监测**读取 Windows 键鼠空闲状态，启用时重新计时。输入、取消或修改动作会使已有提醒失效；提醒倒计时最少 10 秒，且始终可取消本次动作。
 - 两项功能同时收到启用请求时，保持唤醒优先。面板显示合并任务覆盖和暂停条件后的状态。
@@ -59,6 +59,7 @@ Fullscreen/presentation and foreground game activity can pause automatic switchi
 | `IdleTrigger.toml` | Settings and rules / 设置与规则 |
 | `IdleTrigger.state.json` | Occurrence checkpoints / 任务触发记录 |
 | `IdleTrigger.state.json.corrupt-*` | Backup kept when the state file could not be parsed / 状态文件无法解析时保留的备份 |
+| `update/` | Self-update staging (downloaded EXE, checksums, replace script); reclaimed automatically after a successful upgrade / 自更新暂存（下载的程序、校验与替换脚本），升级成功后自动回收 |
 | `IdleTrigger.log`, `IdleTrigger.log.1` | Optional rotating diagnostics / 可选轮转日志 |
 | `IdleTrigger-panic.txt` | Fatal-error details when available / 严重错误详情 |
 

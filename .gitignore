@@ -5,6 +5,14 @@
 # Generated release outputs
 /dist/
 
+# Self-update staging (when a local build updates itself in place)
+/update/
+IdleTrigger.exe.old
+IdleTrigger.exe.new
+
+# Devtools capture output (lands next to the EXE)
+IdleTrigger-*-capture.bmp
+
 # Runtime config and logs generated next to the EXE
 IdleTrigger.toml
 IdleTrigger.toml.bak

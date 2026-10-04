@@ -74,6 +74,13 @@ pub fn remove() {
     let host = HWND(HOST.swap(0, Ordering::SeqCst) as *mut core::ffi::c_void);
     let icon = HICON(ICON.swap(0, Ordering::SeqCst) as *mut core::ffi::c_void);
     if host.is_invalid() {
+        // Still free the icon if the invariant ever breaks: a leaked HICON
+        // is worse than a no-op remove.
+        if !icon.is_invalid() {
+            unsafe {
+                let _ = DestroyIcon(icon);
+            }
+        }
         return;
     }
     let mut nid = nid_base(host, NIF_ICON);

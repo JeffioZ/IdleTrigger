@@ -299,7 +299,17 @@ pub fn handle_capture_timer() -> bool {
             );
         }
         15 => crate::automation_ui::devtools_open_trigger_choice(),
-        16 => crate::choice::close(false),
+        // A step apart from 15 (the popup's first frame lands on its own
+        // timer); shooting the same tick would grab a blank surface.
+        16 => {
+            let popup = crate::choice::open_popup();
+            shoot(
+                popup,
+                out_dir.join("IdleTrigger-choice-popup-capture.bmp"),
+                "choice popup",
+            );
+        }
+        17 => crate::choice::close(false),
         20 => {
             crate::choice::close(false);
             crate::devtools_open_quick_menu();
@@ -322,14 +332,6 @@ pub fn handle_capture_timer() -> bool {
                 popup,
                 out_dir.join("IdleTrigger-quick-menu-hover-capture.bmp"),
                 "system quick menu hover",
-            );
-        }
-        17 => {
-            let popup = crate::choice::open_popup();
-            shoot(
-                popup,
-                out_dir.join("IdleTrigger-choice-popup-capture.bmp"),
-                "choice popup",
             );
         }
         18 => {

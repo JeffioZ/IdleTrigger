@@ -168,28 +168,17 @@ pub(crate) fn manual_check() {
     spawn_check(true);
 }
 
-/// Settings-button check: when the round this starts finds a newer release,
-/// the one-click confirm opens by itself — the user's click already said
-/// "check", so a caption that merely changed to "Update to vX" forces a
-/// second click for no reason. Callers keep ignoring clicks while a check
-/// or download is already running.
+/// Explicit check that wants a dialog answer (the tray menu entry — the
+/// panel stays hidden there — and the settings button): when the round this
+/// starts finds a newer release, the one-click confirm opens by itself,
+/// because the user's click already said "check" and a caption that merely
+/// changed to "Update to vX" would force a second click for no reason. If a
+/// check is already running, the request still latches and that in-flight
+/// round answers it; up-to-date and failure answers arrive via the existing
+/// feedback and error boxes.
 pub(crate) fn manual_check_prompting() {
     PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
     manual_check();
-}
-
-/// Tray-menu "Check for updates": the panel is NOT shown. Every outcome
-/// arrives as a standalone dialog — up to date / failure via the existing
-/// feedback and error boxes, "update available" via the update confirm. If
-/// a check is already running, the request still latches and that in-flight
-/// round answers it.
-pub(crate) fn manual_check_from_tray() {
-    PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
-    if is_busy() {
-        return;
-    }
-    MANUAL_REQUESTED.store(true, Ordering::SeqCst);
-    spawn_check(true);
 }
 
 /// Single spawn site for checks: run_check owns the BUSY gate, so a losing
@@ -523,10 +512,10 @@ fn classify_api_rejection(
 fn describe_api_rejection(status: u16, rejection: &ApiRejection) -> String {
     match rejection {
         ApiRejection::RateLimit { minutes } if *minutes > 0 => {
-            crate::t_pub("update_err_rate_limit").replacen("%d", &minutes.to_string(), 1)
+            crate::t_args("update_err_rate_limit", &[&minutes.to_string()])
         }
         ApiRejection::RetryAfter { minutes } if *minutes > 0 => {
-            crate::t_pub("update_err_secondary_limit").replacen("%d", &minutes.to_string(), 1)
+            crate::t_args("update_err_secondary_limit", &[&minutes.to_string()])
         }
         // The zero-minute guards fall through here too: a reset that already
         // passed reads as a plain rejection with the original status code.
@@ -538,7 +527,7 @@ fn describe_api_rejection(status: u16, rejection: &ApiRejection) -> String {
 }
 
 fn t_http_error(status: u16) -> String {
-    crate::t_pub("update_err_http").replacen("%d", &status.to_string(), 1)
+    crate::t_args("update_err_http", &[&status.to_string()])
 }
 
 fn fetch_api_meta(version: &str) -> Result<ReleaseMeta, String> {

@@ -1,7 +1,6 @@
 # IdleTrigger 配置示例 / Configuration Example
 # 常用设置可直接在应用界面中完成；如需手工维护，复制为 IdleTrigger.toml 并放在 EXE 同目录
 # Common settings are available in the app UI; for manual maintenance, copy this file to IdleTrigger.toml beside the EXE
-# config_template_version = 17
 
 # -- 保持唤醒 / Stay Awake --
 # 手动启用保持唤醒，阻止系统自动睡眠 / Manually keep the system awake and prevent automatic sleep

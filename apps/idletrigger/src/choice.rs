@@ -1065,7 +1065,7 @@ unsafe extern "system" fn popup_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
+    crate::guarded_proc("choice-popup", hwnd, msg, wparam, lparam, move || unsafe {
         let _dpi = crate::dpi::Scope::window(hwnd);
         if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP)
             && scrollbar_pointer(hwnd, msg, lparam)
@@ -1280,7 +1280,7 @@ unsafe extern "system" fn popup_proc(
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-    }
+    })
 }
 
 #[cfg(test)]

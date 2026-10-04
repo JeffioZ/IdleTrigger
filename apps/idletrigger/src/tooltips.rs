@@ -441,6 +441,8 @@ unsafe fn track_position(control: HWND) -> (i32, i32) {
             work = info.rcWork;
         }
         let gap = crate::scale_pub(4);
+        // Pin max at min first: a degenerate work area would otherwise make
+        // clamp panic on min > max (popups.rs keeps the same guard).
         let x = rect.left.clamp(work.left, work.right.max(work.left) - 1);
         let y = (rect.bottom + gap).clamp(work.top, work.bottom.max(work.top) - 1);
         (x, y)

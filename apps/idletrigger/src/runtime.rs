@@ -168,7 +168,7 @@ pub(crate) fn commit_config(
     edit(&mut candidate, &mut doc)?;
     let stay_awake_turned_off = nosleep_was_on && !candidate.nosleep_enabled;
     config::save(&path, &mut doc, &candidate)
-        .map_err(|e| crate::t_pub("msg_config_save_failed").replacen("%s", &e.to_string(), 1))?;
+        .map_err(|e| crate::t_args("msg_config_save_failed", &[&e.to_string()]))?;
     *lock(&CONFIG_SOURCE) = Some(doc.to_string());
     *lock(&CONFIG) = Some(candidate);
     *lock(&CONFIG_DOC) = Some(doc);

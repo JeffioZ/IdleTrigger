@@ -830,7 +830,6 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             false,
         );
 
-        // Application page.
         // Application page. The auto-check switch and the manual check
         // button ride the general card (same one-click flow as the panel
         // link); the about block closes the page.
@@ -3077,7 +3076,7 @@ fn report_restore_result(hwnd: HWND, sides: crate::theme_engine::RestoreSides) {
     } else {
         set_validation(
             hwnd,
-            &t_pub("settings_restore_failed").replacen("%s", &errors.join("; "), 1),
+            &crate::t_args("settings_restore_failed", &[&errors.join("; ")]),
             true,
         );
     }

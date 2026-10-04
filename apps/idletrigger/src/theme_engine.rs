@@ -190,10 +190,11 @@ fn local_utc_offset_minutes() -> i32 {
     unsafe {
         let mut tzi = TIME_ZONE_INFORMATION::default();
         let state = GetTimeZoneInformation(&mut tzi);
+        use windows::Win32::System::SystemServices::TIME_ZONE_ID_STANDARD;
         let bias = tzi.Bias
             + if state == TIME_ZONE_ID_DAYLIGHT {
                 tzi.DaylightBias
-            } else if state == 1 {
+            } else if state == TIME_ZONE_ID_STANDARD {
                 tzi.StandardBias
             } else {
                 0

@@ -588,10 +588,7 @@ fn main() {
         // Field-level type mistakes keep the document parseable; one save
         // rewrites the offenders, so this must not lock committing.
         log_line(&format!("config fields reset to defaults: {fields}"));
-        warn_dialog(
-            "",
-            &t_pub("warning_config_fields").replacen("%s", fields, 1),
-        );
+        warn_dialog("", &t_args("warning_config_fields", &[fields]));
     }
 
     if startup_delay > 0 {
@@ -993,7 +990,7 @@ pub(crate) fn power_overview_verbose() -> String {
 /// "system" ABI aborts the process before anything else could react, so
 /// each proc catches its own body here, logs, and degrades to
 /// DefWindowProcW instead of taking the tray down silently.
-fn guarded_proc(
+pub(crate) fn guarded_proc(
     name: &str,
     hwnd: HWND,
     msg: u32,
@@ -3148,7 +3145,7 @@ fn toggle_panel() {
 /// update confirm), and a confirmed download runs headless until the
 /// verified restart (or a failure dialog).
 pub fn tray_check_update() {
-    selfupdate::manual_check_from_tray();
+    selfupdate::manual_check_prompting();
 }
 
 /// The update action's phase-dependent caption, shared by the panel link and
@@ -3335,7 +3332,7 @@ pub fn update_prompt_and_begin() {
     let Some(version) = selfupdate::pending_update_version() else {
         return;
     };
-    let body = t_pub("update_confirm_body").replacen("%s", &version, 1);
+    let body = t_args("update_confirm_body", &[&version]);
     use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO};
     let owner = active_modal_window().unwrap_or_else(|| hwnd(&PANEL));
     let choice = unsafe {
@@ -3806,24 +3803,25 @@ fn theme_schedule_summary(short: bool) -> String {
                     format!("{:02}:{:02}", set / 60, set % 60),
                 ];
                 if short {
-                    t("theme_schedule_sunrise_short_format")
-                        .replacen("%s", &times[0], 1)
-                        .replacen("%s", &times[1], 1)
+                    t_args(
+                        "theme_schedule_sunrise_short_format",
+                        &[times[0].as_str(), times[1].as_str()],
+                    )
                 } else {
-                    let schedule = t("theme_schedule_sunrise_format")
-                        .replacen("%s", &times[0], 1)
-                        .replacen("%s", &times[1], 1);
+                    let schedule = t_args(
+                        "theme_schedule_sunrise_format",
+                        &[times[0].as_str(), times[1].as_str()],
+                    );
                     let source = t(theme_engine::location(ip_enabled).2);
-                    t("theme_schedule_source_format")
-                        .replacen("%s", &schedule, 1)
-                        .replacen("%s", &source, 1)
+                    t_args("theme_schedule_source_format", &[&schedule, &source])
                 }
             }
             None if short => t("theme_schedule_unavailable"),
             None => {
-                let fixed = t("theme_schedule_format")
-                    .replacen("%s", &hhmm(&light), 1)
-                    .replacen("%s", &hhmm(&dark), 1);
+                let fixed = t_args(
+                    "theme_schedule_format",
+                    &[hhmm(&light).as_str(), hhmm(&dark).as_str()],
+                );
                 t_args("theme_schedule_fallback_format", &[&fixed])
             }
         }
@@ -3833,9 +3831,7 @@ fn theme_schedule_summary(short: bool) -> String {
         } else {
             "theme_schedule_format"
         };
-        t(key)
-            .replacen("%s", &hhmm(&light), 1)
-            .replacen("%s", &hhmm(&dark), 1)
+        t_args(key, &[hhmm(&light).as_str(), hhmm(&dark).as_str()])
     }
 }
 

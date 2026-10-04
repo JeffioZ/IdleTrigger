@@ -99,6 +99,9 @@ fn text_scale_survives_repeated_runtime_shutdown() {
     }
 }
 pub fn refresh_text_scale() {
+    // LOCK_NOTIFY_HWND is deliberately absent: the layered card re-renders
+    // its bitmap on every show, so the next appearance picks up the new
+    // scale; broadcasting at it mid-animation would compose a stale frame.
     let next = query_text_percent();
     let old = TEXT_PERCENT.swap(next, Ordering::SeqCst);
     if old == next {

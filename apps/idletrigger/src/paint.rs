@@ -924,6 +924,10 @@ pub fn draw_switch_row(
 /// long settings labels must truncate at the pill column instead of
 /// wrapping underneath it.
 unsafe fn draw_row_text(hdc: HDC, bounds: &RECT, font: HFONT, label: &str, color: u32) {
+    if label.is_empty() {
+        // Empty labels draw nothing (see draw_label for the AV reason).
+        return;
+    }
     unsafe {
         let mut text: Vec<u16> = label.encode_utf16().collect();
         SetTextColor(hdc, COLORREF(color));
@@ -1161,6 +1165,10 @@ pub fn draw_text_link(
     if state.disabled {
         color = p.disabled_text;
     }
+    if label.is_empty() {
+        // Empty labels draw nothing (see draw_label for the AV reason).
+        return;
+    }
     unsafe {
         let mut text: Vec<u16> = label.encode_utf16().collect();
         let old = SelectObject(hdc, HGDIOBJ(font.0));
@@ -1191,7 +1199,7 @@ pub fn draw_text_link(
         }
         SelectObject(hdc, old);
     }
-    if state.focused {
+    if state.focused && !state.disabled {
         draw_focus_frame(hdc, bounds, p.focus);
     }
 }
@@ -1269,6 +1277,10 @@ pub fn draw_button_label(
     left_inset: i32,
     right_inset: i32,
 ) {
+    if label.is_empty() {
+        // Empty labels draw nothing (see draw_label for the AV reason).
+        return;
+    }
     unsafe {
         // No trailing NUL (cchText counts it and inflates the measure).
         let mut text: Vec<u16> = label.encode_utf16().collect();

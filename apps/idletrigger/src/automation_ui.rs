@@ -1108,15 +1108,15 @@ fn rule_summary(rule: &auto::Rule) -> String {
     let action = action_label(&rule.action);
     let count = rule.processes.len().to_string();
     match rule.trigger.as_str() {
-        "process_running" => fill_template(
+        auto::TRIGGER_PROCESS_RUNNING => fill_template(
             &t_pub("automation_summary_process_running"),
             &[&action, &count],
         ),
-        "process_started" => fill_template(
+        auto::TRIGGER_PROCESS_STARTED => fill_template(
             &t_pub("automation_summary_process_started"),
             &[&action, &count],
         ),
-        "process_exited" => fill_template(
+        auto::TRIGGER_PROCESS_EXITED => fill_template(
             &t_pub("automation_summary_process_exited"),
             &[&action, &count],
         ),
@@ -1140,11 +1140,15 @@ fn rule_summary(rule: &auto::Rule) -> String {
             &t_pub("automation_summary_weekly"),
             &[&action, &day_summary(&rule.days), &rule.time],
         ),
-        "session_locked" => fill_template(&t_pub("automation_summary_session"), &[&action]),
-        "session_unlocked" => {
+        auto::TRIGGER_SESSION_LOCKED => {
+            fill_template(&t_pub("automation_summary_session"), &[&action])
+        }
+        auto::TRIGGER_SESSION_UNLOCKED => {
             fill_template(&t_pub("automation_summary_session_unlocked"), &[&action])
         }
-        "on_resume" => fill_template(&t_pub("automation_summary_on_resume"), &[&action]),
+        auto::TRIGGER_ON_RESUME => {
+            fill_template(&t_pub("automation_summary_on_resume"), &[&action])
+        }
         auto::TRIGGER_BATTERY_BELOW => fill_template(
             &t_pub("automation_summary_battery"),
             &[&action, &rule.battery_level.to_string()],
@@ -2483,7 +2487,7 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
 }
 
 /// Go validateDraft: returns the first error message (with its control).
-fn validate_draft(ed: HWND, draft: &auto::Rule) -> Option<(usize, String)> {
+fn validate_draft(draft: &auto::Rule) -> Option<(usize, String)> {
     let t = |key: &str| t_pub(key);
     let trigger = draft.trigger.as_str();
     let needs_process = matches!(
@@ -2529,7 +2533,6 @@ fn validate_draft(ed: HWND, draft: &auto::Rule) -> Option<(usize, String)> {
     {
         return Some((ED_MAX_WAIT, t("automation_error_max_wait")));
     }
-    let _ = ed;
     None
 }
 
@@ -2570,7 +2573,7 @@ fn save_rule(ed: HWND) {
     let orig = edit_orig().unwrap_or_else(default_rule);
     let draft = read_draft(ed, &orig);
 
-    if let Some((id, message)) = validate_draft(ed, &draft) {
+    if let Some((id, message)) = validate_draft(&draft) {
         set_editor_error(ed, id, &message);
         return;
     }
@@ -3618,9 +3621,12 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 };
                 match crate::paint::fill_rounded_rect(dc, &marker, bar_w.max(1), p.accent, p.accent)
                 {
-                    crate::paint::DrawResult::Completed
-                    | crate::paint::DrawResult::NotStarted
-                    | crate::paint::DrawResult::MayBeDirty => {}
+                    crate::paint::DrawResult::Completed | crate::paint::DrawResult::MayBeDirty => {}
+                    // Plain-GDI fallback, manager-row parity: without it the
+                    // cursor row loses its bar entirely when GDI+ is down.
+                    crate::paint::DrawResult::NotStarted => {
+                        crate::paint::fill_rect(dc, &marker, p.accent)
+                    }
                 }
             }
             let columns = [
@@ -3896,8 +3902,6 @@ fn show_picker(owner: HWND) {
 
         picker_load();
         apply_filter();
-        picker_load();
-        apply_filter();
 
         // Modal target is the manager ROOT: disabling only the embedded
         // pane left the manager's caption draggable/clickable underneath.
@@ -3912,7 +3916,6 @@ fn show_picker(owner: HWND) {
         if crate::viewport::metrics(pk).is_none() {
             crate::viewport::fit(pk);
         }
-        crate::FirstFrameGate::begin(pk).reveal();
         crate::FirstFrameGate::begin(pk).reveal();
         // The uncloak can leave freshly-filled native controls with a
         // validated region; force their first on-screen paint explicitly.
@@ -5343,8 +5346,10 @@ unsafe extern "system" fn picker_proc(
                     crate::runtime::lock(&DESCRIPTIONS).clear();
                     *crate::runtime::lock(&PK_RESULT) = None;
                     *crate::runtime::lock(&PK_UPDATED) = None;
+                    // The modal disable targeted the manager ROOT, not the
+                    // embedded editor pane — re-enable the same window.
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                        HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _),
+                        HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
                         true,
                     );
                     LRESULT(0)

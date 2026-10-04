@@ -322,7 +322,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
         for dark in [false, true] {
             theme::force_dark(dark);
             theme::apply_to_all();
-            for page in 0..4 {
+            for page in 0..5 {
                 settings_ui::devtools_select_page(page);
                 present_layout(settings);
                 pump(20);

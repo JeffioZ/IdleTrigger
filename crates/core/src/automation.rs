@@ -405,7 +405,7 @@ pub fn prepare_rules(rules: &[Rule]) -> (Vec<Rule>, Vec<RuleIssue>) {
             if !overflow_noted {
                 overflow_noted = true;
                 add_issue(format!(
-                    "automation_rules may contain at most {MAX_RULES} rules; later entries were ignored"
+                    "automation_rules may contain at most {MAX_RULES} rules; later entries were disabled"
                 ));
             }
             // ...but the disable must still reach every overflow rule:

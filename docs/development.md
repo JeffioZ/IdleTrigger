@@ -1,6 +1,6 @@
 # Development / 开发
 
-IdleTrigger uses Rust, native Win32 controls, and GDI+ drawing. MSVC runtime code is linked statically; runtime imports are Windows system DLLs. Supported targets are x64 and x86 MSVC, with Windows 10 1607 / Server 2016 as the API baseline.
+IdleTrigger uses Rust 1.88+ (the workspace `rust-version`), native Win32 controls, and GDI+ drawing. MSVC runtime code is linked statically; runtime imports are Windows system DLLs. Supported targets are x64 and x86 MSVC, with Windows 10 1607 / Server 2016 as the API baseline.
 
 IdleTrigger 使用 Rust、原生 Win32 控件和 GDI+ 绘制。MSVC 运行库静态链接，运行时依赖 Windows 系统 DLL。支持 x64、x86 MSVC，API 基线为 Windows 10 1607 / Server 2016。
 
@@ -65,6 +65,7 @@ Only devtools builds recognize these switches, all requiring `IDLETRIGGER_DEVTOO
 | `IDLETRIGGER_DEVTOOLS_CAPTURE_STEP_MS=200..10000` | Capture interval / 捕获步进间隔 |
 | `IDLETRIGGER_DEVTOOLS_WARNING_PREVIEW=1` | Idle-warning preview / 空闲提醒预览 |
 | `IDLETRIGGER_DEVTOOLS_IDLE_MONITOR_SECONDS=10..600` | Temporary test timeout / 临时测试时长 |
+| `IDLETRIGGER_DEVTOOLS_UPDATE_PREVIEW=1` | Self-update UI preview (9.9.9, no network) / 自更新界面预览（不联网） |
 
 Other switches are defined in `devtools.rs`. Window-DC/BitBlt captures do not prove physical mouse interaction or desktop compositing. Native-message tests cover control states; real input, high contrast, text scaling, mixed-DPI monitors, resume, and actual system actions require a suitable Windows test environment.
 

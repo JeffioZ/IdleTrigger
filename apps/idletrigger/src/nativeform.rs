@@ -765,17 +765,16 @@ pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
         }
         let empty = [0u16];
         let _ = SetWindowTheme(tip, PCWSTR(empty.as_ptr()), PCWSTR(empty.as_ptr()));
-        let p = crate::theme::palette();
         SendMessageW(
             tip,
             TTM_SETTIPBKCOLOR,
-            Some(WPARAM(p.tooltip_bg as usize)),
+            Some(WPARAM(crate::theme::tooltip_bg_color() as usize)),
             None,
         );
         SendMessageW(
             tip,
             TTM_SETTIPTEXTCOLOR,
-            Some(WPARAM(p.tooltip_text as usize)),
+            Some(WPARAM(crate::theme::tooltip_text_color() as usize)),
             None,
         );
     }
