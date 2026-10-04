@@ -2,9 +2,9 @@
 
 ## Start and exit / 启动与退出
 
-Put the EXE in a writable folder and run it. Left-click its tray icon to open or close the panel (Esc closes it too); right-click for Open and Exit. While a modal dialog is open, another tray click brings that dialog forward. One GUI instance runs per Windows session, even when different copies of the EXE are launched.
+Put the EXE in a writable folder and run it. Left-click its tray icon to open or close the panel (Esc closes it too); right-click for Open, Check for Updates, and Exit. While a modal dialog is open, another tray click brings that dialog forward. One GUI instance runs per Windows session, even when different copies of the EXE are launched.
 
-将 EXE 放入可写目录后运行。左键托盘图标开关浮层（按 Esc 也可关闭），右键可打开或退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
+将 EXE 放入可写目录后运行。左键托盘图标开关浮层（按 Esc 也可关闭）；右键菜单包含打开、检查更新和退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
 
 Enable Start with Windows in Settings if needed. If already enabled, startup repairs its registered path when you run the EXE from a new location. `--minimized` starts with the panel hidden; `--delay=N` delays initialization by up to 60 seconds.
 
@@ -51,6 +51,12 @@ Theme scheduling supports fixed times and sunrise/sunset. Optional IP lookup use
 Fullscreen/presentation and foreground game activity can pause automatic switching. Battery dark mode can override the schedule. A manual switch lasts until the next scheduled transition, and the panel's snooze chips postpone the next scheduled switch by 30 minutes, 1 hour, or until the next light boundary — the schedule line shows the deadline, and clicking the armed chip again or the cancel link clears it. Win+Shift+D performs a manual switch when global hotkeys are enabled. Optional appearance linkage applies a per-side wallpaper and an installed cursor scheme together with each switch; failures are logged and never block the theme itself. Theme repair is available on demand and reports failures. Automatic switching also coalesces display/resume events, waits for a stable display configuration, and limits repeated repairs. Lock-key notices can be enabled independently and hidden during fullscreen use.
 
 全屏、演示和前台游戏活动可暂停自动切换。电池深色选项可覆盖计划。手动切换保留至下一次计划转换；面板上的推迟预设可将下一次计划切换延后 30 分钟、1 小时或直至下一次浅色边界——调度行显示截止时间，再次点击已选预设或取消链接可立即恢复。启用全局热键时，Win+Shift+D 可手动切换昼夜。可选的外观联动会在每次切换时同时应用对应的壁纸与已安装指针方案；单项失败只记录日志，不阻塞主题切换本身。可手动运行主题修复并查看失败提示；自动切换也会合并显示器和恢复事件，等待显示配置稳定，并限制重复修复。锁定键提示可单独启用，并在全屏时隐藏。
+
+## Self-update / 自动更新
+
+The panel checks quietly in the background each time it is shown (at most once a minute, switchable in Settings). The tray menu and Settings also offer an explicit **Check for updates**: up-to-date and failure answers arrive as standalone dialogs, and a found update opens the one-click confirm directly. One confirmation downloads, SHA-256-verifies, installs, and restarts the app; the `update/` staging folder beside the EXE is reclaimed automatically after a successful upgrade. A staging folder that holds files the updater did not create is left untouched.
+
+每次打开控制面板时在后台静默检查一次（每分钟最多一次，可在设置中关闭）。托盘菜单与设置中的**检查更新**为显式入口：已是最新或失败会以独立提示框作答，发现新版则直接弹出一次性确认。确认后自动下载、SHA-256 校验、安装并重启；EXE 旁的 `update/` 暂存目录在升级成功后自动回收，若其中存在非更新程序创建的文件则原样保留。
 
 ## Files and saves / 文件与保存
 

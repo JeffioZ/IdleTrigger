@@ -2,7 +2,7 @@
 
 IdleTrigger uses Rust 1.88+ (the workspace `rust-version`), native Win32 controls, and GDI+ drawing. MSVC runtime code is linked statically; runtime imports are Windows system DLLs. Supported targets are x64 and x86 MSVC, with Windows 10 1607 / Server 2016 as the API baseline.
 
-IdleTrigger 使用 Rust、原生 Win32 控件和 GDI+ 绘制。MSVC 运行库静态链接，运行时依赖 Windows 系统 DLL。支持 x64、x86 MSVC，API 基线为 Windows 10 1607 / Server 2016。
+IdleTrigger 使用 Rust 1.88+（见 workspace `rust-version`）、原生 Win32 控件和 GDI+ 绘制。MSVC 运行库静态链接，运行时依赖 Windows 系统 DLL。支持 x64、x86 MSVC，API 基线为 Windows 10 1607 / Server 2016。
 
 ## Layout / 目录
 
@@ -15,6 +15,7 @@ IdleTrigger 使用 Rust、原生 Win32 控件和 GDI+ 绘制。MSVC 运行库静
 | `paint.rs`, `nativeform.rs`, `choice.rs`, `list_style.rs`, `dpi.rs`, `viewport.rs`, `accessibility.rs`, `tooltips.rs` | Shared native controls and accessibility / 共享原生控件及辅助功能 |
 | `theme*.rs`, `iplocate.rs`, `gpu_activity.rs`, `display.rs` | Themes and platform detection / 主题及平台检测 |
 | `system.rs`, `single_instance.rs`, `ipc.rs`, `pipe.rs` | System actions, instance ownership, CLI/IPC / 系统操作、单实例及通信 |
+| `selfupdate.rs` | GitHub-Releases self-update (check, verify, replace, restart) / 基于 GitHub Releases 的自更新（检查、校验、替换与重启） |
 | `crates/core/` | Config, rules, TOML document edits, locales / 配置、规则、TOML 编辑与文案 |
 | `build/windows/` | Manifest and icons / 清单及图标 |
 | `.github/workflows/` | Verification and draft releases / 验证及发布草稿 |
