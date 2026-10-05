@@ -161,7 +161,18 @@ fn toggle_automation_tip() -> String {
 }
 
 fn toggle_theme_tip() -> String {
-    toggle_state_tip(crate::IDC_THEME_ENABLE, "tip_theme")
+    let mut body = crate::t_pub("tip_theme");
+    // Same rule as every other sub-setting: armed (on) states get a line;
+    // an off sub-setting does nothing, so it stays silent.
+    if crate::cfg_map(|c| c.theme_dark_on_battery) {
+        body.push('\n');
+        body.push_str(&crate::t_pub("tip_theme_battery_dark_on"));
+    }
+    if crate::cfg_map(|c| c.theme_skip_fullscreen) {
+        body.push('\n');
+        body.push_str(&crate::t_pub("tip_theme_skip_fullscreen_on"));
+    }
+    toggle_state_tip_body(crate::IDC_THEME_ENABLE, body)
 }
 
 // The power summary line is compact on the panel; its tooltip carries the
@@ -519,23 +530,34 @@ pub(crate) fn tooltip_hwnd() -> HWND {
     HWND(TOOLTIP_HWND.load(Ordering::SeqCst) as *mut _)
 }
 
-/// Go withPowerStatusTooltip: 手动设置 state. 运行状态 status. body
+/// Power rows share the toggles' 当前-status frame: the switch itself sits
+/// next to this tooltip, so its state needs no line of its own.
 fn state_power_tip(nosleep: bool) -> String {
-    let manual_key = if crate::cfg_map(|c| {
-        if nosleep {
-            c.nosleep_enabled
-        } else {
-            c.idle_enabled
-        }
-    }) {
-        "tip_state_enabled"
-    } else {
-        "tip_state_disabled"
-    };
     let body = crate::t_pub(if nosleep { "tip_nosleep" } else { "tip_idle" });
     let (awake_status, idle_status) = crate::power_status();
     let (runtime, full_body) = if nosleep {
-        (awake_status, body)
+        // Stay awake: the pause sub-settings live only in Settings, and the
+        // runtime line explains them just after they pause the feature.
+        let (pause_on_lock, battery_allowed, battery_threshold) = crate::cfg_map(|c| {
+            (
+                c.nosleep_pause_on_lock,
+                c.nosleep_on_battery,
+                c.nosleep_battery_threshold,
+            )
+        });
+        let mut full_body = body;
+        if pause_on_lock {
+            full_body.push('\n');
+            full_body.push_str(&crate::t_pub("tip_nosleep_pause_lock_on"));
+        }
+        if battery_allowed {
+            full_body.push('\n');
+            full_body.push_str(&crate::t_args(
+                "tip_nosleep_battery_allowed",
+                &[&battery_threshold.to_string()],
+            ));
+        }
+        (awake_status, full_body)
     } else {
         // Idle: append the manual plan line (Go idleTooltipBody).
         let (minutes, action, warning) = crate::cfg_map(|c| {
@@ -550,26 +572,36 @@ fn state_power_tip(nosleep: bool) -> String {
             "tip_idle_manual_plan_warning",
             &[&minutes.to_string(), &action_label, &warning.to_string()],
         );
-        (idle_status, format!("{body}\n{plan}"))
+        // While idle monitoring runs, the runtime line above already states
+        // the plan as a sentence (with the effective minutes), so the plan
+        // line and the enhanced note appear only in the other states.
+        let mut full_body = body;
+        if !crate::idle_status_active() {
+            full_body.push('\n');
+            full_body.push_str(&plan);
+            if crate::cfg_map(|c| c.idle_enhanced_monitor) {
+                full_body.push('\n');
+                full_body.push_str(&crate::t_pub("tip_idle_enhanced_on"));
+            }
+        }
+        (idle_status, full_body)
     };
-    crate::t_args(
-        "tip_power_setting_status",
-        &[&crate::t_pub(manual_key), &runtime, &full_body],
-    )
+    crate::t_args("tip_toggle_state", &[&runtime, &full_body])
 }
 
 /// Go withStateTooltip: state line then description for toggle controls.
 fn toggle_state_tip(id: usize, body_key: &str) -> String {
+    toggle_state_tip_body(id, crate::t_pub(body_key))
+}
+
+fn toggle_state_tip_body(id: usize, body: String) -> String {
     let active = crate::toggle_value(id);
     let state_key = if active {
         "tip_state_enabled"
     } else {
         "tip_state_disabled"
     };
-    crate::t_args(
-        "tip_toggle_state",
-        &[&crate::t_pub(state_key), &crate::t_pub(body_key)],
-    )
+    crate::t_args("tip_toggle_state", &[&crate::t_pub(state_key), &body])
 }
 
 unsafe fn get_panel_child(panel: HWND, id: usize) -> HWND {

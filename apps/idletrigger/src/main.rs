@@ -390,20 +390,19 @@ fn t(key: &str) -> String {
         .unwrap_or_else(|| key.to_string())
 }
 
+/// The locale "auto" resolves to, from the Windows UI language.
+pub(crate) fn auto_language() -> &'static str {
+    let native = unsafe { GetUserDefaultUILanguage() };
+    if native == 0x0804 { "zh-CN" } else { "en" }
+}
+
 /// Resolves and hot-swaps the active locale; all future `t()` calls use it.
 fn apply_language(lang: &str) {
     let previous = t("settings_title");
     let resolved = match lang {
         "en" => "en".to_string(),
         "zh-CN" => "zh-CN".to_string(),
-        _ => {
-            let native = unsafe { GetUserDefaultUILanguage() };
-            if native == 0x0804 {
-                "zh-CN".into()
-            } else {
-                "en".into()
-            }
-        }
+        _ => auto_language().to_string(),
     };
     if let Ok(mut guard) = I18N.write() {
         *guard = Some(I18n::load(&resolved));
@@ -3586,9 +3585,23 @@ fn power_status_compact() -> (String, String) {
     power_status_impl(true)
 }
 
+/// Mirrors the active branch of `power_status_impl`'s idle status: running,
+/// not paused by Stay Awake or a task. The idle row tooltip uses it to keep
+/// its dedicated enhanced line from duplicating the runtime suffix.
+pub(crate) fn idle_status_active() -> bool {
+    let power = effective_power_state();
+    power.idle_requested && !power.awake && !power.idle_paused
+}
+
 fn power_status_impl(compact: bool) -> (String, String) {
     let power = effective_power_state();
-    let idle_action = cfg_map(|c| c.idle_action.clone());
+    let (idle_action, idle_enhanced, idle_warning) = cfg_map(|c| {
+        (
+            c.idle_action.clone(),
+            c.idle_enhanced_monitor,
+            c.idle_warning_seconds,
+        )
+    });
     // Reason attribution: which task and/or the timed overlay is keeping the
     // machine awake. Shown only while actually awake.
     let mut reasons: Vec<String> = Vec::new();
@@ -3657,11 +3670,22 @@ fn power_status_impl(compact: bool) -> (String, String) {
             "status_paused_by_automation",
         )
     } else {
+        // Compact feeds the one-row panel summary (arrow, minimal words);
+        // verbose reads as a sentence and folds in the reminder so the idle
+        // row tooltip never repeats the plan line. The compact templates
+        // simply leave the third argument unused.
+        let key = match (compact, idle_enhanced) {
+            (true, false) => "status_monitor_active",
+            (true, true) => "status_monitor_enhanced",
+            (false, false) => "status_monitor_active_verbose",
+            _ => "status_monitor_enhanced_verbose",
+        };
         t_args(
-            "status_monitor_active",
+            key,
             &[
                 &power.idle_minutes.to_string(),
                 &t(&format!("menu_action_{idle_action}")),
+                &idle_warning.to_string(),
             ],
         )
     };
@@ -3770,10 +3794,32 @@ fn theme_schedule_text() -> String {
     if let Some(notice) = theme_engine::active_notice() {
         return notice;
     }
+    // Battery dark outranks schedule and snooze in the engine, so it owns
+    // the line ahead of the snooze state too.
+    if battery_dark_forced() {
+        return t("theme_schedule_battery_dark");
+    }
     match theme_engine::snooze_deadline_text() {
         Some(until) => t_args("theme_schedule_snoozed_line", &[&until]),
         None => theme_schedule_summary(false),
     }
+}
+
+/// Mirrors the engine's battery-dark gating (target computation plus the
+/// fullscreen deferral) so the line never claims a state the screen does
+/// not show.
+fn battery_dark_forced() -> bool {
+    let (enabled, dark_on_battery, skip_fullscreen) = cfg_map(|c| {
+        (
+            c.theme_switch_enabled,
+            c.theme_dark_on_battery,
+            c.theme_skip_fullscreen,
+        )
+    });
+    !ON_AC.load(Ordering::SeqCst)
+        && enabled
+        && dark_on_battery
+        && !(skip_fullscreen && display::foreground_is_fullscreen())
 }
 
 /// Go formatThemeSchedule for both consumers: the panel schedule row (long,
