@@ -331,6 +331,12 @@ unsafe extern "system" fn window_proc(
             // geometry; the panel's update links are placed at runtime from
             // phase state instead, so re-derive them at the new scale.
             if hwnd == crate::hwnd(&crate::PANEL) {
+                // Keep scale()'s no-scope fallback (UI-thread paths outside
+                // window procs) tracking the panel's monitor instead of the
+                // DPI captured when the panel was created, so a monitor
+                // hot-plug cannot leave it pointing at a departed monitor's
+                // DPI.
+                crate::DPI_SCALE.store(new as i32, Ordering::SeqCst);
                 crate::request_update_refresh();
             }
             let rect = &*(lp.0 as *const RECT);

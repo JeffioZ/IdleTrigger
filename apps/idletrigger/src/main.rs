@@ -3189,8 +3189,17 @@ fn sync_update_row() {
     };
     unsafe {
         let panel = hwnd(&PANEL);
+        if panel.is_invalid() {
+            return;
+        }
+        // Tray/show paths call this outside any window proc, where scale()
+        // would fall back to the DPI captured when the panel was created;
+        // after a monitor hot-plug that resizes the panel for the wrong
+        // monitor and leaves a blank strip below the content. Scale at the
+        // panel's live per-monitor DPI instead.
+        let _dpi = dpi::Scope::window(panel);
         let mut client = RECT::default();
-        if panel.is_invalid() || GetClientRect(panel, &mut client).is_err() {
+        if GetClientRect(panel, &mut client).is_err() {
             return;
         }
         if client.bottom - client.top == scale(target) {
@@ -3228,13 +3237,20 @@ fn sync_update_row() {
 /// visibility follow the updater phase.
 fn refresh_update_button() {
     unsafe {
+        let panel = hwnd(&PANEL);
+        if panel.is_invalid() {
+            return;
+        }
+        // Same hot-plug hazard as sync_update_row: link geometry must scale
+        // at the panel's live DPI on tray/show call paths, not the
+        // creation-time fallback.
+        let _dpi = dpi::Scope::window(panel);
         sync_update_row();
-        let control = GetDlgItem(Some(hwnd(&PANEL)), IDC_UPDATE_BUTTON as i32).unwrap_or_default();
+        let control = GetDlgItem(Some(panel), IDC_UPDATE_BUTTON as i32).unwrap_or_default();
         if control.is_invalid() {
             return;
         }
-        let notes =
-            GetDlgItem(Some(hwnd(&PANEL)), IDC_UPDATE_NOTES_LINK as i32).unwrap_or_default();
+        let notes = GetDlgItem(Some(panel), IDC_UPDATE_NOTES_LINK as i32).unwrap_or_default();
         if notes.is_invalid() {
             return;
         }
@@ -3256,7 +3272,7 @@ fn refresh_update_button() {
         // Row geometry from the LIVE client rect (after sync_update_row's
         // resize).
         let mut client = RECT::default();
-        if GetClientRect(hwnd(&PANEL), &mut client).is_err() {
+        if GetClientRect(panel, &mut client).is_err() {
             return;
         }
         // Visually centered in the tight zone: LABEL_GAP to the footer
@@ -3270,10 +3286,8 @@ fn refresh_update_button() {
         let (action_x, action_w_slot) = row_slot(card_w, 3, 0);
         let (notes_x, notes_w_slot) = row_slot(card_w, 3, 1);
         let notes_text = window_text(notes);
-        let action_w =
-            scale(measured_text_width(hwnd(&PANEL), panel_font_subtitle(), &text).max(16));
-        let notes_w =
-            scale(measured_text_width(hwnd(&PANEL), panel_font_subtitle(), &notes_text).max(16));
+        let action_w = scale(measured_text_width(panel, panel_font_subtitle(), &text).max(16));
+        let notes_w = scale(measured_text_width(panel, panel_font_subtitle(), &notes_text).max(16));
         // Position while STILL HIDDEN, show only afterwards: a freshly
         // created owner-draw control must never be shown at its 4px creation
         // stub geometry (first-paint at the stub crashes the button wndproc;
