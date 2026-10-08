@@ -475,10 +475,13 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 false,
             );
         }
+        // Header right edge: the version's right side rides CONTENT_RIGHT
+        // (24-px page inset) on the page-title row (both bands end at y=40);
+        // right-aligned so the longer "x (arch)" form grows leftward.
         label(
             hwnd,
             ID_VERSION,
-            &crate::t_args("settings_version", &[crate::APP_VERSION]),
+            &crate::t_args("settings_version", &[&crate::version_with_arch()]),
             font,
             (484, 18, 168, 22),
             true,
@@ -3199,7 +3202,7 @@ pub fn refresh_language() {
     set_text(
         hwnd,
         ID_VERSION,
-        &crate::t_args("settings_version", &[crate::APP_VERSION]),
+        &crate::t_args("settings_version", &[&crate::version_with_arch()]),
     );
     // The check button's caption is phase-formatted; re-derive it in the
     // new language.

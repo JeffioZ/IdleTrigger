@@ -61,6 +61,26 @@ const APP_VERSION: &str = match option_env!("IDLETRIGGER_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+// Release asset suffix of the running architecture (see selfupdate's
+// ASSET_NAME); the compiler target is authoritative for a running binary.
+#[cfg(target_arch = "x86_64")]
+const APP_ARCH: &str = "x64";
+#[cfg(target_arch = "x86")]
+const APP_ARCH: &str = "x86";
+#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+const APP_ARCH: &str = "";
+
+/// Version with the running architecture's release-asset note, e.g.
+/// "2.5.0 (x64)" for the settings header; unshipped architectures return
+/// the bare version instead of an empty parenthetical.
+pub(crate) fn version_with_arch() -> String {
+    if APP_ARCH.is_empty() {
+        APP_VERSION.to_string()
+    } else {
+        format!("{APP_VERSION} ({APP_ARCH})")
+    }
+}
+
 // Control identifiers.
 const IDC_NOSLEEP: usize = 110;
 const IDC_IDLE: usize = 112;
