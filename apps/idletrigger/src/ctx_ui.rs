@@ -457,7 +457,9 @@ pub fn refresh_language() {
 }
 
 fn refresh_manager_status() {
-    let key = if !crate::cfg_map(|c| c.ctx_menu_enabled) {
+    let key = if crate::ctxmenu::registration_blocked() {
+        "ctx_config_blocked"
+    } else if !crate::cfg_map(|c| c.ctx_menu_enabled) {
         "ctx_manager_disabled"
     } else if !crate::ctxmenu::registration_healthy() {
         "ctx_manager_drift"

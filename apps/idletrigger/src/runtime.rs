@@ -16,6 +16,7 @@ pub(crate) static CONFIG_WRITER: Mutex<()> = Mutex::new(());
 pub(crate) static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) static CONFIG_SOURCE: Mutex<Option<String>> = Mutex::new(None);
 pub(crate) static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+pub(crate) static CTX_SYNC_BLOCKED: AtomicBool = AtomicBool::new(false);
 pub(crate) static CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 pub(crate) static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
@@ -174,6 +175,7 @@ pub(crate) fn commit_config(
     *lock(&CONFIG_SOURCE) = Some(doc.to_string());
     *lock(&CONFIG) = Some(candidate);
     *lock(&CONFIG_DOC) = Some(doc);
+    CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
     // Rule publication is inside the writer boundary, preventing a later
     // reload from being overwritten by an older save's publication.
     crate::automation::reload_rules();

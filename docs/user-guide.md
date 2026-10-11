@@ -12,9 +12,9 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 
 ## Explorer context menu / 资源管理器右键增强
 
-Enable **Settings → Context menu** and save to register the menus for the current Windows user. On Windows 11 they normally appear under **Show more options**. The optional classic-menu switch applies immediately after confirmation and restarts Explorer; save work in Explorer windows first. IdleTrigger does not claim a classic-menu override created by another tool. The `ctx_win11_classic` configuration value records the last UI action; editing that value alone does not change Windows.
+Enable **Settings → Context menu** and save to register the menus for the current Windows user. On Windows 11 they normally appear under **Show more options**. The optional classic-menu switch applies immediately after confirmation and restarts Explorer; save work in Explorer windows first. IdleTrigger does not silently claim a classic-menu override created by another tool. An old ownership record requires a separate confirmation before removal because its origin cannot be verified. Restart runs in the background with a timeout; if recovery cannot be confirmed, the app explains how to restart Explorer manually or sign out. The `ctx_win11_classic` configuration value records the last UI action; editing that value alone does not change Windows.
 
-在**设置 → 右键增强**中启用并保存后，菜单注册到当前 Windows 用户。Windows 11 默认在**显示更多选项**中显示。经典菜单开关在确认后立即生效并重启 Explorer，请先处理好已打开的资源管理器窗口；IdleTrigger 不接管其他工具设置的经典菜单。配置中的 `ctx_win11_classic` 仅记录界面操作，手工修改该值不会改动系统。
+在**设置 → 右键增强**中启用并保存后，菜单注册到当前 Windows 用户。Windows 11 默认在**显示更多选项**中显示。经典菜单开关在确认后立即生效并重启 Explorer，请先处理好已打开的资源管理器窗口；IdleTrigger 不会自动接管其他工具设置的经典菜单。旧版管理记录无法确认当前设置来源，关闭前会单独说明并确认。重启在后台执行并设有超时；无法确认恢复时，会提示手动重启资源管理器或注销。配置中的 `ctx_win11_classic` 仅记录界面操作，手工修改该值不会改动系统。
 
 - **Copy path** supports one selected item: full path, shortcut target, parent folder, file name, name without extension, or extension. Shortcut target is shown only for `.lnk` files. It also works without the tray app running. Multi-selection is deliberately unavailable: separate static-verb processes cannot reliably identify one complete selection, and must not silently overwrite or combine different copy operations. The old join-separator preference remains in the configuration for compatibility.
 - **Custom rules** have a title, program, scope, extension filter, arguments, optional icon and working folder, and individual enabled state. New rules start with `"%1"` as the argument template; `%1`, `%L`, and `%V` substitute the selected path once. **Preview arguments** uses an example path and does not run the command. An empty working folder uses the selected folder, or a selected file's parent.
@@ -87,9 +87,9 @@ The panel checks quietly in the background each time it is shown (at most once a
 | `IdleTrigger.log`, `IdleTrigger.log.1` | Optional rotating diagnostics / 可选轮转日志 |
 | `IdleTrigger-panic.txt` | Fatal-error details when available / 严重错误详情 |
 
-Files live beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. Invalid reloads retain the last valid runtime configuration: repair the file and save again. A field with the wrong type (for example, a number written as text) falls back to its default with a startup notice, and saving once rewrites it correctly. Back up both TOML and state files before restoring a setup.
+Files live beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. External edits with syntax errors, mistyped settings, or malformed rule containers retain the last valid runtime configuration and menu registrations: repair the file and save again. Individual invalid rules remain disabled and retained. A field with the wrong type (for example, a number written as text) falls back to its default with a startup notice, and saving once rewrites it correctly. Back up both TOML and state files before restoring a setup.
 
-文件均位于 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，错误重载保留最近的有效运行配置，修正文件后重新保存即可。字段类型写错（如数字写成文本）时回退默认值并在启动时提示，保存一次即可改正。恢复配置前建议备份 TOML 和 state 文件。
+文件均位于 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，外部修改存在语法错误、设置字段类型错误或规则列表结构损坏时，保留最近的有效运行配置与菜单注册，修正文件后重新保存即可；单条规则错误仍按禁用并保留处理。字段类型写错（如数字写成文本）时回退默认值并在启动时提示，保存一次即可改正。恢复配置前建议备份 TOML 和 state 文件。
 
 ## Command line / 命令行
 

@@ -617,6 +617,10 @@ fn main() {
     *lock(&CONFIG_DOC) = Some(loaded.document);
     *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
+    runtime::CTX_SYNC_BLOCKED.store(
+        loaded.load_error.is_some() || loaded.field_errors.is_some(),
+        Ordering::SeqCst,
+    );
     *lock(&CONFIG_PATH) = Some(config_path.clone());
     apply_language(&effective_config.language);
 
@@ -770,6 +774,8 @@ fn main() {
     }
 
     EXITING.store(true, Ordering::SeqCst);
+    // Do not terminate the restart worker between stopping and restoring Shell.
+    settings_ui::finish_classic_restart();
     system::unregister_all();
     tray::remove();
     unsafe {
@@ -865,6 +871,7 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_TIMER if wparam.0 == LOCK_POLL_TIMER => {
+                settings_ui::refresh_classic_restart();
                 // Lock-key sampling must stay on this message-pumping thread.
                 popups::poll();
                 LRESULT(0)
@@ -914,6 +921,7 @@ unsafe extern "system" fn hidden_proc(
             }
 
             WM_REFRESH_UI => {
+                settings_ui::refresh_classic_restart();
                 settings_ui::refresh_location_status();
                 refresh_update_button();
                 settings_ui::refresh_update_status();
@@ -3618,17 +3626,30 @@ fn hot_reload_config() -> Result<(), String> {
         )
         .to_string());
     }
-    if let Some(err) = loaded.load_error.as_ref() {
+    // Startup may recover mistyped fields with defaults, but a live reload
+    // must not replace a working configuration with those fallback values.
+    // Validate rule containers as well before publishing any shared state;
+    // individual rule issues still use the editors' fault-isolation policy.
+    let validation = (|| {
+        if let Some(err) = loaded.load_error.as_ref().or(loaded.field_errors.as_ref()) {
+            return Err(err.clone());
+        }
+        idletrigger_core::ctx_menu::read_rules(&loaded.document)?;
+        idletrigger_core::rule_document::read(&loaded.document)?;
+        Ok::<(), String>(())
+    })();
+    if let Err(err) = validation {
         log_line(&format!(
             "config reload rejected; retaining last valid configuration: {err}"
         ));
-        return Err(err.clone());
+        return Err(err);
     }
     let nosleep_was_on = lock(&CONFIG).as_ref().is_some_and(|c| c.nosleep_enabled);
     *lock(&CONFIG) = Some(loaded.config.clone());
     *lock(&CONFIG_DOC) = Some(loaded.document);
     *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
+    runtime::CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
     automation::reload_rules();
     ctxexec::reload_rules();
     drop(writer);
@@ -5018,6 +5039,38 @@ mod config_transaction_tests {
             saved
         );
 
+        // Rejected external edits must not publish fallback switches, clear
+        // rule caches, or advance the source baseline used for conflict checks.
+        let previous_ctx_rules = crate::runtime::lock(&ctxexec::CTX_RULES).clone();
+        for invalid in [
+            "nosleep_enabled = \"false\"\n",
+            "ctx_menu_enabled = \"true\"\n",
+            "ctx_rules = 42\n",
+            "automation_rules = 42\n",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(hot_reload_config().is_err(), "accepted {invalid}");
+            assert!(cfg_map(|c| c.nosleep_enabled));
+            assert_eq!(
+                crate::runtime::lock(&CONFIG_DOC)
+                    .as_ref()
+                    .unwrap()
+                    .to_string(),
+                saved
+            );
+            assert_eq!(
+                crate::runtime::lock(&CONFIG_SOURCE).as_deref(),
+                Some(saved.as_str())
+            );
+            assert_eq!(
+                *crate::runtime::lock(&ctxexec::CTX_RULES),
+                previous_ctx_rules
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+            assert!(!CONFIG_LOAD_FAILED.load(Ordering::SeqCst));
+            assert!(edit_config(|c| c.nosleep_enabled = false).is_err());
+        }
+        std::fs::write(&path, &saved).unwrap();
         CONFIG_LOAD_FAILED.store(true, Ordering::SeqCst);
         assert!(edit_config(|c| c.nosleep_enabled = false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);

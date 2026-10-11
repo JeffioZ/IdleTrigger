@@ -391,14 +391,34 @@ fn rule_icon(rule: &core_ctx::CtxRule, app_icon: &str) -> String {
 }
 
 /// Builds the complete desired tree, including its empty container keys.
-fn desired_entries() -> BTreeMap<String, ValueMap> {
-    let (enabled, copy, submenu) =
-        crate::cfg_map(|c| (c.ctx_menu_enabled, c.ctx_copy_enabled, c.ctx_rules_submenu));
+fn desired_entries() -> Result<BTreeMap<String, ValueMap>, String> {
+    if crate::runtime::CTX_SYNC_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::runtime::CONFIG_LOAD_FAILED.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(crate::t_pub("ctx_config_blocked"));
+    }
+    let (enabled, copy, submenu) = crate::runtime::lock(&crate::CONFIG)
+        .as_ref()
+        .map(|c| (c.ctx_menu_enabled, c.ctx_copy_enabled, c.ctx_rules_submenu))
+        .ok_or_else(|| crate::t_pub("ctx_config_blocked"))?;
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let rules = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
-    build_entries(enabled, copy, submenu, &exe, &rules)
+    // A valid explicit off state must still remove registrations even if
+    // unused rules are malformed. Never infer off from startup defaults.
+    let rules = if enabled {
+        let doc = crate::runtime::lock(&crate::CONFIG_DOC);
+        let doc = doc
+            .as_ref()
+            .ok_or_else(|| crate::t_pub("ctx_config_blocked"))?;
+        core_ctx::read_rules(doc)?.0
+    } else {
+        Vec::new()
+    };
+    if exe.is_empty() {
+        return Err(crate::t_pub("ctx_config_blocked"));
+    }
+    Ok(build_entries(enabled, copy, submenu, &exe, &rules))
 }
 
 fn build_entries(
@@ -604,8 +624,15 @@ fn contains_registry_path(desired: &BTreeMap<String, ValueMap>, path: &str) -> b
 }
 
 pub fn sync(reason: &str) -> (bool, usize) {
+    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
     let _sync = crate::runtime::lock(&SYNC_LOCK);
-    let desired = desired_entries();
+    let desired = match desired_entries() {
+        Ok(desired) => desired,
+        Err(err) => {
+            crate::log_line(&format!("ctx sync ({reason}) blocked: {err}"));
+            return registration_status();
+        }
+    };
     let mut failed = false;
     // Publish children/commands before removing stale keys. A failed write
     // must not remove the previous working menu.
@@ -637,14 +664,22 @@ pub fn sync(reason: &str) -> (bool, usize) {
 }
 
 pub fn registration_healthy() -> bool {
+    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
     let _sync = crate::runtime::lock(&SYNC_LOCK);
-    let desired = desired_entries();
+    let Ok(desired) = desired_entries() else {
+        return false;
+    };
     desired
         .iter()
         .all(|(path, values)| key_exists(path) && current_values(path) == *values)
         && owned_keys()
             .iter()
             .all(|path| contains_registry_path(&desired, path))
+}
+
+pub fn registration_blocked() -> bool {
+    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+    desired_entries().is_err()
 }
 
 /// Count commands, including cascades; a container is never a rule.
@@ -680,44 +715,174 @@ pub enum ClassicState {
     ByUs,
     /// Rollback key present from another tool; we never fight over it.
     ByOther,
+    Legacy,
+    Unavailable,
+}
+
+// A timestamp is a conservative change detector, not proof of ownership.
+// Only the expected empty default value, with no children, is removable.
+fn classic_stamp() -> Result<Option<String>, String> {
+    let mut key = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide(WIN11_CLASSIC_KEY).as_ptr()),
+            None,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut key,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != ERROR_SUCCESS {
+        return Err(crate::t_pub("ctx_registry_failed"));
+    }
+    let mut children = 0;
+    let mut values = 0;
+    let mut stamp = windows::Win32::Foundation::FILETIME::default();
+    let queried = unsafe {
+        RegQueryInfoKeyW(
+            key,
+            None,
+            None,
+            None,
+            Some(&mut children),
+            None,
+            None,
+            Some(&mut values),
+            None,
+            None,
+            None,
+            Some(&mut stamp),
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if queried != ERROR_SUCCESS {
+        return Err(crate::t_pub("ctx_registry_failed"));
+    }
+    if children != 0 || values != 1 || read_sz(WIN11_CLASSIC_KEY, None).as_deref() != Some("") {
+        return Ok(Some("foreign".into()));
+    }
+    Ok(Some(format!(
+        "{}:{}",
+        stamp.dwHighDateTime, stamp.dwLowDateTime
+    )))
 }
 
 pub fn classic_state() -> ClassicState {
-    let present = key_exists(WIN11_CLASSIC_KEY);
-    if !present {
-        return ClassicState::Off;
+    let stamp = match classic_stamp() {
+        Ok(None) => return ClassicState::Off,
+        Err(_) => return ClassicState::Unavailable,
+        Ok(Some(stamp)) if stamp == "foreign" => return ClassicState::ByOther,
+        Ok(Some(stamp)) => stamp,
+    };
+    classify_classic_marker(
+        &stamp,
+        read_sz(WIN11_CLASSIC_MARKER, Some("Value")).as_deref(),
+    )
+}
+
+fn classify_classic_marker(stamp: &str, marker: Option<&str>) -> ClassicState {
+    match marker {
+        Some("1") => ClassicState::Legacy,
+        Some(value) if value == format!("v2:{stamp}") => ClassicState::ByUs,
+        _ => ClassicState::ByOther,
     }
-    if read_sz(WIN11_CLASSIC_MARKER, Some("Value")).as_deref() == Some("1") {
-        ClassicState::ByUs
-    } else {
-        ClassicState::ByOther
-    }
+}
+
+fn delete_classic_key() -> bool {
+    let status = unsafe {
+        windows::Win32::System::Registry::RegDeleteKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide(WIN11_CLASSIC_KEY).as_ptr()),
+            KEY_WOW64_64KEY.0,
+            None,
+        )
+    };
+    status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND
 }
 
 /// Applies the rollback without restarting Explorer; the caller owns the
 /// disruptive restart (and its confirmation).
 pub fn set_classic(on: bool) -> Result<(), String> {
     if on {
-        if matches!(classic_state(), ClassicState::ByOther) {
+        if classic_state() != ClassicState::Off {
+            return Err(crate::t_pub("ctx_win11_other_tool"));
+        }
+        // Retire stale ownership before creating a new target. If this fails,
+        // leave Windows untouched rather than inheriting an old marker.
+        if !delete_tree(WIN11_CLASSIC_MARKER) {
+            return Err(crate::t_pub("ctx_registry_failed"));
+        }
+        // Disposition closes the read-then-create race with another tool.
+        let mut key = HKEY::default();
+        let mut disposition =
+            windows::Win32::System::Registry::REG_CREATE_KEY_DISPOSITION::default();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(wide(WIN11_CLASSIC_KEY).as_ptr()),
+                None,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE | KEY_WOW64_64KEY,
+                None,
+                &mut key,
+                Some(&mut disposition),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(crate::t_pub("ctx_registry_failed"));
+        }
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+        if disposition != windows::Win32::System::Registry::REG_CREATED_NEW_KEY {
             return Err(crate::t_pub("ctx_win11_other_tool"));
         }
         if !write_sz(WIN11_CLASSIC_KEY, None, "") {
             return Err(crate::t_pub("ctx_registry_failed"));
         }
-        if !write_sz(WIN11_CLASSIC_MARKER, Some("Value"), "1") {
-            let _ = delete_tree(WIN11_CLASSIC_KEY);
-            return Err(crate::t_pub("ctx_registry_failed"));
+        let stamp = classic_stamp()?.ok_or_else(|| crate::t_pub("ctx_registry_failed"))?;
+        if stamp == "foreign"
+            || !write_sz(WIN11_CLASSIC_MARKER, Some("Value"), &format!("v2:{stamp}"))
+        {
+            // Roll back only the unchanged key we just populated, never a
+            // recursive tree. If ownership is uncertain, explain partial apply.
+            if stamp != "foreign"
+                && classic_stamp().ok().flatten().as_deref() == Some(&stamp)
+                && delete_classic_key()
+            {
+                return Err(crate::t_pub("ctx_registry_failed"));
+            }
+            return Err(crate::t_pub("ctx_classic_partial"));
         }
         Ok(())
     } else {
-        if !matches!(classic_state(), ClassicState::ByUs) {
-            return Ok(());
+        if !matches!(classic_state(), ClassicState::ByUs | ClassicState::Legacy) {
+            return Err(crate::t_pub("ctx_win11_other_tool"));
         }
-        if !delete_tree(WIN11_CLASSIC_KEY) {
+        // Upgrade a legacy marker before removing the target. Even if marker
+        // cleanup later fails, it cannot claim an unrelated recreated key.
+        let stamp = classic_stamp()?.ok_or_else(|| crate::t_pub("ctx_registry_failed"))?;
+        if stamp == "foreign"
+            || !write_sz(WIN11_CLASSIC_MARKER, Some("Value"), &format!("v2:{stamp}"))
+        {
             return Err(crate::t_pub("ctx_registry_failed"));
         }
+        if classic_stamp()?.as_deref() != Some(&stamp) {
+            return Err(crate::t_pub("ctx_win11_other_tool"));
+        }
+        if !delete_classic_key() {
+            return Err(crate::t_pub("ctx_registry_failed"));
+        }
+        // Target removal succeeded. An inert timestamp marker must not prevent
+        // the caller from restarting Explorer to apply that successful change.
         if !delete_tree(WIN11_CLASSIC_MARKER) {
-            return Err(crate::t_pub("ctx_registry_failed"));
+            crate::log_line("classic-menu target removed; stale marker cleanup failed");
         }
         Ok(())
     }
@@ -725,20 +890,84 @@ pub fn set_classic(on: bool) -> Result<(), String> {
 
 /// Restart the shell so the rollback takes effect. Explorer windows close
 /// and the taskbar reloads — callers must have warned the user.
-pub fn restart_explorer() {
+pub fn restart_explorer() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new(
-        std::env::var("SystemRoot").unwrap_or_default() + "\\System32\\taskkill.exe",
-    )
-    .args(["/f", "/im", "explorer.exe"])
-    .creation_flags(CREATE_NO_WINDOW)
-    .status();
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    let _ = std::process::Command::new(
-        std::env::var("SystemRoot").unwrap_or_default() + "\\explorer.exe",
-    )
-    .spawn();
+    let failure = || crate::t_pub("ctx_restart_failed");
+    let shell_pid = || unsafe {
+        let shell = GetShellWindow();
+        let mut pid = 0;
+        if !shell.is_invalid() {
+            GetWindowThreadProcessId(shell, Some(&mut pid));
+        }
+        pid
+    };
+    let old_pid = shell_pid();
+    if old_pid == 0 {
+        return Err(failure());
+    }
+    let mut session = 0;
+    let mut ours = 0;
+    unsafe {
+        windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(old_pid, &mut session)
+            .map_err(|_| failure())?;
+        windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(std::process::id(), &mut ours)
+            .map_err(|_| failure())?;
+    }
+    if session != ours {
+        return Err(failure());
+    }
+    let root = std::env::var("SystemRoot").map_err(|_| failure())?;
+    let mut task = std::process::Command::new(format!("{root}\\System32\\taskkill.exe"))
+        .args([
+            "/f",
+            "/pid",
+            &old_pid.to_string(),
+            "/fi",
+            &format!("SESSION eq {ours}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|_| failure())?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = task.try_wait().map_err(|_| failure())? {
+            if !status.success() {
+                return Err(failure());
+            }
+            break;
+        }
+        if Instant::now() >= deadline {
+            if task.kill().is_ok() {
+                let _ = task.wait();
+            }
+            return Err(failure());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Explorer commonly restarts itself. Give that path time before spawning
+    // another process; a successful spawn alone does not prove recovery.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let launch_at = Instant::now() + Duration::from_secs(2);
+    let mut launched = false;
+    loop {
+        let pid = shell_pid();
+        if pid != 0 && pid != old_pid {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(failure());
+        }
+        if !launched && Instant::now() >= launch_at {
+            std::process::Command::new(format!("{root}\\explorer.exe"))
+                .spawn()
+                .map_err(|_| failure())?;
+            launched = true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 // ---- Coexistence warnings -------------------------------------------------
@@ -798,6 +1027,62 @@ pub fn detect_conflicts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_sync_distinguishes_invalid_config_from_explicit_off_and_empty() {
+        use std::sync::atomic::Ordering;
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+        let old_config =
+            crate::runtime::lock(&crate::CONFIG).replace(idletrigger_core::config::Config {
+                ctx_menu_enabled: true,
+                ctx_copy_enabled: false,
+                ..Default::default()
+            });
+        let old_doc =
+            crate::runtime::lock(&crate::CONFIG_DOC).replace("ctx_rules = 42".parse().unwrap());
+        let old_blocked = crate::runtime::CTX_SYNC_BLOCKED.swap(false, Ordering::SeqCst);
+        let old_failed = crate::runtime::CONFIG_LOAD_FAILED.swap(false, Ordering::SeqCst);
+        assert!(desired_entries().is_err());
+        crate::runtime::lock(&crate::CONFIG)
+            .as_mut()
+            .unwrap()
+            .ctx_menu_enabled = false;
+        assert!(desired_entries().unwrap().is_empty());
+        crate::runtime::CTX_SYNC_BLOCKED.store(true, Ordering::SeqCst);
+        assert!(desired_entries().is_err());
+        crate::runtime::CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
+        crate::runtime::lock(&crate::CONFIG)
+            .as_mut()
+            .unwrap()
+            .ctx_menu_enabled = true;
+        *crate::runtime::lock(&crate::CONFIG_DOC) = Some("ctx_rules = []".parse().unwrap());
+        assert!(desired_entries().unwrap().is_empty());
+        *crate::runtime::lock(&crate::CONFIG) = old_config;
+        *crate::runtime::lock(&crate::CONFIG_DOC) = old_doc;
+        crate::runtime::CTX_SYNC_BLOCKED.store(old_blocked, Ordering::SeqCst);
+        crate::runtime::CONFIG_LOAD_FAILED.store(old_failed, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn classic_marker_requires_matching_generation_or_explicit_legacy_confirmation() {
+        assert_eq!(
+            classify_classic_marker("10:20", Some("v2:10:20")),
+            ClassicState::ByUs
+        );
+        assert_eq!(
+            classify_classic_marker("10:21", Some("v2:10:20")),
+            ClassicState::ByOther
+        );
+        assert_eq!(
+            classify_classic_marker("10:20", Some("1")),
+            ClassicState::Legacy
+        );
+        assert_eq!(
+            classify_classic_marker("10:20", None),
+            ClassicState::ByOther
+        );
+    }
 
     fn rule(id: &str, scope: &str) -> core_ctx::CtxRule {
         core_ctx::CtxRule {

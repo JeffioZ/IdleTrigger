@@ -183,6 +183,32 @@ fn checks() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i
 }
 
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
+static CLASSIC_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLASSIC_RESULT: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex::new(None);
+static CLASSIC_WORKER: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn finish_classic_restart() {
+    if let Some(worker) = crate::runtime::lock(&CLASSIC_WORKER).take() {
+        let _ = worker.join();
+    }
+    refresh_classic_restart();
+}
+
+pub(crate) fn refresh_classic_restart() {
+    let result = crate::runtime::lock(&CLASSIC_RESULT).take();
+    let Some(result) = result else {
+        return;
+    };
+    CLASSIC_BUSY.store(false, Ordering::SeqCst);
+    let window = theme_hwnd();
+    if !window.is_invalid() {
+        refresh_ctx_status(window);
+    }
+    if let Err(err) = result {
+        crate::warn_dialog("", &err);
+    }
+}
 static DRAFT_BASE: std::sync::Mutex<Option<idletrigger_core::config::Config>> =
     std::sync::Mutex::new(None);
 static PAGE: AtomicI32 = AtomicI32::new(0);
@@ -1991,7 +2017,8 @@ fn refresh_ctx_status(hwnd: HWND) {
     // Repair applies the saved state. A staged switch is not registry drift.
     let staged = is_checked(hwnd, ID_CTX_ENABLED);
     let saved = crate::cfg_map(|c| c.ctx_menu_enabled);
-    let drift = staged == saved && !crate::ctxmenu::registration_healthy();
+    let blocked = crate::ctxmenu::registration_blocked();
+    let drift = !blocked && staged == saved && !crate::ctxmenu::registration_healthy();
     let forced = crate::runtime::lock(&crate::ctxexec::CTX_RULES)
         .iter()
         .any(|r| r.enabled && r.separator);
@@ -2013,7 +2040,9 @@ fn refresh_ctx_status(hwnd: HWND) {
         crate::ctxmenu::classic_state() != crate::ctxmenu::ClassicState::Off,
     );
 
-    let issue = if !conflict.is_empty() {
+    let issue = if blocked {
+        t_pub("ctx_config_blocked")
+    } else if !conflict.is_empty() {
         conflict
     } else {
         String::new()
@@ -2021,6 +2050,10 @@ fn refresh_ctx_status(hwnd: HWND) {
     set_text(hwnd, ID_CTX_STATUS, &issue);
     set_text(hwnd, ID_CTX_FIX, &t_pub("ctx_drift_fix"));
     unsafe {
+        let _ = EnableWindow(
+            get(hwnd, ID_CTX_WIN11),
+            !CLASSIC_BUSY.load(Ordering::SeqCst),
+        );
         // The notice row lives BELOW the card at a fixed slot — the card
         // never resizes (dynamic heights fought the stacked-statics quirk:
         // flash on change, unpainted growth until hover).
@@ -2065,7 +2098,14 @@ fn conflict_text() -> String {
 /// afterwards — a declined confirm snaps back visually.
 fn on_win11_classic_switch(hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONWARNING, MB_YESNO, MessageBoxW};
+    if CLASSIC_BUSY.load(Ordering::SeqCst) {
+        return;
+    }
     let state = crate::ctxmenu::classic_state();
+    if state == crate::ctxmenu::ClassicState::Unavailable {
+        crate::warn_dialog("", &t_pub("ctx_registry_failed"));
+        return;
+    }
     let enable = state == crate::ctxmenu::ClassicState::Off;
     if !enable && state == crate::ctxmenu::ClassicState::ByOther {
         let note = t_pub("ctx_win11_other_tool");
@@ -2082,7 +2122,9 @@ fn on_win11_classic_switch(hwnd: HWND) {
         refresh_ctx_status(hwnd);
         return;
     }
-    let prompt = if enable {
+    let prompt = if state == crate::ctxmenu::ClassicState::Legacy {
+        t_pub("ctx_classic_legacy")
+    } else if enable {
         t_pub("ctx_win11_confirm_on")
     } else {
         t_pub("ctx_win11_confirm_off")
@@ -2105,13 +2147,35 @@ fn on_win11_classic_switch(hwnd: HWND) {
         return;
     }
     if let Err(err) = crate::edit_config(|c| c.ctx_win11_classic = enable) {
-        // The registry is authoritative; the flag only feeds self-heal.
+        // This is an action record, not a startup self-heal preference.
         crate::log_line(&format!("ctx win11 flag save failed: {err}"));
     }
     if let Some(base) = crate::runtime::lock(&DRAFT_BASE).as_mut() {
         base.ctx_win11_classic = crate::cfg_map(|c| c.ctx_win11_classic);
     }
-    crate::ctxmenu::restart_explorer();
+    CLASSIC_BUSY.store(true, Ordering::SeqCst);
+    let worker = std::thread::Builder::new()
+        .name("explorer-restart".into())
+        .spawn(|| {
+            let result = std::panic::catch_unwind(crate::ctxmenu::restart_explorer)
+                .unwrap_or_else(|_| Err(t_pub("ctx_restart_failed")));
+            *crate::runtime::lock(&CLASSIC_RESULT) = Some(result);
+            unsafe {
+                let _ = PostMessageW(
+                    Some(crate::hwnd(&crate::HIDDEN)),
+                    crate::WM_REFRESH_UI,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+    match worker {
+        Ok(worker) => *crate::runtime::lock(&CLASSIC_WORKER) = Some(worker),
+        Err(_) => {
+            CLASSIC_BUSY.store(false, Ordering::SeqCst);
+            crate::warn_dialog("", &t_pub("ctx_restart_failed"));
+        }
+    }
     rebuild_surface(hwnd);
     refresh_ctx_status(hwnd);
 }

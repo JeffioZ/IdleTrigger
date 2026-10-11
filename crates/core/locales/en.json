@@ -574,5 +574,9 @@
   "ctx_parse_failed": "Could not read this rule: %s",
   "tip_nosleep_battery_no_minimum": "Keeps awake on battery with no minimum battery level",
   "tip_ctx_add_separator": "Append a separator and save immediately. Unavailable when the list is empty, already ends with a separator, or is full. Separators appear only between rules",
-  "tip_automation_battery_level": "Trigger when the battery falls below this percentage. Enter a value from 1 to 95"
+  "tip_automation_battery_level": "Trigger when the battery falls below this percentage. Enter a value from 1 to 95",
+  "ctx_classic_legacy": "An older IdleTrigger ownership record exists, but the source of the current classic-menu setting cannot be confirmed. Turn off this system setting and restart Explorer? Open Explorer windows may close.",
+  "ctx_config_blocked": "Configuration errors prevent menu updates. Fix the configuration and save again.",
+  "ctx_restart_failed": "The classic-menu setting was changed, but Explorer restart could not be confirmed. Restart Windows Explorer in Task Manager, or sign out and sign in again.",
+  "ctx_classic_partial": "The classic-menu change could not be completed or safely rolled back. Check the Windows setting before retrying; other menu tools may have changed it."
 }
