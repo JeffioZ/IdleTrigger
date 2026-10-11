@@ -660,10 +660,8 @@ fn main() {
         ctxmenu::sync("startup");
     }
 
-    // Reclaim the previous round's update staging (logs a replace failure
-    // trail when present) and restore a staged-update phase so the panel
-    // link can offer "restart and update" without waiting for a fresh check.
-    selfupdate::cleanup_on_startup();
+    // Restore a staged-update phase so the panel can offer "restart and
+    // update". Reclamation waits until runtime initialization succeeds.
     selfupdate::restore_ready_phase();
     #[cfg(feature = "devtools")]
     let diagnostics = devtools::ENABLED.load(Ordering::SeqCst);
@@ -768,6 +766,8 @@ fn main() {
         refresh_update_button();
     }
 
+    // Confirm an applied update only after UI and runtime initialization.
+    selfupdate::cleanup_on_startup();
     let mut msg = msg_default();
     loop {
         let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };

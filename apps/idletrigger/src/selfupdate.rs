@@ -946,17 +946,16 @@ fn apply_ready_update() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
-    if command.spawn().is_err() {
-        return Err(crate::t_pub("update_err_spawn"));
-    }
-
-    // The next start reads this to decide whether the previous round
-    // succeeded. A write failure never blocks the update; leftovers are
-    // simply reclaimed after the next successful round.
+    // The replacement script requires this marker before it starts. The new
+    // process removes it only after successful runtime initialization.
     if let Err(error) = std::fs::write(dir.join(PENDING_APPLY_MARKER), &version) {
         crate::log_line(&format!(
             "self-update: writing the apply marker failed: {error}"
         ));
+        return Err(crate::t_pub("update_err_script"));
+    }
+    if command.spawn().is_err() {
+        return Err(crate::t_pub("update_err_spawn"));
     }
     crate::log_line(&format!(
         "self-update: applying {version}, exiting so the replace script can restart the app ({exe:?})"
@@ -979,6 +978,8 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
          $old = $dst + '.old'\n\
          $expected = '{}'\n\
          $replaced = $false\n\
+         $process = $null\n\
+         $marker = Join-Path (Split-Path -Parent $src) '{PENDING_APPLY_MARKER}'\n\
          try {{\n\
            if ((-not (Test-Path -LiteralPath $dst)) -and (Test-Path -LiteralPath $old)) {{ Move-Item -LiteralPath $old -Destination $dst -Force }}\n\
            Copy-Item -LiteralPath $src -Destination $new -Force\n\
@@ -993,13 +994,21 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
              }} catch {{ Start-Sleep -Milliseconds 500; $i++ }}\n\
            }}\n\
            if (-not $replaced) {{ throw 'unable to replace executable' }}\n\
-           $process = Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -PassThru\n\
-           Start-Sleep -Seconds 3\n\
-           if (-not $process.HasExited -and (Test-Path -LiteralPath $old)) {{ Remove-Item -LiteralPath $old -Force }}\n\
+           $process = Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -WindowStyle Hidden -PassThru\n\
+           $deadline = [DateTime]::UtcNow.AddMinutes(2)\n\
+           while (Test-Path -LiteralPath $marker) {{\n\
+             if ($process.HasExited) {{ throw 'updated executable exited before startup confirmation' }}\n\
+             if ([DateTime]::UtcNow -ge $deadline) {{ throw 'startup confirmation timed out; running process and backup retained' }}\n\
+             Start-Sleep -Milliseconds 250\n\
+           }}\n\
          }} catch {{\n\
-           if ((-not (Test-Path -LiteralPath $dst)) -and (Test-Path -LiteralPath $old)) {{ Copy-Item -LiteralPath $old -Destination $dst -Force }}\n\
+           $failure = $_\n\
            # Failure trail: the next start logs and deletes it (drain_replace_error).\n\
-           $_ | Out-File -LiteralPath (Join-Path (Split-Path -Parent $src) '{REPLACE_ERROR_LOG}') -Encoding utf8\n\
+           $failure | Out-File -LiteralPath (Join-Path (Split-Path -Parent $src) '{REPLACE_ERROR_LOG}') -Encoding utf8\n\
+           if ($replaced -and ($null -eq $process -or $process.HasExited) -and (Test-Path -LiteralPath $old)) {{\n\
+             if (Test-Path -LiteralPath $dst) {{ [System.IO.File]::Replace($old, $dst, $null, $true) }} else {{ Move-Item -LiteralPath $old -Destination $dst -Force }}\n\
+             Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -WindowStyle Hidden\n\
+           }} elseif ((-not (Test-Path -LiteralPath $dst)) -and (Test-Path -LiteralPath $old)) {{ Copy-Item -LiteralPath $old -Destination $dst -Force }}\n\
            exit 1\n\
          }} finally {{\n\
            if (Test-Path -LiteralPath $new) {{ Remove-Item -LiteralPath $new -Force }}\n\
