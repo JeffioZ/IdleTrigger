@@ -70,6 +70,7 @@ struct ChoiceData {
     first: i32,
     /// Open the popup above the anchor (Go PreferAbove for quick actions).
     prefer_above: bool,
+    centered: bool,
     update_caption: bool,
 }
 
@@ -231,6 +232,7 @@ pub fn set_rows(button: HWND, rows: &[ChoiceItem]) {
             pressed: -1,
             first: 0,
             prefer_above: false,
+            centered: false,
             update_caption: true,
         },
     );
@@ -283,6 +285,15 @@ pub fn set_prefer_above(button: HWND, prefer: bool) {
         .get_mut(&(button.0 as isize))
     {
         data.prefer_above = prefer;
+    }
+}
+
+pub fn set_centered(button: HWND, centered: bool) {
+    if let Some(data) = choices()
+        .as_mut()
+        .and_then(|map| map.get_mut(&(button.0 as isize)))
+    {
+        data.centered = centered;
     }
 }
 
@@ -521,7 +532,16 @@ fn open(button: HWND, owner: HWND, id: i32) {
             .as_ref()
             .and_then(|m| m.get(&(button.0 as isize)))
             .is_some_and(|d| d.prefer_above);
-        let mut x = anchor.left.max(work.left);
+        let centered = choices()
+            .as_ref()
+            .and_then(|map| map.get(&(button.0 as isize)))
+            .is_some_and(|data| data.centered);
+        let mut x = if centered {
+            anchor.left + (anchor.right - anchor.left - width) / 2
+        } else {
+            anchor.left
+        }
+        .max(work.left);
         let mut y = if prefer_above {
             anchor.top - height - crate::scale_pub(1)
         } else {

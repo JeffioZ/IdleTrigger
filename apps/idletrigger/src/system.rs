@@ -264,6 +264,49 @@ pub fn autostart_disable() -> bool {
         result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
     }
 }
+/// Windows 11 client only; newer Server builds do not use its menu switch.
+pub fn is_windows_11() -> bool {
+    static CLIENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    windows_build() >= 22000
+        && *CLIENT.get_or_init(|| unsafe {
+            use windows::Win32::System::Registry::*;
+            let mut key = HKEY::default();
+            if RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::w!("SYSTEM\\CurrentControlSet\\Control\\ProductOptions"),
+                None,
+                KEY_READ | KEY_WOW64_64KEY,
+                &mut key,
+            ) != ERROR_SUCCESS
+            {
+                return false;
+            }
+            let mut bytes = [0u8; 64];
+            let mut size = bytes.len() as u32;
+            let mut kind = REG_VALUE_TYPE::default();
+            let result = RegQueryValueExW(
+                key,
+                windows::core::w!("ProductType"),
+                None,
+                Some(&mut kind),
+                Some(bytes.as_mut_ptr()),
+                Some(&mut size),
+            );
+            let _ = RegCloseKey(key);
+            if result != ERROR_SUCCESS || kind != REG_SZ || size as usize > bytes.len() {
+                return false;
+            }
+            let text: Vec<u16> = bytes[..size as usize]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .take_while(|c| *c != 0)
+                .collect();
+            String::from_utf16_lossy(&text).eq_ignore_ascii_case("WinNT")
+        })
+}
+
 /// OS build from the machine registry; HKCU does not contain this version key.
 pub fn windows_build() -> u32 {
     static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();

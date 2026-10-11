@@ -310,16 +310,8 @@ pub fn handle_capture_timer() -> bool {
             );
         }
         17 => crate::choice::close(false),
-        20 => crate::settings_ui::devtools_select_page(5),
-        21 => {
-            shoot(
-                crate::settings_ui::devtools_capture_hwnd(),
-                out_dir.join("IdleTrigger-settings-page5-capture.bmp"),
-                "settings page 5",
-            );
-        }
-        22 => crate::ctx_ui::show(),
-        23 => {
+        18 => crate::ctx_ui::show(),
+        19 => {
             shoot(
                 crate::ctx_ui::devtools_hwnd(),
                 out_dir.join("IdleTrigger-ctx-manager-capture.bmp"),

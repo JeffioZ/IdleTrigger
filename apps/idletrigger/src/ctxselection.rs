@@ -6,8 +6,8 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{CLASS_E_NOAGGREGATION, E_FAIL, E_POINTER, POINT};
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::Shell::{
-    IExecuteCommand, IExecuteCommand_Impl, IObjectWithSelection, IObjectWithSelection_Impl,
-    IShellItemArray, SIGDN_FILESYSPATH,
+    IExecuteCommand, IExecuteCommand_Impl, IInitializeCommand, IInitializeCommand_Impl,
+    IObjectWithSelection, IObjectWithSelection_Impl, IShellItemArray, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, GUID, IUnknown, Interface, PCWSTR, Ref, Result, implement};
@@ -15,6 +15,8 @@ use windows::core::{BOOL, GUID, IUnknown, Interface, PCWSTR, Ref, Result, implem
 // Stable, application-owned CLSIDs. LocalServer32 works across bitness;
 // no DLL is loaded into Explorer and no service is installed.
 pub(crate) const FORMATS: [&str; 6] = ["full", "target", "dir", "name", "stem", "ext"];
+pub(crate) const RULE_CLASS: usize = FORMATS.len();
+pub(crate) const CLASS_COUNT: usize = RULE_CLASS + 1;
 pub(crate) fn clsid(index: usize) -> GUID {
     GUID::from_u128(0x3751ee7b_2c46_4e8a_9e65_e03a29d36810 + index as u128)
 }
@@ -45,10 +47,45 @@ fn release_startup() {
 
 // Keep Shell proxies, RefCell state and server lifetime on the STA thread.
 // windows-rs otherwise supplies the free-threaded marshaler by default.
-#[implement(IExecuteCommand, IObjectWithSelection, Agile = false)]
+#[implement(
+    IExecuteCommand,
+    IObjectWithSelection,
+    IInitializeCommand,
+    Agile = false
+)]
 struct CopyCommand {
-    format: &'static str,
+    class: usize,
+    rule_id: RefCell<Option<String>>,
     selection: RefCell<Option<IShellItemArray>>,
+}
+
+fn rule_id_from_command(command: &str) -> Option<String> {
+    let (index, id) = command.strip_prefix("IdleTriggerRule")?.split_once('_')?;
+    if index.is_empty()
+        || !index.bytes().all(|ch| ch.is_ascii_digit())
+        || id.is_empty()
+        || !id
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_')
+    {
+        return None;
+    }
+    Some(id.to_owned())
+}
+
+impl IInitializeCommand_Impl for CopyCommand_Impl {
+    fn Initialize(&self, command: &PCWSTR, _: Ref<StructuredStorage::IPropertyBag>) -> Result<()> {
+        if self.class == RULE_CLASS {
+            *self.rule_id.borrow_mut() = None;
+            if command.is_null() {
+                return Err(E_POINTER.into());
+            }
+            let command =
+                unsafe { command.to_string() }.map_err(|_| windows::core::Error::from(E_FAIL))?;
+            *self.rule_id.borrow_mut() = Some(rule_id_from_command(&command).ok_or(E_FAIL)?);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for CopyCommand {
@@ -98,11 +135,13 @@ impl IExecuteCommand_Impl for CopyCommand_Impl {
     fn Execute(&self) -> Result<()> {
         let selection = self.selection.borrow().clone().ok_or(E_FAIL)?;
         let paths = selection_paths(&selection)?;
-        if crate::ctxexec::copy_selection(self.format, &paths) {
-            Ok(())
+        let success = if self.class == RULE_CLASS {
+            let id = self.rule_id.borrow().clone().ok_or(E_FAIL)?;
+            crate::ctxexec::rule_selection(&id, &paths)
         } else {
-            Err(E_FAIL.into())
-        }
+            crate::ctxexec::copy_selection(FORMATS[self.class], &paths)
+        };
+        if success { Ok(()) } else { Err(E_FAIL.into()) }
     }
 }
 
@@ -127,7 +166,7 @@ fn selection_paths(selection: &IShellItemArray) -> Result<Vec<String>> {
 
 #[implement(IClassFactory, Agile = false)]
 struct Factory {
-    format: &'static str,
+    class: usize,
 }
 
 impl IClassFactory_Impl for Factory_Impl {
@@ -148,7 +187,8 @@ impl IClassFactory_Impl for Factory_Impl {
             CoAddRefServerProcess();
         }
         let command: IUnknown = CopyCommand {
-            format: self.format,
+            class: self.class,
+            rule_id: RefCell::new(None),
             selection: RefCell::new(None),
         }
         .into();
@@ -175,8 +215,8 @@ pub(crate) fn run() -> i32 {
         CoAddRefServerProcess(); // Activation has 30 seconds to arrive.
         let mut cookies = Vec::new();
         let result = (|| -> Result<()> {
-            for (index, format) in FORMATS.iter().enumerate() {
-                let factory: IClassFactory = Factory { format }.into();
+            for index in 0..CLASS_COUNT {
+                let factory: IClassFactory = Factory { class: index }.into();
                 cookies.push(CoRegisterClassObject(
                     &clsid(index),
                     &factory,
@@ -215,6 +255,26 @@ pub(crate) fn run() -> i32 {
 mod tests {
     use super::*;
     use windows::Win32::UI::Shell::{SHCreateShellItemArrayFromIDLists, SHParseDisplayName};
+
+    #[test]
+    fn command_identity_uses_rule_id_not_list_position() {
+        assert_eq!(
+            rule_id_from_command("IdleTriggerRule003_my_rule-2"),
+            Some("my_rule-2".into())
+        );
+        assert_eq!(
+            rule_id_from_command("IdleTriggerRule001_my_rule-2"),
+            Some("my_rule-2".into())
+        );
+        for invalid in [
+            "other",
+            "IdleTriggerRule003_",
+            "IdleTriggerRuleX_id",
+            "IdleTriggerRule003_a:b",
+        ] {
+            assert_eq!(rule_id_from_command(invalid), None);
+        }
+    }
 
     #[test]
     fn shell_selection_retains_all_items_order_and_unicode() {

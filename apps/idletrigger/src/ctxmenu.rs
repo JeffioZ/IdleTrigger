@@ -1,9 +1,10 @@
 //! Registry sync engine for the Explorer context-menu integration.
 //!
-//! Owned keys are prefixed verbs/cascades plus the six fixed copy-handler
+//! Owned keys are prefixed verbs/cascades plus the fixed selection-handler
 //! CLSIDs under HKCU\Software\Classes. Sync computes the desired map from
 //! live configuration, deletes stale owned keys, and rewrites changed ones.
-//! Nothing here ever touches keys owned by other software.
+//! Automatic sync touches only owned entries. The separately confirmed
+//! classic-menu switch can also remove an existing system override.
 
 use idletrigger_core::ctx_menu as core_ctx;
 use std::collections::BTreeMap;
@@ -53,6 +54,8 @@ const ECF_SEPARATOR_AFTER: u32 = 0x40;
 const RULES_MENU_KEY: &str = "IdleTriggerRulesMenu";
 const COPY_MENU_KEY: &str = "IdleTriggerCopyMenu";
 const COPY_VERB: &str = "IdleTriggerCopy";
+const GROUP_VERB: &str = "IdleTrigger";
+const GROUP_MENU_KEY: &str = "IdleTriggerMenu";
 /// Nilesoft Shell ordering: full path | parent | name family, with
 /// separator lines between the groups (ECF works inside cascades).
 const COPY_SUB_FORMATS: [(&str, &str); 6] = [
@@ -396,9 +399,16 @@ fn desired_entries() -> Result<BTreeMap<String, ValueMap>, String> {
     {
         return Err(crate::t_pub("ctx_config_blocked"));
     }
-    let (enabled, copy, submenu) = crate::runtime::lock(&crate::CONFIG)
+    let (enabled, copy, submenu, grouped) = crate::runtime::lock(&crate::CONFIG)
         .as_ref()
-        .map(|c| (c.ctx_menu_enabled, c.ctx_copy_enabled, c.ctx_rules_submenu))
+        .map(|c| {
+            (
+                c.ctx_menu_enabled,
+                c.ctx_copy_enabled,
+                c.ctx_rules_submenu,
+                c.ctx_menu_grouped,
+            )
+        })
         .ok_or_else(|| crate::t_pub("ctx_config_blocked"))?;
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
@@ -417,7 +427,149 @@ fn desired_entries() -> Result<BTreeMap<String, ValueMap>, String> {
     if exe.is_empty() {
         return Err(crate::t_pub("ctx_config_blocked"));
     }
-    Ok(build_entries(enabled, copy, submenu, &exe, &rules))
+    Ok(if grouped {
+        build_grouped_entries(enabled, copy, &exe, &rules)
+    } else {
+        build_entries(enabled, copy, submenu, &exe, &rules)
+    })
+}
+
+/// Keep files and folders on their shared root so mixed selections see one
+/// menu too. Scope restrictions move to AppliesTo on the individual rules.
+fn build_grouped_entries(
+    enabled: bool,
+    copy: bool,
+    exe: &str,
+    rules: &[core_ctx::CtxRule],
+) -> BTreeMap<String, ValueMap> {
+    let legacy = build_entries(enabled, copy, true, exe, rules);
+    let mut desired = legacy.clone();
+    for root in ALL_ROOTS {
+        desired.remove(&format!("{CLASSES}\\{root}\\shell\\{COPY_VERB}"));
+        desired.remove(&format!("{CLASSES}\\{root}\\shell\\{RULES_VERB}"));
+        let container = format!("{CLASSES}\\{root}\\{RULES_MENU_KEY}");
+        desired
+            .retain(|path, _| path != &container && !path.starts_with(&format!("{container}\\")));
+    }
+    // Merge item rules in their original order before assigning separators.
+    // The background keeps its original rule set and %V command.
+    let item_rules: Vec<_> = rules
+        .iter()
+        .cloned()
+        .map(|mut rule| {
+            if rule.scope != core_ctx::SCOPE_BACKGROUND {
+                rule.scope = core_ctx::SCOPE_FILE.into();
+            }
+            rule
+        })
+        .collect();
+    let item_entries = build_entries(enabled, false, true, exe, &item_rules);
+    for root in COPY_ROOTS {
+        let container = format!("{CLASSES}\\{root}\\{GROUP_MENU_KEY}");
+        let menu = format!("{container}\\shell");
+        let copy_verb = format!("{CLASSES}\\{root}\\shell\\{COPY_VERB}");
+        let copy_values = legacy.get(&copy_verb);
+        let (source, rule_root) = if root == "AllFilesystemObjects" {
+            (&item_entries, "*")
+        } else {
+            (&legacy, root)
+        };
+        let rules_prefix = format!("{CLASSES}\\{rule_root}\\{RULES_MENU_KEY}\\shell\\");
+        let mut children: BTreeMap<String, ValueMap> = source
+            .iter()
+            .filter_map(|(path, values)| {
+                path.strip_prefix(&rules_prefix)
+                    .map(|suffix| (suffix.to_owned(), values.clone()))
+            })
+            .collect();
+        if root == "AllFilesystemObjects" {
+            for (suffix, values) in &mut children {
+                if suffix.contains('\\') {
+                    continue;
+                }
+                let Some((_, id)) = suffix.split_once('_') else {
+                    continue;
+                };
+                let Some(rule) = rules.iter().find(|rule| rule.id == id) else {
+                    continue;
+                };
+                let scope = match rule.scope.as_str() {
+                    core_ctx::SCOPE_FILE => Some("NOT (System.ItemType:=\"Directory\")"),
+                    core_ctx::SCOPE_DIR => Some("System.ItemType:=\"Directory\""),
+                    _ => None,
+                };
+                if let Some(scope) = scope {
+                    let filter = match values.get(&Some("AppliesTo".into())) {
+                        Some(RegistryValue::Text(pattern)) => format!("({scope}) AND ({pattern})"),
+                        _ => scope.to_owned(),
+                    };
+                    text_value(values, Some("AppliesTo"), filter);
+                }
+            }
+        }
+        if copy_values.is_none() && children.is_empty() {
+            continue;
+        }
+        let mut values = ValueMap::new();
+        text_value(&mut values, None, "IdleTrigger");
+        text_value(&mut values, Some("Icon"), format!("{exe},-1"));
+        let model = if copy_values.is_some() {
+            "Player"
+        } else {
+            children
+                .iter()
+                .filter(|(suffix, _)| !suffix.contains('\\'))
+                .filter_map(
+                    |(_, child)| match child.get(&Some("MultiSelectModel".into())) {
+                        Some(RegistryValue::Text(model)) => Some(model.as_str()),
+                        _ => None,
+                    },
+                )
+                .max_by_key(|model| match *model {
+                    "Player" => 2,
+                    "Document" => 1,
+                    _ => 0,
+                })
+                .unwrap_or("Single")
+        };
+        text_value(&mut values, Some("MultiSelectModel"), model);
+        text_value(
+            &mut values,
+            Some("ExtendedSubCommandsKey"),
+            format!("{root}\\{GROUP_MENU_KEY}"),
+        );
+        // With copy tools off, suppress an otherwise empty parent menu.
+        if copy_values.is_none() {
+            let filters: Option<Vec<_>> = children
+                .iter()
+                .filter(|(suffix, _)| !suffix.contains('\\'))
+                .map(|(_, child)| match child.get(&Some("AppliesTo".into())) {
+                    Some(RegistryValue::Text(filter)) => Some(format!("({filter})")),
+                    _ => None,
+                })
+                .collect();
+            if let Some(filters) = filters.filter(|filters| !filters.is_empty()) {
+                text_value(&mut values, Some("AppliesTo"), filters.join(" OR "));
+            }
+        }
+        desired.insert(format!("{CLASSES}\\{root}\\shell\\{GROUP_VERB}"), values);
+        desired.insert(container, ValueMap::new());
+        desired.insert(menu.clone(), ValueMap::new());
+        if let Some(copy_values) = copy_values {
+            let mut values = copy_values.clone();
+            if !children.is_empty() {
+                values.insert(
+                    Some("CommandFlags".into()),
+                    RegistryValue::Dword(ECF_SEPARATOR_AFTER),
+                );
+            }
+            desired.insert(format!("{menu}\\000_{COPY_VERB}"), values);
+        }
+        for (suffix, values) in children {
+            desired.insert(format!("{menu}\\{suffix}"), values);
+        }
+    }
+    desired
 }
 
 fn build_entries(
@@ -432,20 +584,28 @@ fn build_entries(
         return desired;
     }
     let app_icon = format!("{exe},-1");
-    if copy {
-        for index in 0..crate::ctxselection::FORMATS.len() {
+    {
+        for index in 0..crate::ctxselection::CLASS_COUNT {
+            if (index < crate::ctxselection::RULE_CLASS && !copy)
+                || (index == crate::ctxselection::RULE_CLASS
+                    && !rules.iter().any(|rule| rule.enabled && !rule.separator))
+            {
+                continue;
+            }
             let class = format!(
                 "{CLASSES}\\CLSID\\{}",
                 crate::ctxselection::class_name(index)
             );
             let mut values = ValueMap::new();
-            text_value(&mut values, None, "IdleTrigger copy selection");
+            text_value(&mut values, None, "IdleTrigger shell selection");
             desired.insert(class.clone(), values);
             let mut server = ValueMap::new();
             text_value(&mut server, None, format!("\"{exe}\" ctx-selection"));
             text_value(&mut server, Some("ServerExecutable"), exe);
             desired.insert(format!("{class}\\LocalServer32"), server);
         }
+    }
+    if copy {
         for root in COPY_ROOTS {
             let placeholder = if root == "Directory\\Background" {
                 "%V"
@@ -533,6 +693,17 @@ fn build_entries(
             let mut values = ValueMap::new();
             text_value(&mut values, None, crate::t("ctx_rules_menu_title"));
             text_value(&mut values, Some("Icon"), &app_icon);
+            let model = applicable
+                .iter()
+                .filter(|(_, rule)| !rule.separator)
+                .map(|(_, rule)| match rule.selection_mode {
+                    core_ctx::SelectionMode::Single => (0, "Single"),
+                    core_ctx::SelectionMode::Each => (1, "Document"),
+                    core_ctx::SelectionMode::Together => (2, "Player"),
+                })
+                .max()
+                .map_or("Single", |(_, model)| model);
+            text_value(&mut values, Some("MultiSelectModel"), model);
             text_value(
                 &mut values,
                 Some("ExtendedSubCommandsKey"),
@@ -566,7 +737,15 @@ fn build_entries(
             let mut values = ValueMap::new();
             text_value(&mut values, None, &rule.title);
             text_value(&mut values, Some("Icon"), rule_icon(rule, &app_icon));
-            text_value(&mut values, Some("MultiSelectModel"), "Document");
+            text_value(
+                &mut values,
+                Some("MultiSelectModel"),
+                match rule.selection_mode {
+                    core_ctx::SelectionMode::Single => "Single",
+                    core_ctx::SelectionMode::Each => "Document",
+                    core_ctx::SelectionMode::Together => "Player",
+                },
+            );
             if let Some(aqs) = core_ctx::applies_to_aqs(&rule.patterns) {
                 text_value(&mut values, Some("AppliesTo"), aqs);
             }
@@ -582,6 +761,13 @@ fn build_entries(
                 None,
                 format!("\"{exe}\" ctx rule {} \"{placeholder}|\"", rule.id),
             );
+            if root != "Directory\\Background" {
+                text_value(
+                    &mut command,
+                    Some("DelegateExecute"),
+                    crate::ctxselection::class_name(crate::ctxselection::RULE_CLASS),
+                );
+            }
             desired.insert(format!("{child}\\command"), command);
             previous = Some(child);
         }
@@ -599,7 +785,7 @@ fn collect_tree(path: String, keys: &mut Vec<String>) {
 /// Enumerate only our verbs, cascade containers and fixed COM classes.
 fn owned_keys() -> Vec<String> {
     let mut owned = Vec::new();
-    for index in 0..crate::ctxselection::FORMATS.len() {
+    for index in 0..crate::ctxselection::CLASS_COUNT {
         let path = format!(
             "{CLASSES}\\CLSID\\{}",
             crate::ctxselection::class_name(index)
@@ -618,7 +804,7 @@ fn owned_keys() -> Vec<String> {
                 collect_tree(format!("{shell}\\{name}"), &mut owned);
             }
         }
-        for name in [COPY_MENU_KEY, RULES_MENU_KEY] {
+        for name in [COPY_MENU_KEY, RULES_MENU_KEY, GROUP_MENU_KEY] {
             let path = format!("{CLASSES}\\{root}\\{name}");
             if key_exists(&path) {
                 collect_tree(path, &mut owned);
@@ -772,14 +958,15 @@ pub enum ClassicState {
     Off,
     /// Rollback key present and written by IdleTrigger.
     ByUs,
-    /// Rollback key present from another tool; we never fight over it.
+    /// Rollback key present without a matching current ownership record.
     ByOther,
     Legacy,
     Unavailable,
 }
 
 // A timestamp is a conservative change detector, not proof of ownership.
-// Only the expected empty default value, with no children, is removable.
+// Only the expected empty default value, with no children, can be recognized
+// as our own override for automatic rollback of a failed enable operation.
 fn classic_stamp() -> Result<Option<String>, String> {
     let mut key = HKEY::default();
     let status = unsafe {
@@ -921,20 +1108,10 @@ pub fn set_classic(on: bool) -> Result<(), String> {
         }
         Ok(())
     } else {
-        if !matches!(classic_state(), ClassicState::ByUs | ClassicState::Legacy) {
-            return Err(crate::t_pub("ctx_win11_other_tool"));
-        }
-        // Upgrade a legacy marker before removing the target. Even if marker
-        // cleanup later fails, it cannot claim an unrelated recreated key.
-        let stamp = classic_stamp()?.ok_or_else(|| crate::t_pub("ctx_registry_failed"))?;
-        if stamp == "foreign"
-            || !write_sz(WIN11_CLASSIC_MARKER, Some("Value"), &format!("v2:{stamp}"))
-        {
-            return Err(crate::t_pub("ctx_registry_failed"));
-        }
-        if classic_stamp()?.as_deref() != Some(&stamp) {
-            return Err(crate::t_pub("ctx_win11_other_tool"));
-        }
+        // The user explicitly confirmed restoring the Windows default.
+        // Ownership is irrelevant for this manual action. Remove only the
+        // exact InprocServer32 override (non-recursively); do not remove its
+        // parent CLSID or unrelated menu registrations.
         if !delete_classic_key() {
             return Err(crate::t_pub("ctx_registry_failed"));
         }
@@ -1154,6 +1331,73 @@ mod tests {
     }
 
     #[test]
+    fn unified_menu_keeps_one_root_and_preserves_leaf_filters_and_handlers() {
+        let rules = vec![
+            core_ctx::CtxRule {
+                patterns: vec!["*.txt".into()],
+                selection_mode: core_ctx::SelectionMode::Together,
+                args: "%*".into(),
+                ..rule("file", core_ctx::SCOPE_FILE)
+            },
+            core_ctx::CtxRule {
+                separator: true,
+                ..Default::default()
+            },
+            rule("second", core_ctx::SCOPE_FILE),
+            rule("bg", core_ctx::SCOPE_BACKGROUND),
+        ];
+        let grouped = build_grouped_entries(true, true, "app.exe", &rules);
+        assert!(grouped.contains_key(&format!(
+            "{CLASSES}\\AllFilesystemObjects\\shell\\{GROUP_VERB}"
+        )));
+        for root in COPY_ROOTS {
+            assert!(grouped.contains_key(&format!("{CLASSES}\\{root}\\shell\\{GROUP_VERB}")));
+            let menu = format!("{CLASSES}\\{root}\\{GROUP_MENU_KEY}\\shell");
+            assert!(grouped.contains_key(&format!("{menu}\\000_{COPY_VERB}")));
+            assert!(!grouped.contains_key(&format!("{CLASSES}\\{root}\\shell\\{RULES_VERB}")));
+            assert!(!grouped.contains_key(&format!("{CLASSES}\\{root}\\shell\\{COPY_VERB}")));
+        }
+        for root in ["*", "Directory"] {
+            assert!(!grouped.contains_key(&format!("{CLASSES}\\{root}\\shell\\{GROUP_VERB}")));
+            assert!(!grouped.contains_key(&format!("{CLASSES}\\{root}\\shell\\{RULES_VERB}")));
+        }
+        let file = format!(
+            "{CLASSES}\\AllFilesystemObjects\\{GROUP_MENU_KEY}\\shell\\IdleTriggerRule000_file"
+        );
+        assert!(grouped[&file].contains_key(&Some("AppliesTo".into())));
+        let RegistryValue::Text(filter) = &grouped[&file][&Some("AppliesTo".into())] else {
+            panic!("missing filter");
+        };
+        assert!(filter.contains("NOT (System.ItemType:=\"Directory\")"));
+        assert!(filter.contains("System.FileExtension:=\".txt\""));
+        assert_eq!(
+            grouped[&file][&Some("MultiSelectModel".into())],
+            RegistryValue::Text("Player".into())
+        );
+        assert!(grouped[&file].contains_key(&Some("CommandFlags".into())));
+        assert!(grouped[&format!("{file}\\command")].contains_key(&Some("DelegateExecute".into())));
+        assert!(
+            !grouped
+                .keys()
+                .any(|path| path.contains("Directory\\") && path.contains("_file"))
+        );
+        // Every cascade reference resolves to an existing nonempty child list.
+        for values in grouped.values() {
+            if let Some(RegistryValue::Text(target)) =
+                values.get(&Some("ExtendedSubCommandsKey".into()))
+            {
+                let prefix = format!("{CLASSES}\\{target}\\shell\\");
+                assert!(grouped.keys().any(|path| path.starts_with(&prefix)));
+            }
+        }
+        let rules_only = build_grouped_entries(true, false, "app.exe", &rules);
+        assert!(!rules_only.contains_key(&format!("{CLASSES}\\Drive\\shell\\{GROUP_VERB}")));
+        assert!(!rules_only.contains_key(&format!("{CLASSES}\\Directory\\shell\\{GROUP_VERB}")));
+        assert!(build_grouped_entries(true, false, "app.exe", &[]).is_empty());
+        assert!(build_grouped_entries(false, true, "app.exe", &rules).is_empty());
+    }
+
+    #[test]
     fn cascades_keep_scope_filters_background_parameters_and_containers() {
         let file = core_ctx::CtxRule {
             patterns: vec!["*.txt".into()],
@@ -1249,5 +1493,60 @@ mod tests {
                 .any(|path| path.contains("Directory\\Background")
                     && path.contains("ctx_copy_target"))
         );
+    }
+
+    #[test]
+    fn rule_selection_modes_register_their_model_and_complete_selection_handler() {
+        for (mode, model) in [
+            (core_ctx::SelectionMode::Single, "Single"),
+            (core_ctx::SelectionMode::Each, "Document"),
+            (core_ctx::SelectionMode::Together, "Player"),
+        ] {
+            let rule = core_ctx::CtxRule {
+                id: "selected".into(),
+                title: "Selected".into(),
+                command: "tool.exe".into(),
+                args: "%*".into(),
+                scope: core_ctx::SCOPE_ALL.into(),
+                selection_mode: mode,
+                ..Default::default()
+            };
+            let map = build_entries(true, false, true, "app.exe", std::slice::from_ref(&rule));
+            let grouped =
+                build_grouped_entries(true, false, "app.exe", std::slice::from_ref(&rule));
+            for (map, root, verb) in [
+                (&map, "*", RULES_VERB),
+                (&grouped, "AllFilesystemObjects", GROUP_VERB),
+            ] {
+                assert_eq!(
+                    map[&format!("{CLASSES}\\{root}\\shell\\{verb}")]
+                        [&Some("MultiSelectModel".into())],
+                    RegistryValue::Text(model.into())
+                );
+            }
+            let with_copy = build_grouped_entries(true, true, "app.exe", &[rule]);
+            assert_eq!(
+                with_copy[&format!("{CLASSES}\\AllFilesystemObjects\\shell\\{GROUP_VERB}")]
+                    [&Some("MultiSelectModel".into())],
+                RegistryValue::Text("Player".into())
+            );
+            let class = crate::ctxselection::class_name(crate::ctxselection::RULE_CLASS);
+            assert!(map.contains_key(&format!("{CLASSES}\\CLSID\\{class}\\LocalServer32")));
+            for (path, values) in &map {
+                if path.ends_with("_selected") {
+                    assert_eq!(
+                        values[&Some("MultiSelectModel".into())],
+                        RegistryValue::Text(model.into())
+                    );
+                }
+                if path.ends_with("\\command") {
+                    assert_eq!(
+                        values.contains_key(&Some("DelegateExecute".into())),
+                        !path.contains("Directory\\Background")
+                    );
+                }
+            }
+        }
+        assert!(build_entries(false, true, true, "app.exe", &[]).is_empty());
     }
 }

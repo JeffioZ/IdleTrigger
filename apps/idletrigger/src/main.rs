@@ -102,6 +102,9 @@ const IDC_AUTOMATION_SUMMARY: usize = 212;
 const IDC_THEME_SCHEDULE: usize = 213;
 const IDC_AUTOMATION: usize = 141;
 const IDC_MANAGE_BUTTON: usize = 147;
+const IDC_AUTOMATION_NEW: usize = 162;
+const IDC_APPEARANCE: usize = 163;
+const IDC_SCREEN_ENABLE: usize = 165;
 // 190: must stay clear of the owner-draw static ranges (201-219) and the
 // row-label range (221-229) — an id inside those draws as a static/label
 // instead of a link (that is how the footer ctx link lost its style).
@@ -175,20 +178,14 @@ fn panel_font_status() -> HFONT {
 // face; section actions sit at the right end of the header row. A bare
 // button row closes the panel — the cards separate it, no hairline needed.
 const PANEL_CLIENT_WIDTH: i32 = 486;
-// Exact flow: pad12 + (title 18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
-// + (18 + 4 + card(8 + 36+6 + 20 + 8)) + 10
-// + (18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
-// + (18 + 4 + card(8 + 20 + 8 + 8)) + pad12 = 488
-// (the footer is a slim "More" card hosting the link row; the update row is
-// an on-demand extra row of links below it).
-// The panel stays 488 without an update and grows upward by
-// (LINK_BOX_H + CARD_GAP) when one appears (see sync_update_row)
-// — the footer card never moves.
-const PANEL_CLIENT_HEIGHT: i32 = 488;
+// Three feature cards and a footer with lock-key controls and navigation.
+// An available update adds its own row below this fixed content height.
+const PANEL_CLIENT_HEIGHT: i32 = 538;
 // Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
 const WM_IDLE_CANCEL: u32 = 0x8003;
 const WM_REFRESH_UI: u32 = 0x8004;
+const WM_PANEL_NEW_TASK: u32 = 0x8046;
 const WM_ACTION_SHOW: u32 = 0x8005;
 const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
@@ -383,7 +380,9 @@ fn is_link_id(id: usize) -> bool {
         IDC_NOSLEEP_TIMED_CANCEL
             | IDC_THEME_SNOOZE_CANCEL
             | IDC_MANAGE_BUTTON
+            | IDC_AUTOMATION_NEW
             | IDC_THEME_REPAIR
+            | IDC_APPEARANCE
             | IDC_UPDATE_BUTTON
             | IDC_UPDATE_NOTES_LINK
     )
@@ -493,8 +492,12 @@ fn refresh_language() {
         (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
         (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
         (IDC_MANAGE_BUTTON, "panel_manage_link"),
+        (IDC_AUTOMATION_NEW, "panel_new_task_link"),
         (IDC_CTX_BUTTON, "panel_ctx_link"),
         (IDC_THEME_REPAIR, "panel_repair_link"),
+        (IDC_APPEARANCE, "panel_appearance_link"),
+        (IDC_SCREEN_ENABLE, "settings_lock_keys"),
+        (IDC_ROW_LABEL_BASE + 4, "settings_lock_keys"),
         (IDC_SETTINGS_BUTTON, "settings_open"),
         (IDC_EXIT_BUTTON, "menu_exit_panel"),
         (IDC_UPDATE_NOTES_LINK, "panel_update_notes"),
@@ -1248,6 +1251,7 @@ fn toggle_value(id: usize) -> bool {
         IDC_IDLE => cfg_map(|c| c.idle_enabled),
         IDC_AUTOMATION => cfg_map(|c| c.automation_enabled),
         IDC_THEME_ENABLE => cfg_map(|c| c.theme_switch_enabled),
+        IDC_SCREEN_ENABLE => cfg_map(|c| c.lock_keys_enabled),
         _ => false,
     }
 }
@@ -1289,7 +1293,7 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             paint::draw_row_label(dc, bounds, panel_font_body(), &label, p, p.surface);
         } else if matches!(
             id,
-            IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION | IDC_THEME_ENABLE
+            IDC_NOSLEEP | IDC_IDLE | IDC_AUTOMATION | IDC_THEME_ENABLE | IDC_SCREEN_ENABLE
         ) {
             // Right-aligned pill switches for label-left rows.
             let mut state = nativeform::control_state(item.control, item.state);
@@ -1476,6 +1480,10 @@ unsafe extern "system" fn panel_proc(
 ) -> LRESULT {
     guarded_proc("panel", hwnd_, msg, wparam, lparam, move || unsafe {
         match msg {
+            WM_PANEL_NEW_TASK => {
+                automation_ui::show_template(wparam.0);
+                LRESULT(0)
+            }
             WM_CLOSE => {
                 let _ = ShowWindow(hwnd_, SW_HIDE);
                 let _ = KillTimer(Some(hwnd_), SWITCH_ANIM_TIMER);
@@ -1584,18 +1592,60 @@ unsafe extern "system" fn panel_proc(
                     }
                 } else if code == IDC_NOSLEEP_TIMED_CANCEL {
                     clear_timed_nosleep();
+                } else if code == IDC_AUTOMATION_NEW {
+                    let button =
+                        GetDlgItem(Some(hwnd_), IDC_AUTOMATION_NEW as i32).unwrap_or_default();
+                    if ((wparam.0 >> 16) & 0xFFFF) == 1 {
+                        // CBN_SELCHANGE
+                        if let Ok(index) = choice::value(button).parse::<usize>() {
+                            // Let the flyout finish tearing down before changing modal owners.
+                            let _ = PostMessageW(
+                                Some(hwnd_),
+                                WM_PANEL_NEW_TASK,
+                                WPARAM(index),
+                                LPARAM(0),
+                            );
+                        }
+                    } else {
+                        automation_ui::show_template_menu(button, hwnd_, IDC_AUTOMATION_NEW);
+                    }
                 } else if code == IDC_MANAGE_BUTTON {
                     automation_ui::show();
                 } else if code == IDC_CTX_BUTTON {
                     ctx_ui::show();
                 } else if code == IDC_SETTINGS_BUTTON {
                     settings_ui::show();
+                } else if code == IDC_APPEARANCE {
+                    settings_ui::show_appearance();
+                } else if code == IDC_SCREEN_ENABLE {
+                    let before = toggle_value(code);
+                    if !before
+                        && !cfg_map(|c| {
+                            c.lock_keys_caps_enabled
+                                || c.lock_keys_num_enabled
+                                || c.lock_keys_scroll_enabled
+                        })
+                    {
+                        settings_ui::configure_notification_keys();
+                        return LRESULT(0);
+                    }
+                    if let Err(error) = edit_config(|config| config.lock_keys_enabled = !before) {
+                        warn_dialog("", &error);
+                    } else {
+                        start_switch_animation(
+                            GetDlgItem(Some(hwnd_), code as i32).unwrap_or_default(),
+                            before,
+                            !before,
+                        );
+                    }
+                    refresh_status();
                 } else if code == IDC_THEME_ENABLE {
                     let before = toggle_value(code);
                     crate::tooltips::set_suppressed(true);
                     theme_engine::toggle_enabled();
                     arm_switch_flights(&[(code, before)]);
                     refresh_checkboxes();
+                    refresh_status();
                     invalidate_control(IDC_THEME_ENABLE);
                 } else if code == IDC_THEME_SWITCH {
                     theme_engine::manual_switch();
@@ -1608,6 +1658,9 @@ unsafe extern "system" fn panel_proc(
                     code,
                     IDC_THEME_SNOOZE_30M | IDC_THEME_SNOOZE_1H | IDC_THEME_SNOOZE_MORNING
                 ) {
+                    if !cfg_map(|c| c.theme_switch_enabled) {
+                        return LRESULT(0);
+                    }
                     // Clicking the armed snooze again cancels it, mirroring
                     // the header cancel link.
                     if SNOOZE_ARMED_CHIP.load(Ordering::SeqCst) == code {
@@ -1772,6 +1825,9 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
         let root = GetAncestor(msg.hwnd, GA_ROOT);
         if root.is_invalid() {
             return false;
+        }
+        if ctx_ui::handle_key(root, msg.wParam.0) {
+            return true;
         }
         let default = ctx_ui::default_button(root)
             .or_else(|| automation_ui::default_button(root))
@@ -2109,6 +2165,19 @@ fn create_windows() {
         owner_button(
             &ControlSpec {
                 parent: panel,
+                label: t("panel_new_task_link"),
+                x: 0,
+                y: 0,
+                width: scale(4),
+                id: IDC_AUTOMATION_NEW,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_BOX_H),
+        );
+        owner_button(
+            &ControlSpec {
+                parent: panel,
                 label: t("panel_manage_link"),
                 x: 0,
                 y: 0,
@@ -2183,6 +2252,19 @@ fn create_windows() {
             subtitle_font,
         );
         HEADER_LINK_ROWS[2].store(y as isize, Ordering::SeqCst);
+        owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("panel_appearance_link"),
+                x: 0,
+                y: 0,
+                width: scale(4),
+                id: IDC_APPEARANCE,
+                instance,
+                font: subtitle_font,
+            },
+            scale(LINK_BOX_H),
+        );
         let snooze_cancel = owner_button(
             &ControlSpec {
                 parent: panel,
@@ -2306,10 +2388,38 @@ fn create_windows() {
             subtitle_font,
         );
         y += SECTION_H + TITLE_GAP;
-        let footer_card_h = CHIP_H + 2 * CARD_PAD_Y;
+        // Leave extra breathing room below the navigation buttons.
+        let footer_card_h = BUTTON_H + LABEL_GAP + CHIP_H + CARD_PAD_Y + 16;
         make_card(IDC_CARD_BASE + 3, y, footer_card_h);
+        let screen_y = y + CARD_PAD_Y;
+        owner_static(
+            &ControlSpec {
+                parent: panel,
+                label: t("settings_lock_keys"),
+                x: scale(row_x),
+                y: scale(screen_y),
+                width: scale(row_width - SWITCH_HIT_W - GAP),
+                id: IDC_ROW_LABEL_BASE + 4,
+                instance,
+                font,
+            },
+            scale(BUTTON_H),
+        );
+        owner_button(
+            &ControlSpec {
+                parent: panel,
+                label: t("settings_lock_keys"),
+                x: scale(row_x + row_width - SWITCH_HIT_W),
+                y: scale(screen_y),
+                width: scale(SWITCH_HIT_W),
+                id: IDC_SCREEN_ENABLE,
+                instance,
+                font,
+            },
+            scale(BUTTON_H),
+        );
         FOOTER_LINK_Y.store(
-            (y + (footer_card_h - CHIP_H) / 2) as isize,
+            (y + CARD_PAD_Y + BUTTON_H + LABEL_GAP) as isize,
             Ordering::SeqCst,
         );
         for (id, key) in FOOTER_LINKS {
@@ -2672,11 +2782,11 @@ const FOOTER_LINKS: [(usize, &str); 3] = [
 ];
 
 /// Header action links wrap their text exactly (hit box == display box) and
-/// center on the switch column of the card below; the theme's snooze cancel
+/// align with the content right edge below; the theme's snooze cancel
 /// parks in a fixed slot left of the repair link.
 fn layout_header_links(panel: HWND) {
     let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
-    let center = PAD + card_w - CARD_PAD_X - SWITCH_HIT_W / 2;
+    let right = PAD + card_w - CARD_PAD_X;
     let place = |id: usize, section: usize, left_of: Option<usize>| {
         let Ok(link) = (unsafe { GetDlgItem(Some(panel), id as i32) }) else {
             return;
@@ -2697,10 +2807,11 @@ fn layout_header_links(panel: HWND) {
                 let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(panel, &mut pt) };
                 pt.x - scale(GAP) - width
             }
-            None => scale(center) - width / 2,
+            None => scale(right) - width,
         };
         let row = scale(HEADER_LINK_ROWS[section].load(Ordering::SeqCst) as i32);
-        let y = row + (scale(SECTION_H) - scale(LINK_BOX_H)) / 2;
+        let height = scale(LINK_BOX_H);
+        let y = row + (scale(SECTION_H) - height) / 2;
         let _ = unsafe {
             SetWindowPos(
                 link,
@@ -2708,7 +2819,7 @@ fn layout_header_links(panel: HWND) {
                 x,
                 y,
                 width,
-                scale(CHIP_H),
+                height,
                 SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             )
         };
@@ -2717,13 +2828,14 @@ fn layout_header_links(panel: HWND) {
     // (refresh_update_button); header links never move because of it.
     place(IDC_NOSLEEP_TIMED_CANCEL, 0, None);
     place(IDC_MANAGE_BUTTON, 1, None);
+    place(IDC_AUTOMATION_NEW, 1, Some(IDC_MANAGE_BUTTON));
     place(IDC_THEME_REPAIR, 2, None);
-    place(IDC_THEME_SNOOZE_CANCEL, 2, Some(IDC_THEME_REPAIR));
+    place(IDC_APPEARANCE, 2, Some(IDC_THEME_REPAIR));
+    place(IDC_THEME_SNOOZE_CANCEL, 2, Some(IDC_APPEARANCE));
 }
 
-/// Footer card row: the four links flow as one centered group with a fixed
-/// comfortable gap — edge-to-edge spreading left four short labels looking
-/// lost on the wide card.
+/// Footer buttons share the cards' content left edge. Version metadata
+/// is centered in the remaining space to the content right edge.
 fn layout_footer_links(panel: HWND) {
     let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
     let row_x = PAD + CARD_PAD_X;
@@ -2741,12 +2853,10 @@ fn layout_footer_links(panel: HWND) {
             scale(measured_text_width(panel, panel_font_body(), &text).max(16))
         })
         .collect();
-    // Chips + version flow as ONE centered cluster: the whole row re-balances
-    // as captions or the version string grow, so nothing ever drifts toward
-    // an edge (a fixed blank-zone center would, once digits accumulate).
-    let pad = scale(18);
+    let pad = scale(12);
     let mut widths: Vec<i32> = widths.into_iter().map(|w| w + 2 * pad).collect();
-    let mut gap = scale(16);
+    let gap = scale(GAP);
+    let mut version_gap = scale(24);
     let version = unsafe { GetDlgItem(Some(panel), IDC_FOOTER_VERSION as i32) }.unwrap_or_default();
     let version_text = if version.is_invalid() {
         String::new()
@@ -2761,16 +2871,17 @@ fn layout_footer_links(panel: HWND) {
     let row_w = scale(card_w - 2 * CARD_PAD_X);
     let count = widths.len() as i32;
     let has_version = !version_text.is_empty();
-    let gap_count = count - 1 + i32::from(has_version);
-    if widths.iter().sum::<i32>() + vw + gap * gap_count > row_w {
-        gap = scale(6);
+    let action_gaps = gap * (count - 1);
+    if widths.iter().sum::<i32>() + action_gaps + vw + if has_version { version_gap } else { 0 }
+        > row_w
+    {
+        version_gap = scale(12);
         for width in &mut widths {
-            *width -= 2 * scale(10);
+            *width -= 2 * scale(4);
         }
-        vw = vw.min((row_w - widths.iter().sum::<i32>() - gap * gap_count).max(0));
+        vw = vw.min((row_w - widths.iter().sum::<i32>() - action_gaps - version_gap).max(0));
     }
-    let total: i32 = widths.iter().sum::<i32>() + vw + gap * gap_count;
-    let mut x = scale(row_x) + (row_w - total).max(0) / 2;
+    let mut x = scale(row_x);
     for ((id, _), width) in FOOTER_LINKS.into_iter().zip(widths) {
         let Ok(link) = (unsafe { GetDlgItem(Some(panel), id as i32) }) else {
             continue;
@@ -2789,6 +2900,9 @@ fn layout_footer_links(panel: HWND) {
         x += width + gap;
     }
     if has_version {
+        let remaining_left = x - gap;
+        let remaining_width = scale(row_x) + row_w - remaining_left;
+        x = remaining_left + (remaining_width - vw).max(0) / 2;
         let _ = unsafe {
             SetWindowPos(
                 version,
@@ -3598,8 +3712,7 @@ fn on_toggle(code: usize) {
     refresh_status();
 }
 
-/// Go dialog.Warn: simple warning box owned by the desktop (NULL parent),
-/// titled with the app name.
+/// Keep warnings modal to this thread's active window when one exists.
 fn warn_dialog(heading: &str, body: &str) {
     let text = match (heading.is_empty(), body.is_empty()) {
         (true, _) => body.to_string(),
@@ -3609,8 +3722,9 @@ fn warn_dialog(heading: &str, body: &str) {
     let text_wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     let title_wide: Vec<u16> = t_pub("app_title").encode_utf16().chain([0]).collect();
     unsafe {
+        let active = windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow();
         let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-            None,
+            (!active.is_invalid()).then_some(active),
             PCWSTR(text_wide.as_ptr()),
             PCWSTR(title_wide.as_ptr()),
             windows::Win32::UI::WindowsAndMessaging::MB_OK
@@ -3927,11 +4041,36 @@ fn power_status_impl(compact: bool) -> (String, String) {
 }
 
 fn refresh_status() {
+    accessibility::check(
+        unsafe { GetDlgItem(Some(hwnd(&PANEL)), IDC_SCREEN_ENABLE as i32).unwrap_or_default() },
+        cfg_map(|c| c.lock_keys_enabled),
+    );
+    invalidate_control(IDC_SCREEN_ENABLE);
+    automation_ui::refresh_runtime_state();
     // Cancel chips are only visible while their row has something armed. An
     // expired preset must also lose its accent outline: the chip never
     // repaints on its own, so invalidate it when the marker is cleared.
     let timed_armed = timed_nosleep_state().is_some();
     let snooze_armed = theme_engine::snooze_deadline().is_some();
+    let automatic_theme = cfg_map(|c| c.theme_switch_enabled);
+    for id in [
+        IDC_THEME_SNOOZE_30M,
+        IDC_THEME_SNOOZE_1H,
+        IDC_THEME_SNOOZE_MORNING,
+    ] {
+        if let Ok(button) = unsafe { GetDlgItem(Some(hwnd(&PANEL)), id as i32) } {
+            unsafe {
+                if windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(button).as_bool()
+                    != automatic_theme
+                {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+                        button,
+                        automatic_theme,
+                    );
+                }
+            }
+        }
+    }
     let previous_timed = TIMED_ARMED_CHIP.load(Ordering::SeqCst);
     if previous_timed != 0 && !timed_armed {
         TIMED_ARMED_CHIP.store(0, Ordering::SeqCst);
@@ -4027,6 +4166,9 @@ fn theme_schedule_text() -> String {
     }
     if let Some(notice) = theme_engine::active_notice() {
         return notice;
+    }
+    if !cfg_map(|c| c.theme_switch_enabled) {
+        return t("theme_schedule_disabled");
     }
     // Battery dark outranks schedule and snooze in the engine, so it owns
     // the line ahead of the snooze state too.

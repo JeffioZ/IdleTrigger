@@ -320,7 +320,7 @@ pub fn run_ctx(args: &[OsString]) -> i32 {
     let success =
         match crate::ipc::send(&format!("{IPC_PREFIX}{kind}:{param}:{}", pct_encode(&path))) {
             Some(reply) => reply == "ok ctx",
-            None => match kind {
+            None if matches!(crate::single_instance::running(), Ok(false)) => match kind {
                 "copy" if valid_copy_format(&param) => {
                     let (quote, separator) = local_copy_settings();
                     copy_to_clipboard(&core_ctx::format_paths(
@@ -332,6 +332,7 @@ pub fn run_ctx(args: &[OsString]) -> i32 {
                 "rule" => local_rule(&param).is_some_and(|rule| spawn_rule(&rule, &path)),
                 _ => false,
             },
+            None => false,
         };
     if success {
         0
@@ -359,10 +360,101 @@ fn local_rule(id: &str) -> Option<core_ctx::CtxRule> {
         .and_then(|exe| exe.parent().map(|dir| dir.join("IdleTrigger.toml")))
         .and_then(|path| {
             let loaded = idletrigger_core::config::load(&path);
-            loaded.load_error.is_none().then_some(loaded.document)
+            (loaded.load_error.is_none()
+                && loaded.field_errors.is_none()
+                && loaded.config.ctx_menu_enabled)
+                .then_some(loaded.document)
         })?;
-    let (rules, _) = core_ctx::read_rules(&document).ok()?;
-    rules.into_iter().find(|rule| rule.id == id)
+    let (rules, issues) = core_ctx::read_rules(&document).ok()?;
+    rules
+        .into_iter()
+        .enumerate()
+        .find(|(index, rule)| rule.id == id && !issues.iter().any(|issue| issue.index == *index))
+        .map(|(_, rule)| rule)
+}
+
+/// Read one saved rule from the running tray; never replay a failed IPC locally.
+pub(crate) fn rule_selection(id: &str, paths: &[String]) -> bool {
+    let request = |offset| crate::ipc::send(&format!("ctx:rule-settings:{offset}:{id}"));
+    let rule = match request(0) {
+        Some(reply) => read_rule_chunks(id, reply, request),
+        None => match crate::single_instance::running() {
+            Ok(false) => local_rule(id),
+            _ => None,
+        },
+    };
+    rule.is_some_and(|rule| spawn_selection(&rule, paths))
+}
+
+const MAX_RULE_REPLY: usize = 256 * 1024;
+fn rule_revision(json: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut hash);
+    format!("{:x}", hash.finish())
+}
+
+/// Keep each reply within the pipe's 4 KiB message bound, without splitting UTF-8.
+fn rule_chunk(rule: &core_ctx::CtxRule, offset: usize) -> Option<String> {
+    let json = serde_json::to_string(rule).ok()?;
+    if json.len() > MAX_RULE_REPLY || offset >= json.len() || !json.is_char_boundary(offset) {
+        return None;
+    }
+    let mut end = (offset + 1800).min(json.len());
+    while !json.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Hex avoids the pipe's whitespace trimming changing a chunk boundary.
+    let chunk: String = json.as_bytes()[offset..end]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(format!(
+        "ok ctx-rule:{}:{}:{chunk}",
+        rule_revision(&json),
+        json.len()
+    ))
+}
+
+fn read_rule_chunks(
+    id: &str,
+    mut reply: String,
+    request: impl Fn(usize) -> Option<String>,
+) -> Option<core_ctx::CtxRule> {
+    let mut json = String::new();
+    let mut version = None;
+    loop {
+        let mut parts = reply.strip_prefix("ok ctx-rule:")?.splitn(3, ':');
+        let revision = parts.next()?;
+        let total = parts.next()?.parse::<usize>().ok()?;
+        let encoded = parts.next()?;
+        if !encoded.is_ascii() || encoded.len() % 2 != 0 {
+            return None;
+        }
+        let bytes = (0..encoded.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let chunk = String::from_utf8(bytes).ok()?;
+        if total > MAX_RULE_REPLY || chunk.is_empty() || json.len() + chunk.len() > total {
+            return None;
+        }
+        let snapshot = (revision.to_owned(), total);
+        if version.as_ref().is_some_and(|old| old != &snapshot) {
+            return None;
+        }
+        version = Some(snapshot);
+        json.push_str(&chunk);
+        if json.len() == total {
+            if rule_revision(&json) != revision {
+                return None;
+            }
+            return serde_json::from_str::<core_ctx::CtxRule>(&json)
+                .ok()
+                .filter(|rule| rule.id == id);
+        }
+        reply = request(json.len())?;
+    }
 }
 
 /// IPC fast path: called on the pipe server thread before the UI queue, so
@@ -378,6 +470,19 @@ pub(crate) fn handle_ipc(request: &str) -> Option<String> {
     }
     let rest = request.strip_prefix(IPC_PREFIX)?;
     match rest.split_once(':') {
+        Some(("rule-settings", tail)) => {
+            let (offset, id) = tail.split_once(':')?;
+            let offset = offset.parse::<usize>().ok()?;
+            if !crate::cfg_map(|config| config.ctx_menu_enabled) {
+                return Some("err: context menu disabled".into());
+            }
+            let rules = crate::runtime::lock(&CTX_RULES);
+            let reply = rules
+                .iter()
+                .find(|rule| rule.id == id && rule.enabled && !rule.separator)
+                .and_then(|rule| rule_chunk(rule, offset));
+            Some(reply.unwrap_or_else(|| "err: rule unavailable or configuration too large".into()))
+        }
         Some(("copy", tail)) => {
             let (format, encoded) = tail.split_once(':')?;
             if !valid_copy_format(format) {
@@ -400,10 +505,11 @@ pub(crate) fn handle_ipc(request: &str) -> Option<String> {
             let (id, encoded) = tail.split_once(':')?;
             let path = pct_decode(encoded);
             let rules = crate::runtime::lock(&CTX_RULES).clone();
-            let executed = rules
-                .iter()
-                .find(|rule| rule.id == id)
-                .is_some_and(|rule| spawn_rule(rule, &path));
+            let executed = crate::cfg_map(|config| config.ctx_menu_enabled)
+                && rules
+                    .iter()
+                    .find(|rule| rule.id == id)
+                    .is_some_and(|rule| spawn_rule(rule, &path));
             if executed {
                 Some("ok ctx".into())
             } else {
@@ -419,23 +525,62 @@ pub(crate) fn handle_ipc(request: &str) -> Option<String> {
 /// .bat/.cmd and document associations; `hidden_console` rides the show
 /// command (console hosts honor SW_HIDE).
 pub(crate) fn spawn_rule(rule: &core_ctx::CtxRule, path: &str) -> bool {
+    spawn_selection(rule, &[path.to_owned()])
+}
+
+fn selection_allowed(rule: &core_ctx::CtxRule, paths: &[String]) -> bool {
     if !rule.enabled || rule.separator {
         return false;
     }
-    let selection = PathBuf::from(path);
-    let allowed = match rule.scope.as_str() {
-        core_ctx::SCOPE_FILE => selection.is_file(),
-        core_ctx::SCOPE_DIR | core_ctx::SCOPE_BACKGROUND => selection.is_dir(),
-        _ => selection.exists(),
+    if paths.is_empty()
+        || (rule.selection_mode == core_ctx::SelectionMode::Single && paths.len() != 1)
+        || !core_ctx::prepare_rules(vec![rule.clone()]).1.is_empty()
+    {
+        return false;
+    }
+    paths.iter().all(|path| {
+        let selection = PathBuf::from(path);
+        let allowed = match rule.scope.as_str() {
+            core_ctx::SCOPE_FILE => selection.is_file(),
+            core_ctx::SCOPE_DIR | core_ctx::SCOPE_BACKGROUND => selection.is_dir(),
+            _ => selection.exists(),
+        };
+        allowed && core_ctx::extension_matches(&rule.patterns, &selection)
+    })
+}
+
+fn spawn_selection(rule: &core_ctx::CtxRule, paths: &[String]) -> bool {
+    if !selection_allowed(rule, paths) {
+        return false;
+    }
+    let batches: Vec<&[String]> = if rule.selection_mode == core_ctx::SelectionMode::Together {
+        vec![paths]
+    } else {
+        paths.chunks(1).collect()
     };
-    if !allowed {
+    let Some(arguments) = batches
+        .iter()
+        .map(|batch| core_ctx::rule_selection_args(rule, batch))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    // Validate every launch before any side effects; Shell/CRT command lines are bounded.
+    if arguments.iter().any(|args| {
+        args.contains('\0')
+            || rule.command.encode_utf16().count() + args.encode_utf16().count() + 4 > 32767
+    }) {
         return false;
     }
-    if !core_ctx::extension_matches(&rule.patterns, &selection) {
-        crate::log_line(&format!("ctx rule {} skipped: pattern mismatch", rule.id));
-        return false;
+    let mut success = true;
+    for (batch, args) in batches.iter().zip(arguments) {
+        success &= launch_rule(rule, &batch[0], &args);
     }
-    let args = core_ctx::substitute_args(&rule.args, path);
+    success
+}
+
+fn launch_rule(rule: &core_ctx::CtxRule, path: &str, args: &str) -> bool {
+    let selection = PathBuf::from(path);
     let directory = if rule.working_dir.is_empty() {
         if selection.is_dir() {
             path.to_string()
@@ -454,7 +599,7 @@ pub(crate) fn spawn_rule(rule: &core_ctx::CtxRule, path: &str) -> bool {
         SW_SHOWNORMAL
     };
     let file = wide(&rule.command);
-    let params = wide(&args);
+    let params = wide(args);
     let dir = wide(&directory);
     let result = unsafe {
         ShellExecuteW(
@@ -479,6 +624,87 @@ pub(crate) fn spawn_rule(rule: &core_ctx::CtxRule, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_chunks_preserve_long_unicode_and_reject_mid_read_changes() {
+        let rule = core_ctx::CtxRule {
+            id: "batch".into(),
+            title: "tool".into(),
+            command: "tool.exe".into(),
+            args: format!("%* {}", "中文 %1 : spaces  ".repeat(700)),
+            selection_mode: core_ctx::SelectionMode::Together,
+            ..Default::default()
+        };
+        let first = rule_chunk(&rule, 0).unwrap();
+        assert!(first.len() + 2 <= 4096);
+        assert_eq!(
+            read_rule_chunks("batch", first.clone(), |offset| {
+                let chunk = rule_chunk(&rule, offset)?;
+                assert!(chunk.len() + 2 <= 4096);
+                Some(chunk)
+            }),
+            Some(rule.clone())
+        );
+        let changed = core_ctx::CtxRule {
+            title: "changed".into(),
+            ..rule.clone()
+        };
+        assert!(
+            read_rule_chunks("batch", first.clone(), |offset| rule_chunk(
+                &changed, offset
+            ))
+            .is_none()
+        );
+        assert!(
+            read_rule_chunks("different", first.clone(), |offset| rule_chunk(
+                &rule, offset
+            ))
+            .is_none()
+        );
+        assert!(read_rule_chunks("batch", first, |_| None).is_none());
+        assert!(
+            read_rule_chunks("batch", "err: disabled".into(), |_| panic!(
+                "must not retry"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn selection_validation_rejects_entire_mixed_batch_before_launch() {
+        let executable = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let folder = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut rule = core_ctx::CtxRule {
+            title: "test".into(),
+            command: "unused.exe".into(),
+            args: "%*".into(),
+            selection_mode: core_ctx::SelectionMode::Together,
+            ..Default::default()
+        };
+        assert!(selection_allowed(&rule, std::slice::from_ref(&executable)));
+        assert!(!selection_allowed(
+            &rule,
+            &[executable.clone(), folder.clone()]
+        ));
+        rule.scope = core_ctx::SCOPE_FILE_DIR.into();
+        assert!(selection_allowed(
+            &rule,
+            &[executable.clone(), folder.clone()]
+        ));
+        rule.selection_mode = core_ctx::SelectionMode::Single;
+        assert!(!selection_allowed(&rule, &[executable.clone(), folder]));
+        rule.patterns = vec!["*.txt".into()];
+        assert!(!selection_allowed(&rule, &[executable]));
+        assert!(!selection_allowed(&rule, &[]));
+    }
 
     #[test]
     fn copy_settings_use_runtime_snapshot_and_never_mask_ipc_errors() {

@@ -202,7 +202,17 @@ fn status_theme_schedule() -> String {
 /// Every panel tool: control id plus its caption source. Action buttons
 /// describe what they do; only real toggles carry the enabled/disabled
 /// state line.
-const TOOLS: [(usize, TipSource); 31] = [
+const TOOLS: [(usize, TipSource); 42] = [
+    (crate::ctx_ui::ID_GROUPED, TipSource::Key("tip_ctx_submenu")),
+    (crate::ctx_ui::ID_COPY, TipSource::Key("tip_ctx_copy")),
+    (crate::ctx_ui::ID_QUOTE, TipSource::Key("tip_ctx_quote")),
+    (crate::ctx_ui::ID_SEPARATOR, TipSource::Key("tip_ctx_sep")),
+    (crate::ctx_ui::ID_CLASSIC, TipSource::Key("tip_ctx_win11")),
+    (crate::ctx_ui::ID_REPAIR, TipSource::Key("tip_ctx_repair")),
+    (
+        crate::ctx_ui::ID_ENABLED,
+        TipSource::Key("tip_ctx_rule_enabled"),
+    ),
     (
         crate::ctx_ui::ID_WORK_B,
         TipSource::Key("ctx_browse_work_title"),
@@ -240,6 +250,10 @@ const TOOLS: [(usize, TipSource); 31] = [
         TipSource::Key("tip_ctx_f_scope"),
     ),
     (
+        crate::ctx_ui::FIELD_SELECTION,
+        TipSource::Key("tip_ctx_selection"),
+    ),
+    (
         crate::ctx_ui::FIELD_CONSOLE,
         TipSource::Key("tip_ctx_f_console"),
     ),
@@ -266,7 +280,16 @@ const TOOLS: [(usize, TipSource); 31] = [
     (crate::IDC_THEME_SWITCH, TipSource::Key("tip_theme_switch")),
     (crate::IDC_THEME_REPAIR, TipSource::Key("tip_theme_repair")),
     (crate::IDC_MANAGE_BUTTON, TipSource::Key("tip_automation")),
+    (
+        crate::IDC_AUTOMATION_NEW,
+        TipSource::Key("tip_automation_new"),
+    ),
+    (
+        crate::ctx_ui::ID_MASTER,
+        TipSource::Key("tip_ctx_master_live"),
+    ),
     (crate::IDC_CTX_BUTTON, TipSource::Key("tip_ctx")),
+    (crate::IDC_SCREEN_ENABLE, TipSource::Key("tip_lock_keys")),
     (crate::IDC_EXIT_BUTTON, TipSource::Key("tip_exit")),
     (
         crate::IDC_NOSLEEP_TIMED_30M,

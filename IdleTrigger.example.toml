@@ -100,9 +100,11 @@ ctx_copy_enabled = true
 ctx_copy_quote = "auto"
 # 多选结果分隔方式：newline 换行（默认）/ space 空格 / Multi-selection separator: newline (default) or space
 ctx_copy_separator = "newline"
-# 仅记录设置窗口中的经典菜单操作；手工改此值不修改系统。请在设置中切换并确认重启 Explorer / Records the last classic-menu action. Editing this value does not change Windows; use Settings and confirm the Explorer restart
+# 仅记录经典菜单操作；手工改此值不修改系统。请在右键增强的菜单选项中切换并确认重启资源管理器 / Records the last classic-menu action. Editing this value does not change Windows; use Context Menu > Menu options and confirm the File Explorer restart
 ctx_win11_classic = false
-# 将自定义规则收入「自定义规则」子菜单（分隔线需要此模式；存在分隔线时自动启用） / Group custom rules under one cascade submenu (separators need it; any separator forces it)
+# 默认将复制路径和自定义规则收入同一个 IdleTrigger 菜单 / Group copy tools and custom rules under one IdleTrigger menu by default
+ctx_menu_grouped = true
+# 关闭统一菜单时，将规则另收进子菜单；有分隔线时自动启用 / When ungrouped, put rules in their own cascade; separators force this
 ctx_rules_submenu = false
 #
 # 自定义打开规则（通常由规则管理器维护）。一条完整示例：
@@ -125,6 +127,8 @@ ctx_rules_submenu = false
 # args = '"%1"'                  # %1/%L/%V = 选中项路径 / %1/%L/%V = selected path
 # icon = ""                      # 留空自动取目标程序图标 / empty = target program's icon
 # hidden_console = false         # 隐藏控制台窗口（py/bat 类） / hide the console window
+# selection_mode = "each"        # single: 仅单选 / one item; each: 逐项 / per item; together: 一次传入全部 / all at once
+# 批量参数示例 args = "%*"（每条路径自动加引号） / Batch arguments: args = "%*" (each path quoted automatically)
 # working_dir = ""               # 留空 = 选中项所在目录 / empty = the selection's folder
 #
 

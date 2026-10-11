@@ -69,6 +69,10 @@ pub struct Config {
     /// Group the custom rules under one cascade submenu (required for
     /// separator rows; flat top-level verbs cannot draw separators).
     pub ctx_rules_submenu: bool,
+    /// Put copy tools and custom rules under a single IdleTrigger cascade.
+    pub ctx_menu_grouped: bool,
+    // Per-rule selection_mode belongs to [[ctx_rules]] (ctx_menu::CtxRule),
+    // not to this global settings snapshot. Missing values default to Each.
 }
 
 impl Default for Config {
@@ -114,6 +118,7 @@ impl Default for Config {
             ctx_copy_separator: "newline".to_string(),
             ctx_win11_classic: false,
             ctx_rules_submenu: false,
+            ctx_menu_grouped: true,
         }
     }
 }
@@ -406,6 +411,8 @@ fn read_config(
             .unwrap_or(defaults.ctx_win11_classic),
         ctx_rules_submenu: as_bool(document, "ctx_rules_submenu", bad_fields)
             .unwrap_or(defaults.ctx_rules_submenu),
+        ctx_menu_grouped: as_bool(document, "ctx_menu_grouped", bad_fields)
+            .unwrap_or(defaults.ctx_menu_grouped),
     }
 }
 
@@ -588,6 +595,7 @@ fn save_candidate(
     set_str(document, "ctx_copy_separator", &config.ctx_copy_separator);
     set_bool(document, "ctx_win11_classic", config.ctx_win11_classic);
     set_bool(document, "ctx_rules_submenu", config.ctx_rules_submenu);
+    set_bool(document, "ctx_menu_grouped", config.ctx_menu_grouped);
     set_str(document, "language", &config.language);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -752,6 +760,7 @@ mod save_tests {
             ctx_copy_separator: "space".into(),
             ctx_win11_classic: true,
             ctx_rules_submenu: true,
+            ctx_menu_grouped: false,
         };
         let path = std::env::temp_dir().join(format!(
             "idletrigger-full-field-{}-{}.toml",

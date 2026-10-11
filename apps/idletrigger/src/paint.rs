@@ -849,7 +849,7 @@ pub fn draw_button_danger(
     state: ControlState,
     radius: i32,
 ) {
-    let (mut fill, mut border, mut text) = (p.surface, p.subtle_border, p.danger_surface_text);
+    let (mut fill, mut border, mut text) = (p.surface, p.border, p.danger_surface_text);
     if state.hovered {
         fill = p.danger_bg;
         border = p.danger_bg;
@@ -884,6 +884,37 @@ pub fn draw_button_danger(
 /// toggle-row grammar for forms: the whole row is one hit target and the
 /// pill carries the state. `background` is the surface the row sits on
 /// (card face or window background).
+/// Header switches keep their label next to the pill, even in a wide slot.
+pub fn draw_compact_switch_row(
+    hdc: HDC,
+    bounds: &RECT,
+    font: HFONT,
+    label: &str,
+    p: &Palette,
+    background: u32,
+    state: ControlState,
+    scale: i32,
+    progress: SwitchProgress,
+) {
+    fill_rect(hdc, bounds, background);
+    let mut size = SIZE::default();
+    unsafe {
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let text: Vec<u16> = label.encode_utf16().collect();
+        let _ = GetTextExtentPoint32W(hdc, &text, &mut size);
+        let _ = SelectObject(hdc, old);
+    }
+    let compact = RECT {
+        left: bounds
+            .left
+            .max(bounds.right - size.cx - sp(crate::layout::SWITCH_HIT_W + 8, scale)),
+        ..*bounds
+    };
+    draw_switch_row(
+        hdc, &compact, font, label, p, background, state, scale, progress,
+    );
+}
+
 pub fn draw_switch_row(
     hdc: HDC,
     bounds: &RECT,

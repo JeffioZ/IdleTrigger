@@ -1,7 +1,5 @@
-//! Context-menu rule manager: the automation-manager family grammar —
-//! list card with a horizontal action row, then a persistent edit form
-//! (Open++ flow) hosted on its own section card with card-painted field
-//! wells (settings field grammar).
+//! Context-menu manager with separate list, editor, and live menu options.
+//! Geometry uses equal columns, 32px controls, and an 8/12/16px spacing scale.
 
 use idletrigger_core::ctx_menu as core_ctx;
 use std::sync::Mutex;
@@ -18,11 +16,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, CreateWindowExW, DefWindowProcW, GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetDlgItem,
     GetWindow, GetWindowRect, GetWindowTextW, IDC_ARROW, IsWindowVisible, LBN_DBLCLK,
-    LBN_SELCHANGE, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
-    RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
-    SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST,
-    WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
+    LBN_SELCHANGE, LoadCursorW, MB_ICONQUESTION, MB_YESNO, MessageBoxW, RegisterClassW, SW_HIDE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST, WM_SETFONT, WNDCLASSW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{HMENU, IDYES, SendMessageW, SetWindowTextW};
 use windows::core::PCWSTR;
@@ -38,7 +36,7 @@ const EN_CHANGE: usize = 0x0300;
 // ---- control ids -----------------------------------------------------------
 
 const ID_TITLE: usize = 700; // header page title
-const ID_MORE: usize = 701; // "more settings" link
+const ID_MORE: usize = 701; // menu options tab
 const ID_SURF: usize = 702; // list card surface
 const ID_LIST: usize = 703;
 const ID_ADD: usize = 704;
@@ -69,13 +67,43 @@ const ID_ICON_B: usize = 726;
 const ID_CONSOLE: usize = 727; // hide-console switch row
 const ID_DISCARD: usize = 728;
 const ID_SAVE: usize = 729;
-const ID_ENABLED: usize = 730;
+pub(crate) const ID_ENABLED: usize = 730;
 const ID_WORK_L: usize = 731;
 pub const FIELD_WORK: usize = 732;
 const ID_PREVIEW: usize = 733;
 const ID_STATUS: usize = 734;
 pub const ID_WORK_B: usize = 735;
-const ID_DETAILS: usize = 736;
+pub(crate) const ID_MASTER: usize = 737;
+const ID_TAB_RULES: usize = 738;
+const ID_SELECTION_L: usize = 739;
+pub const FIELD_SELECTION: usize = 740;
+const ID_EDIT: usize = 741;
+const ID_BACK: usize = 742;
+const ID_CLOSE: usize = 743;
+const ID_ADVANCED: usize = 744;
+const ID_LIST_HINT: usize = 745;
+pub(crate) const ID_REPAIR: usize = 746;
+const ID_OPTIONS_HINT: usize = 747;
+const ID_LAYOUT_TITLE: usize = 748;
+const ID_LAYOUT_CARD: usize = 749;
+pub(crate) const ID_GROUPED: usize = 750;
+const ID_LAYOUT_HINT: usize = 751;
+pub(crate) const ID_CLASSIC: usize = 752;
+const ID_COPY_TITLE: usize = 753;
+const ID_COPY_CARD: usize = 754;
+pub(crate) const ID_COPY: usize = 755;
+const ID_QUOTE_L: usize = 756;
+pub(crate) const ID_QUOTE: usize = 757;
+const ID_SEPARATOR_L: usize = 758;
+pub(crate) const ID_SEPARATOR: usize = 759;
+const ID_OPTIONS_STATUS: usize = 760;
+const ID_TOGGLE: usize = 761;
+const ID_EDITOR_GUIDE: usize = 762;
+const VIEW_LIST: usize = 0;
+const VIEW_EDIT: usize = 1;
+const VIEW_OPTIONS: usize = 2;
+static VIEW: AtomicUsize = AtomicUsize::new(VIEW_LIST);
+static ADVANCED: AtomicBool = AtomicBool::new(false);
 static RULE_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Tooltip anchors for the manager's form fields.
@@ -92,37 +120,48 @@ const FIELD_EDITS: [usize; 6] = [
     ID_TITLE_E, ID_PROG_E, ID_ARGS_E, ID_ICON_E, ID_MATCH_E, FIELD_WORK,
 ];
 /// Statics whose background must erase with the card face.
-const ON_CARD_STATICS: [usize; 8] = [
-    ID_TITLE_L, ID_PROG_L, ID_MATCH_L, ID_SCOPE_L, ID_ARGS_L, ID_ICON_L, ID_EMPTY, ID_WORK_L,
+const ON_CARD_STATICS: &[usize] = &[
+    ID_TITLE_L,
+    ID_PROG_L,
+    ID_MATCH_L,
+    ID_SCOPE_L,
+    ID_ARGS_L,
+    ID_ICON_L,
+    ID_EMPTY,
+    ID_WORK_L,
+    ID_SELECTION_L,
+    ID_LAYOUT_HINT,
+    ID_QUOTE_L,
+    ID_SEPARATOR_L,
 ];
 
 // ---- geometry (logical px, scaled at creation) ------------------------------
 
 const CLIENT_W: i32 = 680;
-const CLIENT_H: i32 = 632;
+const CLIENT_H: i32 = 648;
 const EDGE: i32 = 16;
 const IN_X: i32 = EDGE + 12;
-const COL_GAP: i32 = 8;
+const COL_GAP: i32 = 16;
 const COL_W: i32 = (CLIENT_W - 2 * IN_X - COL_GAP) / 2;
 const COL_A: i32 = IN_X;
 const COL_B: i32 = IN_X + COL_W + COL_GAP;
 
-const HEADER_Y: i32 = 16;
+const HEADER_Y: i32 = 20;
 const HEADER_H: i32 = 24;
-const LIST_Y: i32 = 68;
-const LIST_H: i32 = 168;
-const ACTIONS_Y: i32 = 248;
-const ACT_H: i32 = 30;
-const ACT_W: i32 = 104;
-const FORM_TITLE_Y: i32 = 292;
-const FORM_Y: i32 = 312;
+const LIST_Y: i32 = 184;
+const LIST_H: i32 = 360;
+const ACTIONS_Y: i32 = 136;
+const ACT_H: i32 = 32;
+const ACT_W: i32 = 128;
+const FORM_TITLE_Y: i32 = 142;
+const FORM_Y: i32 = 184;
 
-const LABEL_H: i32 = 18;
+const LABEL_H: i32 = 20;
 const LABEL_GAP: i32 = 4;
-const FIELD_H: i32 = 34; // field slot; the edit itself is inset inside
-const SLOT_GAP: i32 = 10;
+const FIELD_H: i32 = 32; // field slot; the edit itself is inset inside
+const SLOT_GAP: i32 = 8;
 const BROWSE_W: i32 = 80;
-const BTN_H: i32 = 28;
+const FOOTER_Y: i32 = 600;
 
 static MGR_HWND: AtomicIsize = AtomicIsize::new(0);
 static LIST_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -281,6 +320,29 @@ fn scope_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
+const SELECTION_MODES: [core_ctx::SelectionMode; 3] = [
+    core_ctx::SelectionMode::Single,
+    core_ctx::SelectionMode::Each,
+    core_ctx::SelectionMode::Together,
+];
+fn selection_pairs() -> Vec<(String, String)> {
+    [
+        "ctx_selection_single",
+        "ctx_selection_each",
+        "ctx_selection_together",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, key)| (index.to_string(), crate::t_pub(key)))
+    .collect()
+}
+fn selection_index(mode: core_ctx::SelectionMode) -> i32 {
+    SELECTION_MODES
+        .iter()
+        .position(|value| *value == mode)
+        .unwrap_or(1) as i32
+}
+
 fn scope_row_index(scope: &str) -> i32 {
     [
         core_ctx::SCOPE_FILE,
@@ -299,17 +361,367 @@ pub fn theme_hwnd() -> HWND {
 }
 
 pub fn default_button(window: HWND) -> Option<HWND> {
-    (window == mgr() && !window.is_invalid()).then(|| get_dlg_item(window, ID_SAVE))
+    (window == mgr() && !window.is_invalid()).then(|| {
+        get_dlg_item(
+            window,
+            match VIEW.load(Ordering::SeqCst) {
+                VIEW_EDIT => ID_SAVE,
+                VIEW_OPTIONS => ID_CLOSE,
+                _ if selected_index().is_some_and(|index| {
+                    crate::runtime::lock(&DISPLAYED)
+                        .get(index)
+                        .is_some_and(|rule| !rule.separator)
+                }) =>
+                {
+                    ID_EDIT
+                }
+                _ => ID_ADD,
+            },
+        )
+    })
 }
 
-static MODAL_OWNER: AtomicIsize = AtomicIsize::new(0);
-
-pub fn show_modal_to(owner: HWND) {
-    MODAL_OWNER.store(owner.0 as isize, Ordering::SeqCst);
-    unsafe {
-        let _ = EnableWindow(owner, false);
+pub(crate) fn handle_key(window: HWND, key: usize) -> bool {
+    if window != mgr() || window.is_invalid() {
+        return false;
     }
-    show();
+    let view = VIEW.load(Ordering::SeqCst);
+    if key == 0x1b && view == VIEW_EDIT {
+        if leave_draft() {
+            finish_edit(false);
+        }
+        return true;
+    }
+    if key == 0x53
+        && view == VIEW_EDIT
+        && unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
+                windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32,
+            ) < 0
+        }
+    {
+        if unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() } && apply_form() {
+            finish_edit(true);
+        }
+        return true;
+    }
+    if view == VIEW_LIST && unsafe { GetFocus() } == list_hwnd() {
+        match key {
+            0x71 => {
+                edit_selected();
+                return true;
+            } // F2
+            0x2e => {
+                delete_selected();
+                return true;
+            } // Delete
+            _ => (),
+        }
+    }
+    false
+}
+
+fn quote_pairs() -> Vec<(String, String)> {
+    [
+        ("auto", "ctx_quote_auto"),
+        ("always", "ctx_quote_always"),
+        ("none", "ctx_quote_none"),
+    ]
+    .into_iter()
+    .map(|(value, key)| (value.into(), crate::t_pub(key)))
+    .collect()
+}
+
+fn separator_pairs() -> Vec<(String, String)> {
+    [("newline", "ctx_sep_newline"), ("space", "ctx_sep_space")]
+        .into_iter()
+        .map(|(value, key)| (value.into(), crate::t_pub(key)))
+        .collect()
+}
+
+fn visible(id: usize, show: bool) {
+    let control = get_dlg_item(mgr(), id);
+    if !control.is_invalid() {
+        unsafe {
+            let _ = ShowWindow(control, if show { SW_SHOW } else { SW_HIDE });
+        }
+    }
+}
+
+fn refresh_editor_visibility() {
+    let editing = VIEW.load(Ordering::SeqCst) == VIEW_EDIT;
+    let advanced = editing && ADVANCED.load(Ordering::SeqCst);
+    visible(ID_EDITOR_GUIDE, editing && !advanced);
+    for id in [
+        ID_WORK_L, FIELD_WORK, ID_WORK_B, ID_ICON_L, ID_ICON_E, ID_ICON_B, ID_CONSOLE,
+    ] {
+        visible(id, advanced);
+    }
+    let selection = editing
+        && crate::choice::value(get_dlg_item(mgr(), ID_SCOPE_C)) != core_ctx::SCOPE_BACKGROUND;
+    for id in [ID_SELECTION_L, FIELD_SELECTION] {
+        visible(id, selection);
+    }
+    set_text(
+        ID_ADVANCED,
+        &crate::t_pub(if advanced {
+            "ctx_advanced_hide"
+        } else {
+            "ctx_advanced_show"
+        }),
+    );
+    crate::accessibility::check(get_dlg_item(mgr(), ID_ADVANCED), advanced);
+    let card = get_dlg_item(mgr(), ID_FORM);
+    let mut bounds = RECT::default();
+    let height = s(if advanced { 368 } else { 256 });
+    unsafe {
+        if GetWindowRect(card, &mut bounds).is_ok() && bounds.bottom - bounds.top != height {
+            let _ = SetWindowPos(
+                card,
+                None,
+                0,
+                0,
+                bounds.right - bounds.left,
+                height,
+                SWP_NOMOVE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+            );
+        }
+    }
+}
+
+fn apply_view() {
+    let view = VIEW.load(Ordering::SeqCst);
+    for id in [
+        ID_SURF,
+        ID_LIST,
+        ID_ADD,
+        ID_EDIT,
+        ID_ADD_SEP,
+        ID_UP,
+        ID_DOWN,
+        ID_DELETE,
+        ID_LIST_HINT,
+        ID_TOGGLE,
+    ] {
+        visible(id, view == VIEW_LIST);
+    }
+    visible(
+        ID_EMPTY,
+        view == VIEW_LIST && LIST_ROW_COUNT.load(Ordering::SeqCst) == 0,
+    );
+    for id in [
+        ID_BACK,
+        ID_FORM_TITLE,
+        ID_ENABLED,
+        ID_FORM,
+        ID_TITLE_L,
+        ID_TITLE_E,
+        ID_SCOPE_L,
+        ID_SCOPE_C,
+        ID_PROG_L,
+        ID_PROG_E,
+        ID_PROG_B,
+        ID_ARGS_L,
+        ID_ARGS_E,
+        ID_MATCH_L,
+        ID_MATCH_E,
+        ID_ADVANCED,
+        ID_VALID,
+        ID_PREVIEW,
+        ID_DISCARD,
+        ID_SAVE,
+    ] {
+        visible(id, view == VIEW_EDIT);
+    }
+    for id in [
+        ID_OPTIONS_HINT,
+        ID_LAYOUT_TITLE,
+        ID_LAYOUT_CARD,
+        ID_GROUPED,
+        ID_LAYOUT_HINT,
+        ID_COPY_TITLE,
+        ID_COPY_CARD,
+        ID_COPY,
+        ID_QUOTE_L,
+        ID_QUOTE,
+        ID_SEPARATOR_L,
+        ID_SEPARATOR,
+        ID_OPTIONS_STATUS,
+    ] {
+        visible(id, view == VIEW_OPTIONS);
+    }
+    visible(
+        ID_CLASSIC,
+        view == VIEW_OPTIONS && crate::system::is_windows_11(),
+    );
+    visible(ID_CLOSE, view != VIEW_EDIT);
+    refresh_editor_visibility();
+    for (id, active) in [
+        (ID_TAB_RULES, view != VIEW_OPTIONS),
+        (ID_MORE, view == VIEW_OPTIONS),
+    ] {
+        crate::accessibility::check(get_dlg_item(mgr(), id), active);
+    }
+    unsafe {
+        lower_cards(mgr());
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            Some(mgr()),
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+        );
+    }
+}
+
+fn select_view(view: usize) {
+    crate::choice::close(false);
+    crate::tooltips::dismiss_focus_tip(unsafe { GetFocus() });
+    VIEW.store(view, Ordering::SeqCst);
+    refresh_options();
+    apply_view();
+    let target = match view {
+        VIEW_OPTIONS => ID_GROUPED,
+        VIEW_EDIT => ID_PROG_E,
+        _ if selected_index().is_some() => ID_LIST,
+        _ => ID_ADD,
+    };
+    unsafe {
+        let control = get_dlg_item(mgr(), target);
+        let _ = SetFocus(Some(control));
+        crate::viewport::reveal_control(mgr(), control);
+    }
+}
+
+fn finish_edit(saved: bool) {
+    let id = crate::runtime::lock(&DRAFT)
+        .as_ref()
+        .map(|rule| rule.id.clone());
+    *crate::runtime::lock(&DRAFT) = None;
+    refresh_list();
+    let index = crate::runtime::lock(&DISPLAYED)
+        .iter()
+        .position(|rule| Some(&rule.id) == id.as_ref());
+    select_index(index.map_or(-1, |index| index as i32));
+    refresh_form_buttons();
+    select_view(VIEW_LIST);
+    set_text(
+        ID_LIST_HINT,
+        &crate::t_pub(if !saved {
+            "ctx_list_hint"
+        } else if crate::cfg_map(|c| c.ctx_menu_enabled) {
+            "ctx_rule_saved"
+        } else {
+            "ctx_rule_saved_off"
+        }),
+    );
+}
+
+fn edit_selected() {
+    let Some(rule) =
+        selected_index().and_then(|index| crate::runtime::lock(&DISPLAYED).get(index).cloned())
+    else {
+        return;
+    };
+    if rule.separator {
+        return;
+    }
+    ADVANCED.store(
+        !rule.working_dir.is_empty() || !rule.icon.is_empty() || rule.hidden_console,
+        Ordering::SeqCst,
+    );
+    *crate::runtime::lock(&DRAFT) = Some(rule);
+    load_form();
+    select_view(VIEW_EDIT);
+}
+
+fn refresh_options() {
+    if mgr().is_invalid() {
+        return;
+    }
+    let config = crate::cfg_map(Clone::clone);
+    set_text(
+        ID_LAYOUT_HINT,
+        &crate::t_pub(if config.ctx_menu_grouped {
+            "ctx_layout_hint"
+        } else {
+            "ctx_layout_hint_flat"
+        }),
+    );
+    let classic = matches!(
+        crate::ctxmenu::classic_state(),
+        crate::ctxmenu::ClassicState::ByUs
+            | crate::ctxmenu::ClassicState::ByOther
+            | crate::ctxmenu::ClassicState::Legacy
+    );
+    for (id, checked) in [
+        (ID_GROUPED, config.ctx_menu_grouped),
+        (ID_COPY, config.ctx_copy_enabled),
+        (ID_CLASSIC, classic),
+    ] {
+        let control = get_dlg_item(mgr(), id);
+        crate::accessibility::check(control, checked);
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
+        }
+    }
+    for (id, values, selected) in [
+        (ID_QUOTE, quote_pairs(), config.ctx_copy_quote),
+        (ID_SEPARATOR, separator_pairs(), config.ctx_copy_separator),
+    ] {
+        let index = values
+            .iter()
+            .position(|(value, _)| *value == selected)
+            .unwrap_or(0);
+        crate::choice::select_index(get_dlg_item(mgr(), id), index as i32);
+        unsafe {
+            let _ = EnableWindow(get_dlg_item(mgr(), id), config.ctx_copy_enabled);
+        }
+    }
+    unsafe {
+        let _ = EnableWindow(
+            get_dlg_item(mgr(), ID_CLASSIC),
+            !crate::settings_ui::classic_busy(),
+        );
+    }
+    set_text(
+        ID_OPTIONS_STATUS,
+        &if crate::settings_ui::classic_busy() {
+            crate::t_pub("ctx_classic_busy")
+        } else {
+            crate::settings_ui::conflict_text()
+        },
+    );
+}
+
+fn change_option(id: usize) {
+    let value = crate::choice::value(get_dlg_item(mgr(), id));
+    let before = crate::cfg_map(|config| match id {
+        ID_GROUPED => config.ctx_menu_grouped,
+        _ => config.ctx_copy_enabled,
+    });
+    let result = crate::edit_config(|config| match id {
+        ID_GROUPED => config.ctx_menu_grouped = !config.ctx_menu_grouped,
+        ID_COPY => config.ctx_copy_enabled = !config.ctx_copy_enabled,
+        ID_QUOTE if ["auto", "always", "none"].contains(&value.as_str()) => {
+            config.ctx_copy_quote = value
+        }
+        ID_SEPARATOR if ["newline", "space"].contains(&value.as_str()) => {
+            config.ctx_copy_separator = value
+        }
+        _ => (),
+    });
+    if let Err(error) = result {
+        crate::warn_dialog("", &error);
+    } else {
+        crate::ctxmenu::sync("context-options");
+        crate::settings_ui::sync_ctx_options();
+        if matches!(id, ID_GROUPED | ID_COPY) {
+            crate::start_switch_animation(get_dlg_item(mgr(), id), before, !before);
+        }
+    }
+    refresh_options();
+    refresh_manager_status();
 }
 
 pub fn show() {
@@ -317,20 +729,14 @@ pub fn show() {
     unsafe {
         ensure_created();
         let window = mgr();
-        let owner = MODAL_OWNER.load(Ordering::SeqCst);
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-            window,
-            windows::Win32::UI::WindowsAndMessaging::GWLP_HWNDPARENT,
-            if owner == 0 {
-                crate::hwnd(&crate::PANEL).0 as _
-            } else {
-                owner as _
-            },
-        );
         if crate::runtime::lock(&DRAFT).is_none() {
+            let selected = selected_index();
             refresh_list();
+            select_index(selected.map_or(0, |index| index as i32));
             load_form();
         }
+        refresh_options();
+        apply_view();
         theme::retheme_children(window);
         refresh_manager_status();
         crate::tooltips::refresh_all(window);
@@ -345,7 +751,11 @@ pub fn show() {
         lower_cards(window);
         crate::FirstFrameGate::begin(window).reveal();
         let _ = SetForegroundWindow(window);
-        let target = if LIST_ROW_COUNT.load(Ordering::SeqCst) == 0 {
+        let target = if VIEW.load(Ordering::SeqCst) == VIEW_OPTIONS {
+            get_dlg_item(window, ID_GROUPED)
+        } else if VIEW.load(Ordering::SeqCst) == VIEW_EDIT {
+            get_dlg_item(window, ID_PROG_E)
+        } else if LIST_ROW_COUNT.load(Ordering::SeqCst) == 0 {
             get_dlg_item(window, ID_ADD)
         } else {
             list_hwnd()
@@ -361,14 +771,10 @@ fn hide() {
         return;
     }
     *crate::runtime::lock(&DRAFT) = None;
+    VIEW.store(VIEW_LIST, Ordering::SeqCst);
     unsafe {
         let _ = ShowWindow(mgr(), SW_HIDE);
         crate::release_panel_modal(mgr());
-        let owner = HWND(MODAL_OWNER.swap(0, Ordering::SeqCst) as *mut _);
-        if !owner.is_invalid() {
-            let _ = EnableWindow(owner, true);
-            let _ = SetForegroundWindow(owner);
-        }
         // Rules may have changed behind the panel's status line.
         crate::refresh_status();
     }
@@ -380,7 +786,7 @@ fn hide() {
 /// parity); idempotent, so every show and size pass may call it freely.
 unsafe fn lower_cards(window: HWND) {
     unsafe {
-        for id in [ID_SURF, ID_FORM] {
+        for id in [ID_SURF, ID_FORM, ID_LAYOUT_CARD, ID_COPY_CARD] {
             let card = get_dlg_item(window, id);
             if !card.is_invalid() {
                 let _ = SetWindowPos(
@@ -415,6 +821,7 @@ pub fn refresh_language() {
         (ID_FORM_TITLE, "ctx_form_title"),
         (ID_TITLE_L, "ctx_field_title"),
         (ID_SCOPE_L, "ctx_field_scope"),
+        (ID_SELECTION_L, "ctx_selection_mode"),
         (ID_PROG_L, "ctx_field_program"),
         (ID_ARGS_L, "ctx_field_args"),
         (ID_ICON_L, "ctx_field_icon"),
@@ -425,16 +832,32 @@ pub fn refresh_language() {
         (ID_DELETE, "ctx_delete"),
         (ID_UP, "ctx_up"),
         (ID_DOWN, "ctx_down"),
-        (ID_SAVE, "common_save"),
+        (ID_SAVE, "ctx_save_rule"),
         (ID_DISCARD, "common_cancel"),
-        (ID_MORE, "ctx_more_settings"),
+        (ID_MORE, "ctx_tab_options"),
+        (ID_TAB_RULES, "ctx_tab_rules"),
+        (ID_EDIT, "ctx_edit"),
+        (ID_BACK, "ctx_back"),
+        (ID_CLOSE, "ctx_close"),
+        (ID_REPAIR, "ctx_repair_action"),
+        (ID_LIST_HINT, "ctx_list_hint"),
+        (ID_OPTIONS_HINT, "ctx_options_hint"),
+        (ID_LAYOUT_TITLE, "ctx_layout_title"),
+        (ID_GROUPED, "ctx_submenu_label"),
+        (ID_LAYOUT_HINT, "ctx_layout_hint"),
+        (ID_CLASSIC, "ctx_win11_switch"),
+        (ID_COPY_TITLE, "ctx_copy_section"),
+        (ID_COPY, "settings_ctx_copy"),
+        (ID_QUOTE_L, "ctx_quote_label"),
+        (ID_SEPARATOR_L, "ctx_sep_label"),
+        (ID_MASTER, "ctx_master_live"),
+        (ID_EDITOR_GUIDE, "ctx_editor_guide"),
     ] {
         set_text(id, &crate::t_pub(key));
     }
     set_text(ID_PROG_B, &crate::t_pub("ctx_field_browse"));
     set_text(ID_ICON_B, &crate::t_pub("ctx_field_browse"));
     set_text(ID_WORK_B, &crate::t_pub("ctx_field_browse"));
-    set_text(ID_DETAILS, &crate::t_pub("ctx_details"));
     let title = crate::t_pub("ctx_manager_title");
     unsafe {
         let _ = SetWindowTextW(window, PCWSTR(wide(&title).as_ptr()));
@@ -444,6 +867,22 @@ pub fn refresh_language() {
         );
     }
     crate::choice::set_rows(get_dlg_item(window, ID_SCOPE_C), &scope_items());
+    for (id, pairs) in [(ID_QUOTE, quote_pairs()), (ID_SEPARATOR, separator_pairs())] {
+        crate::choice::set_rows(
+            get_dlg_item(window, id),
+            &pairs
+                .iter()
+                .map(|(value, label)| crate::choice::ChoiceItem::option(value, label))
+                .collect::<Vec<_>>(),
+        );
+    }
+    crate::choice::set_rows(
+        get_dlg_item(window, FIELD_SELECTION),
+        &selection_pairs()
+            .iter()
+            .map(|(value, label)| crate::choice::ChoiceItem::option(value, label))
+            .collect::<Vec<_>>(),
+    );
     // Repaint captions from the existing snapshot; language changes must
     // neither adopt a new conflict baseline nor discard typed fields.
     render_list();
@@ -452,25 +891,42 @@ pub fn refresh_language() {
     }
     if let Some(edited) = edited {
         crate::choice::select_index(
+            get_dlg_item(window, FIELD_SELECTION),
+            selection_index(edited.selection_mode),
+        );
+        crate::choice::select_index(
             get_dlg_item(window, ID_SCOPE_C),
             scope_row_index(&edited.scope),
         );
     }
     refresh_manager_status();
     crate::tooltips::refresh_all(window);
+    refresh_form_buttons();
+    refresh_options();
+    apply_view();
 }
 
 fn refresh_manager_status() {
+    let control = get_dlg_item(mgr(), ID_MASTER);
+    crate::accessibility::check(control, crate::cfg_map(|c| c.ctx_menu_enabled));
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
+    }
     let key = if crate::ctxmenu::registration_blocked() {
-        "ctx_config_blocked"
+        "ctx_status_config_error"
     } else if !crate::cfg_map(|c| c.ctx_menu_enabled) {
         "ctx_manager_disabled"
     } else if !crate::ctxmenu::registration_healthy() {
         "ctx_manager_drift"
+    } else if crate::system::is_windows_11()
+        && crate::ctxmenu::classic_state() == crate::ctxmenu::ClassicState::Off
+    {
+        "ctx_manager_ready_more"
     } else {
         "ctx_manager_ready"
     };
     set_text(ID_STATUS, &crate::t_pub(key));
+    visible(ID_REPAIR, key == "ctx_manager_drift");
 }
 
 /// Refresh live state without replacing the user's draft or conflict baseline.
@@ -480,8 +936,23 @@ pub fn refresh_config_state() {
         return;
     }
     let _dpi = crate::dpi::Scope::window(window);
+    if crate::runtime::lock(&DRAFT).is_none()
+        && *crate::runtime::lock(&DISPLAYED) != *crate::runtime::lock(&crate::ctxexec::CTX_RULES)
+    {
+        let selected = selected_index().and_then(|index| {
+            crate::runtime::lock(&DISPLAYED)
+                .get(index)
+                .map(|rule| rule.id.clone())
+        });
+        refresh_list();
+        let index = crate::runtime::lock(&DISPLAYED)
+            .iter()
+            .position(|rule| Some(&rule.id) == selected.as_ref());
+        select_index(index.map_or(-1, |index| index as i32));
+    }
     refresh_form_buttons();
     refresh_manager_status();
+    refresh_options();
 }
 
 /// Centers the manager over the control panel (settings parity).
@@ -648,7 +1119,7 @@ unsafe fn form_edit(window: HWND, id: usize, x: i32, y: i32, w: i32) {
             x + 3,
             y + 7,
             w - 6,
-            (FIELD_H - 14).max(20),
+            FIELD_H - 14,
             body_font(),
         );
         // Go editWithStyle: 6px inner margins.
@@ -664,7 +1135,6 @@ unsafe fn form_edit(window: HWND, id: usize, x: i32, y: i32, w: i32) {
 
 unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMODULE) {
     unsafe {
-        // Header: page title left, "more settings" right (manager parity).
         mk_control(
             window,
             windows::core::w!("STATIC"),
@@ -673,29 +1143,23 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             ID_TITLE,
             EDGE,
             HEADER_Y,
-            320,
+            280,
             HEADER_H,
-            section_font(),
+            crate::make_font_pub(18, 600),
         );
-        owner_button(
-            window,
-            ID_MORE,
-            "ctx_more_settings",
-            CLIENT_W - EDGE - 120,
-            HEADER_Y - 2,
-            120,
-            BTN_H,
-        );
-
-        form_label(
-            window,
-            ID_STATUS,
-            "ctx_manager_disabled",
-            EDGE,
-            44,
-            CLIENT_W - 2 * EDGE,
-        );
-
+        let master = owner_button(window, ID_MASTER, "ctx_master_live", 360, 16, 304, ACT_H);
+        crate::nativeform::set_hover_column(master, s(crate::layout::SWITCH_HIT_W));
+        form_label(window, ID_STATUS, "ctx_manager_disabled", EDGE, 56, 516);
+        owner_button(window, ID_REPAIR, "ctx_repair_action", 552, 48, 112, ACT_H);
+        owner_button(window, ID_TAB_RULES, "ctx_tab_rules", EDGE, 88, 144, ACT_H);
+        owner_button(window, ID_MORE, "ctx_tab_options", 168, 88, 144, ACT_H);
+        for (id, key, x, width) in [
+            (ID_ADD, "ctx_add", EDGE, ACT_W),
+            (ID_EDIT, "ctx_edit", 152, ACT_W),
+            (ID_ADD_SEP, "ctx_add_separator", 288, ACT_W),
+        ] {
+            owner_button(window, id, key, x, ACTIONS_Y, width, ACT_H);
+        }
         // List card, then the list above it.
         let surf = surface_card(window, ID_SURF, EDGE, LIST_Y, CLIENT_W - 2 * EDGE, LIST_H);
         let list = CreateWindowExW(
@@ -739,185 +1203,295 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080 | 0x0001), // SS_NOPREFIX | SS_CENTER
             ID_EMPTY,
             EDGE + 2,
-            LIST_Y + (LIST_H - 20) / 2,
+            LIST_Y + (LIST_H - 48) / 2,
             CLIENT_W - 2 * EDGE - 4,
-            20,
+            48,
             label_font(),
         );
 
-        // Horizontal action row under the list (manager parity).
-        let mut x = EDGE;
-        for (id, key) in [
-            (ID_ADD, "ctx_add"),
-            (ID_ADD_SEP, "ctx_add_separator"),
-            (ID_DELETE, "ctx_delete"),
-            (ID_UP, "ctx_up"),
-            (ID_DOWN, "ctx_down"),
+        form_label(
+            window,
+            ID_LIST_HINT,
+            "ctx_list_hint",
+            EDGE,
+            560,
+            CLIENT_W - 2 * EDGE,
+        );
+        owner_button(
+            window,
+            ID_TOGGLE,
+            "ctx_disable_rule",
+            EDGE,
+            FOOTER_Y,
+            112,
+            32,
+        );
+
+        for (id, key, x, width) in [
+            (ID_UP, "ctx_up", 136, 112),
+            (ID_DOWN, "ctx_down", 256, 112),
+            (ID_DELETE, "ctx_delete", 376, 112),
         ] {
-            owner_button(window, id, key, x, ACTIONS_Y, ACT_W, ACT_H);
-            x += ACT_W + COL_GAP;
+            owner_button(window, id, key, x, FOOTER_Y, width, 32);
         }
 
-        // Form section title with the guidance/validation line at its right.
-        mk_control(
-            window,
-            windows::core::w!("STATIC"),
-            &crate::t_pub("ctx_form_title"),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080),
-            ID_FORM_TITLE,
-            EDGE,
-            FORM_TITLE_Y,
-            200,
-            LABEL_H + 2,
-            section_font(),
-        );
+        owner_button(window, ID_BACK, "ctx_back", EDGE, ACTIONS_Y, 104, ACT_H);
         mk_control(
             window,
             windows::core::w!("STATIC"),
             "",
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080 | 0x0002 | 0x4000), // SS_NOPREFIX | SS_RIGHT | SS_ENDELLIPSIS
-            ID_VALID,
-            CLIENT_W - EDGE - 420,
-            FORM_TITLE_Y + 2,
-            340,
-            LABEL_H,
-            label_font(),
-        );
-        owner_button(
-            window,
-            ID_DETAILS,
-            "ctx_details",
-            CLIENT_W - EDGE - 72,
-            FORM_TITLE_Y - 2,
-            72,
-            BTN_H,
-        );
-        let _ = ShowWindow(get_dlg_item(window, ID_DETAILS), SW_HIDE);
-
-        // Form card hosts every field row below.
-        // Card closes 8px under the action row.
-        let form_card_h = CLIENT_H - EDGE - FORM_Y;
-        surface_card(
-            window,
-            ID_FORM,
-            EDGE,
-            FORM_Y,
-            CLIENT_W - 2 * EDGE,
-            form_card_h,
-        );
-
-        // Two-column label-above-field grid (editor grammar).
-        let f1 = FORM_Y + 12;
-        let field1 = f1 + LABEL_H + LABEL_GAP;
-        form_label(window, ID_TITLE_L, "ctx_field_title", COL_A, f1, COL_W);
-        form_label(window, ID_SCOPE_L, "ctx_field_scope", COL_B, f1, COL_W);
-        form_edit(window, ID_TITLE_E, COL_A, field1, COL_W);
-        // choice::create scales its geometry internally: pass LOGICAL
-        // values, pre-scaling here put the dropdown double-scaled into the
-        // window's bottom-right corner.
-        crate::choice::create(
-            window,
-            ID_SCOPE_C as i32,
-            (COL_B, field1, COL_W, FIELD_H),
-            &scope_pairs(),
-            body_font(),
-        );
-
-        // Row 2: program (+browse) | arguments.
-        let f2 = field1 + FIELD_H + SLOT_GAP - 2;
-        let field2 = f2 + LABEL_H + LABEL_GAP;
-        form_label(window, ID_PROG_L, "ctx_field_program", COL_A, f2, COL_W);
-        form_label(window, ID_ARGS_L, "ctx_field_args", COL_B, f2, COL_W);
-        form_edit(window, ID_PROG_E, COL_A, field2, COL_W - BROWSE_W - COL_GAP);
-        owner_button(
-            window,
-            ID_PROG_B,
-            "ctx_field_browse",
-            COL_A + COL_W - BROWSE_W,
-            field2,
-            BROWSE_W,
-            FIELD_H,
-        );
-        form_edit(window, ID_ARGS_E, COL_B, field2, COL_W);
-
-        // Row 3: file types | icon (+browse).
-        let f3 = field2 + FIELD_H + SLOT_GAP - 2;
-        let field3 = f3 + LABEL_H + LABEL_GAP;
-        form_label(window, ID_MATCH_L, "ctx_field_match", COL_A, f3, COL_W);
-        form_label(window, ID_ICON_L, "ctx_field_icon", COL_B, f3, COL_W);
-        form_edit(window, ID_MATCH_E, COL_A, field3, COL_W);
-        form_edit(window, ID_ICON_E, COL_B, field3, COL_W - BROWSE_W - COL_GAP);
-        owner_button(
-            window,
-            ID_ICON_B,
-            "ctx_field_browse",
-            COL_B + COL_W - BROWSE_W,
-            field3,
-            BROWSE_W,
-            FIELD_H,
-        );
-
-        let f4 = field3 + FIELD_H + SLOT_GAP - 2;
-        let field4 = f4 + LABEL_H + LABEL_GAP;
-        form_label(window, ID_WORK_L, "ctx_working_dir", COL_A, f4, COL_W);
-        form_edit(window, FIELD_WORK, COL_A, field4, COL_W - BROWSE_W - 8);
-        owner_button(
-            window,
-            ID_WORK_B,
-            "ctx_field_browse",
-            COL_A + COL_W - BROWSE_W,
-            field4,
-            BROWSE_W,
-            FIELD_H,
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080),
+            ID_FORM_TITLE,
+            136,
+            FORM_TITLE_Y,
+            252,
+            22,
+            section_font(),
         );
         let enabled = owner_button(
             window,
             ID_ENABLED,
             "ctx_rule_enabled",
-            COL_B,
-            field4,
-            COL_W,
-            BTN_H,
+            420,
+            ACTIONS_Y,
+            244,
+            ACT_H,
         );
         crate::nativeform::set_hover_column(enabled, s(crate::layout::SWITCH_HIT_W));
+        surface_card(window, ID_FORM, EDGE, FORM_Y, CLIENT_W - 2 * EDGE, 368);
 
-        // Bottom row: console switch left, discard/save flush right.
-        let right = COL_B + COL_W;
-        let bottom = field4 + FIELD_H + SLOT_GAP;
-        let console = mk_control(
+        let field1 = FORM_Y + 12 + LABEL_H + LABEL_GAP;
+        form_label(
             window,
-            windows::core::w!("BUTTON"),
-            &crate::t_pub("ctx_console_label"),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0000000B), // BS_OWNERDRAW
-            ID_CONSOLE,
+            ID_PROG_L,
+            "ctx_field_program",
             COL_A,
-            bottom,
-            260,
-            BTN_H,
+            field1 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_label(
+            window,
+            ID_ARGS_L,
+            "ctx_field_args",
+            COL_B,
+            field1 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_edit(window, ID_PROG_E, COL_A, field1, COL_W - BROWSE_W - 8);
+        owner_button(
+            window,
+            ID_PROG_B,
+            "ctx_field_browse",
+            COL_A + COL_W - BROWSE_W,
+            field1,
+            BROWSE_W,
+            FIELD_H,
+        );
+        form_edit(window, ID_ARGS_E, COL_B, field1, COL_W);
+
+        let field2 = field1 + FIELD_H + SLOT_GAP + LABEL_H + LABEL_GAP;
+        form_label(
+            window,
+            ID_TITLE_L,
+            "ctx_field_title",
+            COL_A,
+            field2 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_label(
+            window,
+            ID_SCOPE_L,
+            "ctx_field_scope",
+            COL_B,
+            field2 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_edit(window, ID_TITLE_E, COL_A, field2, COL_W);
+        crate::choice::create(
+            window,
+            ID_SCOPE_C as i32,
+            (COL_B, field2, COL_W, FIELD_H),
+            &scope_pairs(),
             body_font(),
         );
-        crate::nativeform::track(console);
-        // Switch rows hover on the pill column alone (panel parity).
+
+        let field3 = field2 + FIELD_H + SLOT_GAP + LABEL_H + LABEL_GAP;
+        form_label(
+            window,
+            ID_MATCH_L,
+            "ctx_field_match",
+            COL_A,
+            field3 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_label(
+            window,
+            ID_SELECTION_L,
+            "ctx_selection_mode",
+            COL_B,
+            field3 - LABEL_H - LABEL_GAP,
+            COL_W,
+        );
+        form_edit(window, ID_MATCH_E, COL_A, field3, COL_W);
+        crate::choice::create(
+            window,
+            FIELD_SELECTION as i32,
+            (COL_B, field3, COL_W, FIELD_H),
+            &selection_pairs(),
+            body_font(),
+        );
+
+        owner_button(
+            window,
+            ID_ADVANCED,
+            "ctx_advanced_show",
+            COL_A,
+            396,
+            176,
+            32,
+        );
+        form_label(window, ID_WORK_L, "ctx_working_dir", COL_A, 440, COL_W);
+        form_label(window, ID_ICON_L, "ctx_field_icon", COL_B, 440, COL_W);
+        form_edit(window, FIELD_WORK, COL_A, 464, COL_W - BROWSE_W - 8);
+        form_edit(window, ID_ICON_E, COL_B, 464, COL_W - BROWSE_W - 8);
+        owner_button(
+            window,
+            ID_WORK_B,
+            "ctx_field_browse",
+            COL_A + COL_W - BROWSE_W,
+            464,
+            BROWSE_W,
+            FIELD_H,
+        );
+        owner_button(
+            window,
+            ID_ICON_B,
+            "ctx_field_browse",
+            COL_B + COL_W - BROWSE_W,
+            464,
+            BROWSE_W,
+            FIELD_H,
+        );
+        let console = owner_button(
+            window,
+            ID_CONSOLE,
+            "ctx_console_label",
+            COL_A,
+            508,
+            COL_W,
+            ACT_H,
+        );
         crate::nativeform::set_hover_column(console, s(crate::layout::SWITCH_HIT_W));
-        owner_button(window, ID_PREVIEW, "ctx_preview", 296, bottom, 136, BTN_H);
-        owner_button(
+
+        mk_control(
             window,
-            ID_DISCARD,
-            "common_cancel",
-            right - 2 * 96 - COL_GAP,
-            bottom,
-            96,
-            BTN_H,
+            windows::core::w!("STATIC"),
+            "",
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080),
+            ID_VALID,
+            EDGE,
+            560,
+            648,
+            32,
+            label_font(),
         );
-        owner_button(
+        owner_button(window, ID_PREVIEW, "ctx_preview", EDGE, FOOTER_Y, 112, 32);
+        owner_button(window, ID_DISCARD, "common_cancel", 432, FOOTER_Y, 112, 32);
+        owner_button(window, ID_SAVE, "ctx_save_rule", 552, FOOTER_Y, 112, 32);
+
+        mk_control(
             window,
-            ID_SAVE,
-            "common_save",
-            right - 96,
-            bottom,
-            96,
-            BTN_H,
+            windows::core::w!("STATIC"),
+            &crate::t_pub("ctx_editor_guide"),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080),
+            ID_EDITOR_GUIDE,
+            COL_A,
+            456,
+            624,
+            64,
+            label_font(),
         );
+
+        form_label(
+            window,
+            ID_OPTIONS_HINT,
+            "ctx_options_hint",
+            EDGE,
+            ACTIONS_Y,
+            648,
+        );
+        form_label(window, ID_LAYOUT_TITLE, "ctx_layout_title", EDGE, 176, 648);
+        let layout_h = if crate::system::is_windows_11() {
+            128
+        } else {
+            84
+        };
+        surface_card(window, ID_LAYOUT_CARD, EDGE, 208, 648, layout_h);
+        let grouped = owner_button(
+            window,
+            ID_GROUPED,
+            "ctx_submenu_label",
+            IN_X,
+            220,
+            624,
+            ACT_H,
+        );
+        crate::nativeform::set_hover_column(grouped, s(crate::layout::SWITCH_HIT_W));
+        form_label(window, ID_LAYOUT_HINT, "ctx_layout_hint", IN_X, 260, 624);
+        let classic = owner_button(
+            window,
+            ID_CLASSIC,
+            "ctx_win11_switch",
+            IN_X,
+            292,
+            624,
+            ACT_H,
+        );
+        crate::nativeform::set_hover_column(classic, s(crate::layout::SWITCH_HIT_W));
+        let copy_y = 208 + layout_h + 16;
+        form_label(window, ID_COPY_TITLE, "ctx_copy_section", EDGE, copy_y, 648);
+        surface_card(window, ID_COPY_CARD, EDGE, copy_y + 28, 648, 148);
+        let copy = owner_button(
+            window,
+            ID_COPY,
+            "settings_ctx_copy",
+            IN_X,
+            copy_y + 40,
+            624,
+            32,
+        );
+        crate::nativeform::set_hover_column(copy, s(crate::layout::SWITCH_HIT_W));
+        form_label(
+            window,
+            ID_QUOTE_L,
+            "ctx_quote_label",
+            IN_X,
+            copy_y + 94,
+            224,
+        );
+        form_label(
+            window,
+            ID_SEPARATOR_L,
+            "ctx_sep_label",
+            IN_X,
+            copy_y + 138,
+            224,
+        );
+        for (id, y, choices) in [
+            (ID_QUOTE, copy_y + 88, quote_pairs()),
+            (ID_SEPARATOR, copy_y + 132, separator_pairs()),
+        ] {
+            crate::choice::create(
+                window,
+                id as i32,
+                (COL_B, y, COL_W, FIELD_H),
+                &choices,
+                body_font(),
+            );
+        }
+        form_label(window, ID_OPTIONS_STATUS, "", EDGE, 560, 648);
+        owner_button(window, ID_CLOSE, "ctx_close", 552, FOOTER_Y, 112, 32);
+        apply_view();
     }
 }
 
@@ -940,15 +1514,91 @@ unsafe extern "system" fn mgr_proc(
                     let id = wparam.0 & 0xFFFF;
                     let code = wparam.0 >> 16;
                     match id {
-                        ID_MORE if code == BN_CLICKED as usize => {
-                            // Modal to the manager: settings must not leave this
-                            // window interactive behind it.
-                            let owner = HWND(MODAL_OWNER.load(Ordering::SeqCst) as *mut _);
-                            if !owner.is_invalid() {
-                                hide();
-                            } else if leave_draft() {
-                                crate::settings_ui::open_ctx_page_modal_to(hwnd);
+                        ID_MASTER if code == BN_CLICKED as usize => {
+                            let before = crate::cfg_map(|c| c.ctx_menu_enabled);
+                            if let Err(err) =
+                                crate::edit_config(|c| c.ctx_menu_enabled = !c.ctx_menu_enabled)
+                            {
+                                crate::warn_dialog("", &err);
+                            } else {
+                                crate::ctxmenu::sync("rule-manager");
+                                crate::settings_ui::sync_ctx_options();
+                                crate::start_switch_animation(
+                                    get_dlg_item(hwnd, ID_MASTER),
+                                    before,
+                                    !before,
+                                );
                             }
+                            refresh_manager_status();
+                            LRESULT(0)
+                        }
+                        ID_MORE if code == BN_CLICKED as usize => {
+                            select_view(VIEW_OPTIONS);
+                            LRESULT(0)
+                        }
+                        ID_TAB_RULES if code == BN_CLICKED as usize => {
+                            let has_draft = crate::runtime::lock(&DRAFT).is_some();
+                            select_view(if has_draft { VIEW_EDIT } else { VIEW_LIST });
+                            LRESULT(0)
+                        }
+                        ID_EDIT if code == BN_CLICKED as usize => {
+                            edit_selected();
+                            LRESULT(0)
+                        }
+                        ID_TOGGLE if code == BN_CLICKED as usize => {
+                            toggle_selected();
+                            LRESULT(0)
+                        }
+                        ID_BACK if code == BN_CLICKED as usize => {
+                            if leave_draft() {
+                                finish_edit(false);
+                            }
+                            LRESULT(0)
+                        }
+                        ID_CLOSE if code == BN_CLICKED as usize => {
+                            hide();
+                            LRESULT(0)
+                        }
+                        ID_ADVANCED if code == BN_CLICKED as usize => {
+                            ADVANCED.fetch_xor(true, Ordering::SeqCst);
+                            refresh_editor_visibility();
+                            let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+                                Some(hwnd),
+                                None,
+                                None,
+                                windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                                    | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+                            );
+                            LRESULT(0)
+                        }
+                        ID_GROUPED | ID_COPY if code == BN_CLICKED as usize => {
+                            change_option(id);
+                            LRESULT(0)
+                        }
+                        ID_QUOTE | ID_SEPARATOR if code == BN_CLICKED as usize => {
+                            crate::choice::toggle(get_dlg_item(hwnd, id), hwnd, id as i32);
+                            LRESULT(0)
+                        }
+                        ID_QUOTE | ID_SEPARATOR
+                            if code
+                                == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE
+                                    as usize =>
+                        {
+                            change_option(id);
+                            LRESULT(0)
+                        }
+                        ID_CLASSIC if code == BN_CLICKED as usize => {
+                            crate::settings_ui::on_win11_classic_switch(hwnd);
+                            refresh_options();
+                            refresh_manager_status();
+                            LRESULT(0)
+                        }
+                        ID_REPAIR if code == BN_CLICKED as usize => {
+                            crate::ctxmenu::sync("repair");
+                            if !crate::ctxmenu::registration_healthy() {
+                                crate::warn_dialog("", &crate::t_pub("ctx_registry_failed"));
+                            }
+                            refresh_manager_status();
                             LRESULT(0)
                         }
                         ID_ADD if code == BN_CLICKED as usize => {
@@ -972,24 +1622,57 @@ unsafe extern "system" fn mgr_proc(
                             LRESULT(0)
                         }
                         ID_SAVE if code == BN_CLICKED as usize => {
-                            apply_form();
+                            if apply_form() {
+                                finish_edit(true);
+                            }
                             LRESULT(0)
                         }
                         ID_DISCARD if code == BN_CLICKED as usize => {
-                            discard_form();
+                            finish_edit(false);
                             LRESULT(0)
                         }
                         ID_PREVIEW if code == BN_CLICKED as usize => {
                             let rule = draft_from_form();
-                            let sample = r"C:\Example\Sample.txt";
+                            let sample = if rule.scope == core_ctx::SCOPE_DIR
+                                || rule.scope == core_ctx::SCOPE_BACKGROUND
+                            {
+                                r"C:\Example\Folder"
+                            } else {
+                                r"C:\Example\Sample.txt"
+                            };
+                            let mut paths = vec![sample.to_owned()];
+                            if rule.selection_mode == core_ctx::SelectionMode::Together
+                                && rule.scope != core_ctx::SCOPE_BACKGROUND
+                            {
+                                paths.push(
+                                    if rule.scope == core_ctx::SCOPE_DIR {
+                                        r"C:\Example\Second Folder"
+                                    } else {
+                                        r"C:\Example\Second File.txt"
+                                    }
+                                    .to_owned(),
+                                );
+                            }
+                            let Some(args) = core_ctx::rule_selection_args(&rule, &paths) else {
+                                set_valid(&crate::t_pub("ctx_issue_args"));
+                                let field = get_dlg_item(hwnd, ID_ARGS_E);
+                                let _ = SetFocus(Some(field));
+                                crate::viewport::reveal_control(hwnd, field);
+                                return LRESULT(0);
+                            };
+                            let directory = if !rule.working_dir.is_empty() {
+                                rule.working_dir.clone()
+                            } else if matches!(
+                                rule.scope.as_str(),
+                                core_ctx::SCOPE_DIR | core_ctx::SCOPE_BACKGROUND
+                            ) {
+                                sample.to_owned()
+                            } else {
+                                r"C:\Example".into()
+                            };
                             let text = crate::t_args(
                                 "ctx_preview_body",
-                                &[
-                                    sample,
-                                    &rule.command,
-                                    &core_ctx::substitute_args(&rule.args, sample),
-                                    &rule.working_dir,
-                                ],
+                                &[&paths.join("\n"), &rule.command, &args, &directory],
                             );
                             let _ = MessageBoxW(
                                 Some(hwnd),
@@ -998,23 +1681,6 @@ unsafe extern "system" fn mgr_proc(
                                 windows::Win32::UI::WindowsAndMessaging::MB_OK
                                     | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
                             );
-                            LRESULT(0)
-                        }
-                        ID_DETAILS if code == BN_CLICKED as usize => {
-                            let text = text_of(hwnd, ID_VALID);
-                            if !text.is_empty() {
-                                let body = format!(
-                                    "{}\n\n{}",
-                                    text,
-                                    crate::t_pub("ctx_details_copy_hint")
-                                );
-                                let _ = MessageBoxW(
-                                    Some(hwnd),
-                                    PCWSTR(wide(&body).as_ptr()),
-                                    PCWSTR(wide(&crate::t_pub("ctx_details_title")).as_ptr()),
-                                    MB_OK | MB_ICONINFORMATION,
-                                );
-                            }
                             LRESULT(0)
                         }
                         ID_WORK_B if code == BN_CLICKED as usize => {
@@ -1061,7 +1727,7 @@ unsafe extern "system" fn mgr_proc(
                             LRESULT(0)
                         }
                         ID_LIST if code == LBN_DBLCLK as usize => {
-                            let _ = SetFocus(Some(get_dlg_item(hwnd, ID_TITLE_E)));
+                            edit_selected();
                             LRESULT(0)
                         }
                         ID_LIST if code == LBN_SELCHANGE as usize => {
@@ -1072,23 +1738,28 @@ unsafe extern "system" fn mgr_proc(
                             refresh_form_buttons();
                             DefWindowProcW(hwnd, msg, wparam, lparam)
                         }
-                        ID_SCOPE_C
+                        ID_SCOPE_C | FIELD_SELECTION
                             if code
                                 == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE
                                     as usize =>
                         {
+                            if id == FIELD_SELECTION
+                                && crate::choice::value(get_dlg_item(hwnd, FIELD_SELECTION)) == "2"
+                                && matches!(
+                                    text_of(hwnd, ID_ARGS_E).as_str(),
+                                    "\"%1\"" | "\"%L\"" | "\"%V\""
+                                )
+                            {
+                                set_text(ID_ARGS_E, "%*");
+                            }
                             refresh_form_buttons();
                             LRESULT(0)
                         }
-                        ID_SCOPE_C if code == BN_CLICKED as usize => {
+                        ID_SCOPE_C | FIELD_SELECTION if code == BN_CLICKED as usize => {
                             // The choice button opens its popup only when the
                             // owner toggles it (settings combo parity); the
                             // selection read-back doubles as the dirty check.
-                            crate::choice::toggle(
-                                get_dlg_item(hwnd, ID_SCOPE_C),
-                                hwnd,
-                                ID_SCOPE_C as i32,
-                            );
+                            crate::choice::toggle(get_dlg_item(hwnd, id), hwnd, id as i32);
                             refresh_form_buttons();
                             DefWindowProcW(hwnd, msg, wparam, lparam)
                         }
@@ -1098,7 +1769,9 @@ unsafe extern "system" fn mgr_proc(
                             // The well's focus ring is card pixels: repaint just
                             // that well, never the whole card face.
                             let edit = HWND(lparam.0 as *mut core::ffi::c_void);
-                            crate::tooltips::set_focus_tip(edit, code == EN_SETFOCUS);
+                            if code == EN_KILLFOCUS {
+                                crate::tooltips::dismiss_focus_tip(edit);
+                            }
                             let _ = crate::nativeform::invalidate_field_well(
                                 get_dlg_item(hwnd, ID_FORM),
                                 edit,
@@ -1194,6 +1867,7 @@ unsafe extern "system" fn mgr_proc(
                             if control == get_dlg_item(hwnd, ID_VALID)
                                 || control == get_dlg_item(hwnd, ID_STATUS)
                                 || control == get_dlg_item(hwnd, ID_EMPTY)
+                                || control == get_dlg_item(hwnd, ID_EDITOR_GUIDE)
                             {
                                 palette.muted
                             } else {
@@ -1248,7 +1922,7 @@ unsafe fn draw_item(hwnd: HWND, item: &crate::nativeform::DrawItem) {
         // Card repaints end in one SRCCOPY of the whole card rect: cut the
         // hosted children's rects out of the target DC first so the blit can
         // never paint over their pixels (settings/edit card parity).
-        if item.control_id as usize == ID_FORM {
+        if [ID_FORM, ID_LAYOUT_CARD, ID_COPY_CARD].contains(&(item.control_id as usize)) {
             let mut card_rect = RECT::default();
             if GetWindowRect(item.control, &mut card_rect).is_ok() {
                 let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
@@ -1294,7 +1968,7 @@ unsafe fn draw_item_impl(
     let scale = crate::scale_pub(96);
     let id = item.control_id as usize;
     unsafe {
-        if id == ID_SURF {
+        if [ID_SURF, ID_LAYOUT_CARD, ID_COPY_CARD].contains(&id) {
             crate::paint::draw_surface(
                 dc,
                 bounds,
@@ -1303,11 +1977,27 @@ unsafe fn draw_item_impl(
                 p.border,
                 crate::paint::control_radius(),
             );
-            crate::list_style::paint_lane(
+            if id == ID_SURF {
+                crate::list_style::paint_lane(
+                    dc,
+                    item.control,
+                    bounds.right - bounds.left,
+                    bounds.bottom - bounds.top,
+                );
+            }
+        } else if id == ID_TAB_RULES || id == ID_MORE {
+            let mut state = crate::nativeform::control_state(item.control, item.state);
+            state.active = (VIEW.load(Ordering::SeqCst) == VIEW_OPTIONS) == (id == ID_MORE);
+            crate::paint::draw_chip(
                 dc,
-                item.control,
-                bounds.right - bounds.left,
-                bounds.bottom - bounds.top,
+                bounds,
+                body_font(),
+                &text_of(mgr(), id),
+                p,
+                p.window_bg,
+                state,
+                crate::paint::control_radius(),
+                false,
             );
         } else if id == ID_FORM {
             // Section card face + the settings field wells: every visible
@@ -1455,24 +2145,16 @@ unsafe fn draw_item_impl(
         } else if crate::choice::is_choice(item.control) {
             let state = crate::nativeform::control_state(item.control, item.state);
             crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
-        } else if id == ID_MORE || id == ID_PREVIEW || id == ID_DETAILS {
+        } else if matches!(id, ID_PREVIEW | ID_ADVANCED | ID_REPAIR | ID_BACK) {
             let label = text_of(mgr(), id);
-            let background = if id == ID_PREVIEW {
+            let background = if id == ID_ADVANCED {
                 p.surface
             } else {
                 p.window_bg
             };
-            let mut text_bounds = *bounds;
-            if id == ID_MORE {
-                // Keep the caption aligned to the card's right edge in
-                // either language, rather than the left of a wide button.
-                crate::paint::fill_rect(dc, bounds, background);
-                let width = s(crate::measured_text_width(mgr(), body_font(), &label));
-                text_bounds.left = (bounds.right - width).max(bounds.left);
-            }
             crate::paint::draw_text_link(
                 dc,
-                &text_bounds,
+                bounds,
                 body_font(),
                 &label,
                 p,
@@ -1480,23 +2162,48 @@ unsafe fn draw_item_impl(
                 crate::nativeform::control_state(item.control, item.state),
                 scale,
             );
-        } else if id == ID_CONSOLE || id == ID_ENABLED {
+        } else if matches!(
+            id,
+            ID_CONSOLE | ID_ENABLED | ID_MASTER | ID_GROUPED | ID_COPY | ID_CLASSIC
+        ) {
             // Panel switch grammar on the card face.
             let label = text_of(mgr(), id);
             let mut state = crate::nativeform::control_state(item.control, item.state);
             state.active = if id == ID_CONSOLE {
                 CONSOLE_HIDE.load(Ordering::SeqCst)
+            } else if id == ID_MASTER {
+                crate::cfg_map(|c| c.ctx_menu_enabled)
+            } else if id == ID_GROUPED {
+                crate::cfg_map(|c| c.ctx_menu_grouped)
+            } else if id == ID_COPY {
+                crate::cfg_map(|c| c.ctx_copy_enabled)
+            } else if id == ID_CLASSIC {
+                matches!(
+                    crate::ctxmenu::classic_state(),
+                    crate::ctxmenu::ClassicState::ByUs
+                        | crate::ctxmenu::ClassicState::ByOther
+                        | crate::ctxmenu::ClassicState::Legacy
+                )
             } else {
                 RULE_ENABLED.load(Ordering::SeqCst)
             };
             let progress = crate::switch_animation_progress(item.control);
-            crate::paint::draw_switch_row(
+            let draw_switch = if matches!(id, ID_MASTER | ID_ENABLED) {
+                crate::paint::draw_compact_switch_row
+            } else {
+                crate::paint::draw_switch_row
+            };
+            draw_switch(
                 dc,
                 bounds,
                 body_font(),
                 &label,
                 p,
-                p.surface,
+                if matches!(id, ID_MASTER | ID_ENABLED) {
+                    p.window_bg
+                } else {
+                    p.surface
+                },
                 state,
                 scale,
                 progress,
@@ -1504,16 +2211,12 @@ unsafe fn draw_item_impl(
         } else {
             let label = text_of(mgr(), id);
             // Buttons riding a card face erase with the card color.
-            let on_card = id == ID_PROG_B
-                || id == ID_ICON_B
-                || id == ID_WORK_B
-                || id == ID_SAVE
-                || id == ID_DISCARD;
+            let on_card = id == ID_PROG_B || id == ID_ICON_B || id == ID_WORK_B;
             let background = if on_card { p.surface } else { p.window_bg };
             // Save carries the accent fill of a default action (settings and
             // editor footer parity).
             let mut state = crate::nativeform::control_state(item.control, item.state);
-            if id == ID_SAVE {
+            if id == ID_SAVE || id == ID_ADD {
                 state.active = true;
             }
             if id == ID_DELETE {
@@ -1547,7 +2250,12 @@ unsafe fn draw_item_impl(
 
 fn row_text(rule: &core_ctx::CtxRule) -> String {
     if rule.separator {
-        return crate::t_pub("ctx_separator_row");
+        let label = crate::t_pub("ctx_separator_row");
+        return if rule.enabled {
+            label
+        } else {
+            format!("{} ({})", label, crate::t_pub("ctx_disabled_short"))
+        };
     }
     let (_, issues) = core_ctx::prepare_rules(vec![rule.clone()]);
     let matched = if !issues.is_empty() {
@@ -1623,7 +2331,11 @@ fn render_list() {
         let empty = rules.is_empty();
         let _ = ShowWindow(
             get_dlg_item(mgr(), ID_EMPTY),
-            if empty { SW_SHOW } else { SW_HIDE },
+            if empty && VIEW.load(Ordering::SeqCst) == VIEW_LIST {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
         );
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, true);
         refresh_action_states();
@@ -1633,12 +2345,27 @@ fn render_list() {
 /// Row buttons follow the selection: delete/reorder need a selected rule.
 fn refresh_action_states() {
     let selected = selected_index();
+    let selected_rule =
+        selected.and_then(|index| crate::runtime::lock(&DISPLAYED).get(index).cloned());
+    set_text(
+        ID_TOGGLE,
+        &crate::t_pub(if selected_rule.as_ref().is_some_and(|rule| rule.enabled) {
+            "ctx_disable_rule"
+        } else {
+            "ctx_enable_rule"
+        }),
+    );
     let (count, can_append_separator) = {
         let rules = crate::runtime::lock(&DISPLAYED);
         (rules.len(), can_append_separator(&rules))
     };
     for (id, enabled) in [
         (ID_DELETE, selected.is_some()),
+        (
+            ID_EDIT,
+            selected_rule.as_ref().is_some_and(|rule| !rule.separator),
+        ),
+        (ID_TOGGLE, selected.is_some()),
         (ID_UP, selected.is_some_and(|index| index > 0)),
         (ID_DOWN, selected.is_some_and(|index| index + 1 < count)),
         (ID_ADD, count < core_ctx::MAX_CTX_RULES),
@@ -1688,10 +2415,6 @@ fn set_valid(text: &str) {
     set_text(ID_VALID, text);
     let control = get_dlg_item(mgr(), ID_VALID);
     unsafe {
-        let _ = ShowWindow(
-            get_dlg_item(mgr(), ID_DETAILS),
-            if text.is_empty() { SW_HIDE } else { SW_SHOW },
-        );
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
     }
 }
@@ -1702,6 +2425,7 @@ fn issue_text(issue: &core_ctx::CtxIssue) -> String {
     match issue.code {
         core_ctx::IssueCode::TitleRequired => crate::t_pub("ctx_issue_title"),
         core_ctx::IssueCode::PatternInvalid => crate::t_pub("ctx_issue_pattern"),
+        core_ctx::IssueCode::ArgumentsInvalid => crate::t_pub("ctx_issue_args"),
         core_ctx::IssueCode::CommandRequired => crate::t_pub("ctx_issue_program"),
         core_ctx::IssueCode::TooMany => {
             crate::t_args("ctx_issue_limit", &[&core_ctx::MAX_CTX_RULES.to_string()])
@@ -1729,6 +2453,11 @@ fn draft_from_form() -> core_ctx::CtxRule {
     if core_ctx::valid_scope(&scope) {
         draft.scope = scope;
     }
+    if let Ok(index) = crate::choice::value(get_dlg_item(window, FIELD_SELECTION)).parse::<usize>()
+        && let Some(mode) = SELECTION_MODES.get(index)
+    {
+        draft.selection_mode = *mode;
+    }
     draft.hidden_console = CONSOLE_HIDE.load(Ordering::SeqCst);
     draft
 }
@@ -1738,7 +2467,13 @@ fn load_form() {
     let draft = crate::runtime::lock(&DRAFT).clone();
     let editable = draft.as_ref().is_some_and(|rule| !rule.separator);
     for id in FIELD_EDITS.into_iter().chain([
-        ID_SCOPE_C, ID_PROG_B, ID_ICON_B, ID_WORK_B, ID_CONSOLE, ID_PREVIEW,
+        ID_SCOPE_C,
+        FIELD_SELECTION,
+        ID_PROG_B,
+        ID_ICON_B,
+        ID_WORK_B,
+        ID_CONSOLE,
+        ID_PREVIEW,
     ]) {
         unsafe {
             let _ = EnableWindow(get_dlg_item(window, id), editable);
@@ -1781,6 +2516,10 @@ fn load_form() {
         );
     }
     set_text(FIELD_WORK, &rule.working_dir);
+    crate::choice::select_index(
+        get_dlg_item(window, FIELD_SELECTION),
+        selection_index(rule.selection_mode),
+    );
     set_text(ID_TITLE_E, &rule.title);
     set_text(ID_PROG_E, &rule.command);
     set_text(ID_ARGS_E, &rule.args);
@@ -1803,21 +2542,41 @@ fn load_form() {
     refresh_form_buttons();
 }
 
-/// Save/Cancel follow the draft: both stay disabled until the form differs
-/// from the loaded rule (no selection parks them; an untouched rule too —
-/// Cancel used to read as a dead button).
+/// Keep the editor's visible state and actions in sync with its saved baseline.
 fn refresh_form_buttons() {
     let draft = crate::runtime::lock(&DRAFT).clone();
-    let dirty = match draft {
+    let is_new = draft.as_ref().is_some_and(|rule| rule.id.is_empty());
+    let dirty = match draft.as_ref() {
         None => false,
-        Some(rule) => rule.id.is_empty() || draft_from_form() != rule,
+        Some(rule) => is_new || draft_from_form() != *rule,
     };
     let stale =
         *crate::runtime::lock(&DISPLAYED) != *crate::runtime::lock(&crate::ctxexec::CTX_RULES);
-    for (id, enabled) in [(ID_SAVE, dirty), (ID_DISCARD, dirty || stale)] {
-        unsafe {
-            let _ = EnableWindow(get_dlg_item(mgr(), id), enabled);
-        }
+    let title_key = if stale {
+        "ctx_form_stale_title"
+    } else if is_new {
+        "ctx_form_new_title"
+    } else if dirty {
+        "ctx_form_dirty_title"
+    } else if draft.is_some() {
+        "ctx_form_saved_title"
+    } else {
+        "ctx_form_title"
+    };
+    set_text(ID_FORM_TITLE, &crate::t_pub(title_key));
+    set_text(
+        ID_TAB_RULES,
+        &crate::t_pub(if dirty {
+            "ctx_tab_rules_dirty"
+        } else {
+            "ctx_tab_rules"
+        }),
+    );
+    set_text(ID_DISCARD, &crate::t_pub("common_cancel"));
+    refresh_editor_visibility();
+    unsafe {
+        let _ = EnableWindow(get_dlg_item(mgr(), ID_SAVE), dirty);
+        let _ = EnableWindow(get_dlg_item(mgr(), ID_DISCARD), true);
     }
 }
 
@@ -1836,6 +2595,9 @@ fn set_console(value: bool) {
 fn apply_form() -> bool {
     if crate::runtime::lock(&DRAFT).is_none() {
         return true;
+    }
+    if VIEW.load(Ordering::SeqCst) != VIEW_EDIT {
+        select_view(VIEW_EDIT);
     }
     let draft = draft_from_form();
     let base = crate::runtime::lock(&DISPLAYED).clone();
@@ -1860,10 +2622,13 @@ fn apply_form() -> bool {
         let field = match issue.code {
             core_ctx::IssueCode::TitleRequired => ID_TITLE_E,
             core_ctx::IssueCode::CommandRequired => ID_PROG_E,
+            core_ctx::IssueCode::ArgumentsInvalid => ID_ARGS_E,
             _ => ID_MATCH_E,
         };
         unsafe {
-            let _ = SetFocus(Some(get_dlg_item(mgr(), field)));
+            let control = get_dlg_item(mgr(), field);
+            let _ = SetFocus(Some(control));
+            crate::viewport::reveal_control(mgr(), control);
         }
         return false;
     }
@@ -1886,7 +2651,7 @@ fn leave_draft() -> bool {
     let Some(original) = original else {
         return true;
     };
-    if !original.id.is_empty() && draft_from_form() == original {
+    if draft_from_form() == original {
         return true;
     }
     let answer = unsafe {
@@ -1916,11 +2681,11 @@ fn begin_new_rule() {
         args: "\"%1\"".into(),
         ..Default::default()
     });
+    ADVANCED.store(false, Ordering::SeqCst);
     load_form();
-    // A blank draft looks identical to the empty selection state; the
-    // example hint is what makes the click read as "started something".
-    set_valid(&crate::t_pub("ctx_form_new_hint"));
-    let _ = unsafe { SetFocus(Some(get_dlg_item(mgr(), ID_TITLE_E))) };
+    select_view(VIEW_EDIT);
+    set_valid("");
+    let _ = unsafe { SetFocus(Some(get_dlg_item(mgr(), ID_PROG_E))) };
 }
 
 fn begin_new_separator() {
@@ -1944,52 +2709,42 @@ fn begin_new_separator() {
         return;
     }
     let position = prepared.len() - 1;
-    *crate::runtime::lock(&DRAFT) = Some(prepared[position].clone());
+    *crate::runtime::lock(&DRAFT) = None;
     refresh_list();
     select_index(position as i32);
-    load_form();
+    set_text(ID_LIST_HINT, &crate::t_pub("ctx_separator_saved"));
     refresh_manager_status();
     let _ = unsafe { SetFocus(Some(list_hwnd())) };
 }
 
-/// Discard: reload the selected rule; a brand-new draft just cancels out.
-fn discard_form() {
-    let selected_id = crate::runtime::lock(&DRAFT)
-        .as_ref()
-        .map(|rule| rule.id.clone());
-    refresh_list();
-    let index = crate::runtime::lock(&DISPLAYED)
-        .iter()
-        .position(|rule| Some(&rule.id) == selected_id.as_ref());
-    *crate::runtime::lock(&DRAFT) =
-        index.and_then(|i| crate::runtime::lock(&DISPLAYED).get(i).cloned());
-    select_index(index.map_or(-1, |i| i as i32));
-    load_form();
+fn selection_changed() {
+    refresh_action_states();
+    set_text(ID_LIST_HINT, &crate::t_pub("ctx_list_hint"));
 }
 
-fn selection_changed() {
-    let target_id = selected_index().and_then(|index| {
-        crate::runtime::lock(&DISPLAYED)
-            .get(index)
-            .map(|rule| rule.id.clone())
-    });
-    if !leave_draft() {
-        let id = crate::runtime::lock(&DRAFT)
-            .as_ref()
-            .map(|rule| rule.id.clone());
-        let index = crate::runtime::lock(&DISPLAYED)
-            .iter()
-            .position(|rule| Some(&rule.id) == id.as_ref());
-        select_index(index.map_or(-1, |i| i as i32));
+fn toggle_selected() {
+    let Some(index) = selected_index() else {
+        return;
+    };
+    let base = crate::runtime::lock(&DISPLAYED).clone();
+    let mut next = base.clone();
+    let Some(rule) = next.get_mut(index) else {
+        return;
+    };
+    rule.enabled = !rule.enabled;
+    let enabled = rule.enabled;
+    let (_, issues) = core_ctx::prepare_rules(next.clone());
+    if enabled && let Some(issue) = issues.iter().find(|issue| issue.index == index) {
+        crate::warn_dialog("", &issue_text(issue));
         return;
     }
-    let index = crate::runtime::lock(&DISPLAYED)
-        .iter()
-        .position(|rule| Some(&rule.id) == target_id.as_ref());
-    *crate::runtime::lock(&DRAFT) =
-        index.and_then(|i| crate::runtime::lock(&DISPLAYED).get(i).cloned());
-    select_index(index.map_or(-1, |i| i as i32));
-    load_form();
+    if let Err(error) = crate::save_ctx_rules(&base, &next) {
+        crate::warn_dialog("", &error);
+        return;
+    }
+    refresh_list();
+    select_index(index as i32);
+    refresh_manager_status();
 }
 
 fn delete_selected() {
@@ -2001,18 +2756,17 @@ fn delete_selected() {
     if index >= rules.len() {
         return;
     }
-    let title = if rules[index].separator {
-        crate::t_pub("ctx_add_separator")
+    let message = if rules[index].separator {
+        crate::t_pub("ctx_delete_separator_confirm")
     } else {
-        rules[index].title.clone()
+        crate::t_args("ctx_delete_confirm", &[&rules[index].title])
     };
-    let message = crate::t_args("ctx_delete_confirm", &[&title]);
     let result = unsafe {
         MessageBoxW(
             Some(mgr()),
             PCWSTR(wide(&message).as_ptr()),
             PCWSTR(wide(&crate::t_pub("ctx_manager_title")).as_ptr()),
-            MB_YESNO | MB_ICONQUESTION,
+            MB_YESNO | MB_ICONQUESTION | windows::Win32::UI::WindowsAndMessaging::MB_DEFBUTTON2,
         )
     };
     if result != IDYES {
@@ -2151,6 +2905,15 @@ fn browse_for_file(edit_id: usize, filter_key: &str) {
         let len = file.iter().position(|ch| *ch == 0).unwrap_or(file.len());
         let path = String::from_utf16_lossy(&file[..len]);
         set_text(edit_id, &path);
+        if edit_id == ID_PROG_E
+            && text_of(mgr(), ID_TITLE_E).trim().is_empty()
+            && let Some(name) = std::path::Path::new(&path).file_stem()
+        {
+            set_text(
+                ID_TITLE_E,
+                &crate::t_args("ctx_default_rule_title", &[&name.to_string_lossy()]),
+            );
+        }
     }
 }
 
@@ -2192,109 +2955,113 @@ mod tests {
         unsafe {
             ensure_created();
         }
-        render_list();
-        load_form();
-        begin_new_separator();
-        assert!(crate::runtime::lock(&DRAFT).is_none());
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_TITLE_E)).as_bool() });
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_WORK_B)).as_bool() });
-        *crate::runtime::lock(&DRAFT) = None;
-        let rule = core_ctx::CtxRule {
-            id: "a".into(),
-            title: "A".into(),
-            command: "tool.exe".into(),
-            ..Default::default()
-        };
-        *crate::runtime::lock(&DISPLAYED) = vec![rule.clone()];
-        *crate::runtime::lock(&crate::ctxexec::CTX_RULES) = vec![rule.clone()];
-        *crate::runtime::lock(&DRAFT) = Some(rule.clone());
-        render_list();
-        select_index(0);
-        load_form();
-        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_WORK_B)).as_bool() });
-        // Shared theme refreshes must not collapse this two-line list back
-        // to the default row height used by other native lists.
-        crate::list_style::refresh(list_hwnd());
-        assert!(unsafe {
-            SendMessageW(
-                list_hwnd(),
-                windows::Win32::UI::WindowsAndMessaging::LB_GETITEMHEIGHT,
-                Some(WPARAM(0)),
-                None,
-            )
-            .0 >= s(48) as isize
-        });
-        let details_visible = || unsafe {
+        let is_shown = |id| unsafe {
             windows::Win32::UI::WindowsAndMessaging::GetWindowLongW(
-                get_dlg_item(mgr(), ID_DETAILS),
+                get_dlg_item(mgr(), id),
                 windows::Win32::UI::WindowsAndMessaging::GWL_STYLE,
             ) as u32
                 & WS_VISIBLE.0
                 != 0
         };
-        let long_message = "long validation message ".repeat(80);
-        set_valid(&long_message);
-        assert_eq!(text_of(mgr(), ID_VALID), long_message);
-        assert!(details_visible());
-        set_valid("");
-        assert!(!details_visible());
-        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
-        assert!(!can_append_separator(&[core_ctx::CtxRule {
-            separator: true,
+        let rule = core_ctx::CtxRule {
+            id: "a".into(),
+            title: "A".into(),
+            command: "tool.exe".into(),
+            args: "\"%1\"".into(),
             ..Default::default()
-        }]));
+        };
+        *crate::runtime::lock(&crate::ctxexec::CTX_RULES) = vec![rule.clone()];
+        refresh_list();
+        select_index(0);
+        select_view(VIEW_LIST);
+        assert!(is_shown(ID_LIST));
+        assert!(!is_shown(ID_FORM));
+        assert_eq!(default_button(mgr()), Some(get_dlg_item(mgr(), ID_EDIT)));
+        edit_selected();
+        assert_eq!(VIEW.load(Ordering::SeqCst), VIEW_EDIT);
+        assert!(!is_shown(ID_LIST));
+        assert!(is_shown(ID_TITLE_E));
+        assert!(!is_shown(FIELD_WORK));
         assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
-        crate::choice::select_index(get_dlg_item(mgr(), ID_SCOPE_C), 1);
+        set_text(ID_ARGS_E, "unsaved argument");
+        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
+        select_view(VIEW_OPTIONS);
+        assert!(is_shown(ID_GROUPED));
+        assert!(!is_shown(ID_SAVE));
+        assert_eq!(is_shown(ID_CLASSIC), crate::system::is_windows_11());
+        refresh_language();
+        assert_eq!(text_of(mgr(), ID_ARGS_E), "unsaved argument");
+        assert_eq!(*crate::runtime::lock(&DRAFT), Some(rule.clone()));
+        select_view(VIEW_EDIT);
+        ADVANCED.store(true, Ordering::SeqCst);
+        refresh_editor_visibility();
+        assert!(is_shown(FIELD_WORK));
+        set_text(FIELD_WORK, r"C:\Example");
+        ADVANCED.store(false, Ordering::SeqCst);
+        refresh_editor_visibility();
+        assert_eq!(draft_from_form().working_dir, r"C:\Example");
+        let long = "x".repeat(4096);
+        set_text(ID_ARGS_E, &long);
+        refresh_language();
+        assert_eq!(text_of(mgr(), ID_ARGS_E), long);
+        set_text(ID_ARGS_E, "\"%1\"");
+        crate::choice::select_index(get_dlg_item(mgr(), FIELD_SELECTION), 2);
         unsafe {
             SendMessageW(
                 mgr(),
                 WM_COMMAND,
                 Some(WPARAM(
-                    ID_SCOPE_C
+                    FIELD_SELECTION
                         | ((windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE as usize) << 16),
                 )),
                 None,
             );
         }
-        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
-        let long = "x".repeat(4096);
-        set_text(ID_ARGS_E, &long);
-        refresh_language();
-        assert_eq!(text_of(mgr(), ID_ARGS_E), long);
-        assert_eq!(draft_from_form().scope, core_ctx::SCOPE_DIR);
-        assert_eq!(*crate::runtime::lock(&DRAFT), Some(rule));
-        assert_eq!(default_button(mgr()), Some(get_dlg_item(mgr(), ID_SAVE)));
-        discard_form();
-        assert!(text_of(mgr(), ID_ARGS_E).is_empty());
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_UP)).as_bool() });
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DOWN)).as_bool() });
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
-        let baseline = crate::runtime::lock(&DRAFT).clone();
+        assert_eq!(text_of(mgr(), ID_ARGS_E), "%*");
+        assert_eq!(
+            draft_from_form().selection_mode,
+            core_ctx::SelectionMode::Together
+        );
+        crate::choice::select_index(
+            get_dlg_item(mgr(), ID_SCOPE_C),
+            scope_row_index(core_ctx::SCOPE_BACKGROUND),
+        );
+        refresh_form_buttons();
+        assert!(!is_shown(FIELD_SELECTION));
         crate::runtime::lock(&crate::ctxexec::CTX_RULES)[0].title = "External edit".into();
         refresh_config_state();
-        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
-        assert_eq!(*crate::runtime::lock(&DRAFT), baseline);
         assert_eq!(text_of(mgr(), ID_TITLE_E), "A");
-        set_text(ID_ARGS_E, "unsaved argument");
-        set_text(ID_STATUS, "stale status before returning from settings");
-        unsafe {
-            SendMessageW(
-                mgr(),
-                windows::Win32::UI::WindowsAndMessaging::WM_SHOWWINDOW,
-                Some(WPARAM(1)),
-                None,
-            );
-        }
+        assert_eq!(*crate::runtime::lock(&DRAFT), Some(rule));
         assert_eq!(
-            text_of(mgr(), ID_STATUS),
-            crate::t_pub("ctx_manager_disabled")
+            text_of(mgr(), ID_FORM_TITLE),
+            crate::t_pub("ctx_form_stale_title")
         );
-        assert_eq!(text_of(mgr(), ID_ARGS_E), "unsaved argument");
-        assert_eq!(*crate::runtime::lock(&DRAFT), baseline);
-        discard_form();
+        finish_edit(false);
+        assert!(crate::runtime::lock(&DRAFT).is_none());
+        assert_eq!(VIEW.load(Ordering::SeqCst), VIEW_LIST);
+        assert!(!is_shown(ID_TITLE_E));
+        edit_selected();
         assert_eq!(text_of(mgr(), ID_TITLE_E), "External edit");
-        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
+        assert_eq!(default_button(mgr()), Some(get_dlg_item(mgr(), ID_SAVE)));
+        set_valid("A long validation message");
+        assert!(is_shown(ID_VALID));
+        select_view(VIEW_OPTIONS);
+        assert!(!is_shown(ID_VALID));
+        select_view(VIEW_EDIT);
+        assert!(is_shown(ID_VALID));
+        finish_edit(false);
+        let separator = core_ctx::CtxRule {
+            id: "sep".into(),
+            separator: true,
+            ..Default::default()
+        };
+        crate::runtime::lock(&crate::ctxexec::CTX_RULES).push(separator);
+        refresh_list();
+        select_index(1);
+        assert_eq!(default_button(mgr()), Some(get_dlg_item(mgr(), ID_ADD)));
+        begin_new_rule();
+        assert!(crate::runtime::lock(&DRAFT).as_ref().unwrap().id.is_empty());
+        finish_edit(false);
+        assert_eq!(VIEW.load(Ordering::SeqCst), VIEW_LIST);
     }
 }

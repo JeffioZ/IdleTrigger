@@ -1004,6 +1004,22 @@ fn interactive_controls_react_to_every_state() {
     let panel = hwnd(&PANEL);
     show_panel();
     pump(30);
+    // Delay actions are intentionally unavailable until automatic switching is on.
+    for id in [
+        IDC_THEME_SNOOZE_30M,
+        IDC_THEME_SNOOZE_1H,
+        IDC_THEME_SNOOZE_MORNING,
+    ] {
+        let control = unsafe { GetDlgItem(Some(panel), id as i32).unwrap() };
+        assert!(!unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(control).as_bool()
+        });
+    }
+    crate::runtime::lock(&CONFIG)
+        .as_mut()
+        .unwrap()
+        .theme_switch_enabled = true;
+    refresh_status();
     // Use real runtime state: a queued status refresh correctly hides
     // unarmed cancel links, undoing a test-only ShowWindow.
     theme_engine::snooze(30);
@@ -1017,6 +1033,9 @@ fn interactive_controls_react_to_every_state() {
         IDC_NOSLEEP_TIMED_2H,
         IDC_AUTOMATION,
         IDC_MANAGE_BUTTON,
+        IDC_AUTOMATION_NEW,
+        IDC_APPEARANCE,
+        IDC_SCREEN_ENABLE,
         IDC_THEME_ENABLE,
         IDC_THEME_SWITCH,
         IDC_THEME_SNOOZE_30M,
@@ -1677,11 +1696,19 @@ fn focus_tips_are_transient_and_never_wedge() {
         };
         let visible = || IsWindowVisible(tip).as_bool();
 
-        // Keyboard focus shows the tip, anchored under the control.
+        // Keyboard focus alone must not show a persistent tip. Explicit
+        // activation below retains coverage of tooltip dismissal and cleanup.
         nativeform::keyboard_navigation();
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
         pump(10);
-        assert!(tooltips::focus_tip_active(switch), "focus tip not armed");
+        assert!(
+            !tooltips::focus_tip_active(switch),
+            "focus must not arm a tooltip"
+        );
+        assert!(!visible(), "keyboard focus unexpectedly showed a tooltip");
+        tooltips::set_focus_tip(switch, true);
+        pump(10);
+        assert!(tooltips::focus_tip_active(switch), "explicit tip not armed");
         assert!(visible(), "focus tip failed to show");
         let (tip_rect, switch_rect) = (rect_of(tip), rect_of(switch));
         assert!(
@@ -1736,6 +1763,9 @@ fn focus_tips_are_transient_and_never_wedge() {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
             pump(5);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(target));
+            pump(10);
+            assert!(!visible(), "focus unexpectedly showed a tooltip");
+            tooltips::set_focus_tip(target, true);
             pump(10);
         };
 
@@ -1848,6 +1878,7 @@ fn theme_switch_keeps_panel_tooltips_alive() {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
             pump(5);
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            tooltips::set_focus_tip(switch, true);
             pump(10);
             assert!(visible(), "{stage}: tip refuses to show");
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));
@@ -1880,6 +1911,7 @@ fn theme_switch_keeps_panel_tooltips_alive() {
         // window re-themed underneath itself. Run the full production path.
         let flip = |dark: bool, side: &str| {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            tooltips::set_focus_tip(switch, true);
             pump(10);
             assert!(visible(), "{side}: tip missing before switch");
             theme::force_dark(dark);
@@ -1892,6 +1924,7 @@ fn theme_switch_keeps_panel_tooltips_alive() {
                 "{side}: tip showing during the switch refuses to hide (wedge)"
             );
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(switch));
+            tooltips::set_focus_tip(switch, true);
             pump(10);
             assert!(visible(), "{side}: no tips after theme switch");
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(panel));

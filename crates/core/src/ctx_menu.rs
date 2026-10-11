@@ -22,6 +22,16 @@ pub const SCOPE_FILE_DIR: &str = "file_dir";
 pub const SCOPE_BACKGROUND: &str = "background";
 pub const SCOPE_ALL: &str = "all";
 
+/// Missing fields keep the historical one-invocation-per-item behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    Single,
+    #[default]
+    Each,
+    Together,
+}
+
 pub const QUOTE_AUTO: &str = "auto";
 pub const QUOTE_ALWAYS: &str = "always";
 pub const QUOTE_NONE: &str = "none";
@@ -67,6 +77,8 @@ pub struct CtxRule {
     pub separator: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub working_dir: String,
+    #[serde(default)]
+    pub selection_mode: SelectionMode,
 }
 
 fn default_true() -> bool {
@@ -87,6 +99,7 @@ impl Default for CtxRule {
             hidden_console: false,
             separator: false,
             working_dir: String::new(),
+            selection_mode: SelectionMode::Each,
         }
     }
 }
@@ -106,6 +119,7 @@ pub enum IssueCode {
     TitleRequired,
     CommandRequired,
     PatternInvalid,
+    ArgumentsInvalid,
     TooMany,
     /// A malformed [[ctx_rules]] entry (the message carries the decode error).
     Parse,
@@ -257,6 +271,91 @@ pub fn substitute_args(args: &str, path: &str) -> String {
     output
 }
 
+/// Expand a complete selection once, without interpreting tokens in paths.
+/// `%*` must occupy a whole argument; optional surrounding quotes are accepted.
+pub fn selection_args(args: &str, paths: &[String]) -> Option<String> {
+    let first = paths.first()?;
+    let all = paths
+        .iter()
+        .map(|path| {
+            let mut quoted = String::from("\"");
+            let mut slashes = 0;
+            for ch in path.chars() {
+                if ch == '\\' {
+                    slashes += 1;
+                    continue;
+                }
+                quoted.extend(std::iter::repeat_n(
+                    '\\',
+                    if ch == '"' { slashes * 2 + 1 } else { slashes },
+                ));
+                quoted.push(ch);
+                slashes = 0;
+            }
+            quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+            quoted.push('"');
+            quoted
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut output = String::new();
+    let mut rest = args;
+    let mut boundary = true;
+    let mut in_quotes = false;
+    let mut slashes = 0;
+    while !rest.is_empty() {
+        let token_len = if rest.starts_with("\"%*\"") {
+            4
+        } else if rest.starts_with("%*") {
+            2
+        } else {
+            0
+        };
+        if token_len > 0 {
+            let tail = &rest[token_len..];
+            if in_quotes || !boundary || tail.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
+                return None;
+            }
+            output.push_str(&all);
+            rest = tail;
+            boundary = false;
+            slashes = 0;
+        } else if ["%1", "%L", "%V"]
+            .iter()
+            .any(|token| rest.starts_with(token))
+        {
+            output.push_str(first);
+            rest = &rest[2..];
+            if rest.starts_with('"') {
+                output.extend(first.chars().rev().take_while(|ch| *ch == '\\'));
+            }
+            boundary = false;
+            slashes = 0;
+        } else {
+            let ch = rest.chars().next()?;
+            output.push(ch);
+            rest = &rest[ch.len_utf8()..];
+            if ch == '"' && slashes % 2 == 0 {
+                in_quotes = !in_quotes;
+            }
+            slashes = if ch == '\\' { slashes + 1 } else { 0 };
+            boundary = !in_quotes && ch.is_whitespace();
+        }
+    }
+    Some(output)
+}
+
+/// Use the same selection contract for validation, preview and execution.
+pub fn rule_selection_args(rule: &CtxRule, paths: &[String]) -> Option<String> {
+    if rule.selection_mode == SelectionMode::Together
+        && rule.scope != SCOPE_BACKGROUND
+        && !rule.args.contains("%*")
+    {
+        return None;
+    }
+    selection_args(&rule.args, paths)
+}
+
 /// Slugs a rule id into a registry-key-safe fragment.
 fn slug(id: &str) -> String {
     let cleaned: String = id
@@ -313,6 +412,13 @@ pub fn prepare_rules(rules: Vec<CtxRule>) -> (Vec<CtxRule>, Vec<CtxIssue>) {
         rule.id = id.clone();
         used_ids.push(id);
         if !rule.separator {
+            if rule_selection_args(&rule, &[String::from("sample")]).is_none() {
+                issues.push(CtxIssue {
+                    index,
+                    code: IssueCode::ArgumentsInvalid,
+                    message: format!("ctx_rules[{index}]: batch arguments require a standalone %*"),
+                });
+            }
             if rule
                 .patterns
                 .iter()
@@ -764,11 +870,74 @@ title = 42
             hidden_console: true,
             separator: true,
             working_dir: "D:\\".into(),
+            selection_mode: SelectionMode::Together,
         };
         let mut doc = DocumentMut::new();
         update_rules(&mut doc, &[], std::slice::from_ref(&rule)).unwrap();
         let (expected, issues) = read_rules(&doc).unwrap();
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(expected, vec![rule]);
+    }
+
+    #[test]
+    fn batch_arguments_quote_roots_and_do_not_expand_tokens_in_paths() {
+        let paths = vec!["C:\\".into(), "C:\\中文 空格\\%1 %*.txt".into()];
+        let expected = "\"C:\\\\\" \"C:\\中文 空格\\%1 %*.txt\"";
+        assert_eq!(selection_args("%*", &paths).as_deref(), Some(expected));
+        assert_eq!(selection_args("\"%*\"", &paths).as_deref(), Some(expected));
+        assert_eq!(
+            selection_args("--open %* --flag", &paths),
+            Some(format!("--open {expected} --flag"))
+        );
+        for invalid in [
+            "--files=%*",
+            "prefix%*",
+            "%*suffix",
+            "\"prefix %* suffix\"",
+            "\"%*\"tail",
+        ] {
+            assert_eq!(selection_args(invalid, &paths), None, "{invalid}");
+        }
+        assert!(selection_args("%*", &[]).is_none());
+        assert_eq!(
+            selection_args("\"%1\"", &paths),
+            Some(substitute_args("\"%1\"", &paths[0]))
+        );
+    }
+
+    #[test]
+    fn selection_mode_defaults_preserve_documents_and_batch_requires_all_paths() {
+        let text = "[[ctx_rules]]\nid = 'old'\ntitle = 'Tool'\ncommand = 'tool.exe'\nargs = '\"%1\"' # keep\n";
+        let mut doc = text.parse::<DocumentMut>().unwrap();
+        let (base, issues) = read_rules(&doc).unwrap();
+        assert!(issues.is_empty());
+        assert_eq!(base[0].selection_mode, SelectionMode::Each);
+        update_rules(&mut doc, &base, &base).unwrap();
+        assert_eq!(doc.to_string(), text);
+        let mut next = base.clone();
+        next[0].selection_mode = SelectionMode::Together;
+        assert!(rule_selection_args(&next[0], &["one.txt".into(), "two.txt".into()]).is_none());
+        assert!(
+            prepare_rules(next.clone())
+                .1
+                .iter()
+                .any(|issue| issue.code == IssueCode::ArgumentsInvalid)
+        );
+        next[0].args = "%*".into();
+        assert_eq!(
+            rule_selection_args(&next[0], &["one.txt".into(), "two.txt".into()]),
+            Some("\"one.txt\" \"two.txt\"".into())
+        );
+        update_rules(&mut doc, &base, &next).unwrap();
+        assert!(doc.to_string().contains("# keep"));
+        assert_eq!(read_rules(&doc).unwrap().0, next);
+        let invalid = doc.to_string().replace("together", "unknown");
+        assert!(
+            read_rules(&invalid.parse().unwrap())
+                .unwrap()
+                .1
+                .iter()
+                .any(|issue| issue.code == IssueCode::Parse)
+        );
     }
 }

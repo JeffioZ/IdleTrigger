@@ -37,6 +37,7 @@ const MGR_TITLE: usize = 311;
 const MGR_NEXT: usize = 312;
 const MGR_EMPTY_TITLE: usize = 313;
 const MGR_EMPTY_BODY: usize = 314;
+const MGR_MASTER: usize = 315;
 
 // Editor (Go idName 200 … idFieldSurfaceBase 500).
 const ED_NAME: usize = 311;
@@ -710,9 +711,32 @@ pub fn ensure_created() {
             crate::make_font_pub(17, 600),
             MGR_PAD,
             MGR_TITLE_Y,
-            content_w,
+            content_w - 250,
             MGR_TITLE_H,
         );
+        let master = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::w!("BUTTON"),
+            PCWSTR(wide(&t_pub("automation_master")).as_ptr()),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
+            s(MGR_W - MGR_PAD - 240),
+            s(MGR_TITLE_Y - 2),
+            s(240),
+            s(28),
+            Some(mgr),
+            Some(HMENU(MGR_MASTER as *mut _)),
+            Some(instance.into()),
+            None,
+        )
+        .expect("automation master");
+        let _ = SendMessageW(
+            master,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        crate::nativeform::track(master);
+        crate::nativeform::set_hover_column(master, s(crate::layout::SWITCH_HIT_W));
 
         // Rounded surface behind the listbox (Go idListSurface), then the
         // list inset 2px inside it.
@@ -908,7 +932,11 @@ pub fn default_button(window: HWND) -> Option<HWND> {
     let id = if window.0 as isize == PICKER_HWND.load(Ordering::SeqCst) {
         PK_CONFIRM
     } else if window.0 as isize == MGR_HWND.load(Ordering::SeqCst) {
-        MGR_EDIT
+        if crate::runtime::lock(&crate::automation::RULES).is_empty() {
+            MGR_NEW
+        } else {
+            MGR_EDIT
+        }
     } else if window == ed {
         ED_SAVE
     } else {
@@ -1011,7 +1039,11 @@ fn refresh_list() {
                     rule_summary(rule),
                 ),
             };
-            let line = format!("{}  {} — {}", state, rule.name, summary);
+            let line = if rule.name.is_empty() || rule.name == summary {
+                format!("{state}  {summary}")
+            } else {
+                format!("{}  {} — {}", state, rule.name, summary)
+            };
             let _ = SendMessageW(
                 list,
                 LB_ADDSTRING,
@@ -1048,8 +1080,25 @@ fn refresh_list() {
 
         update_manager_actions(mgr_from_list(), &rules, selected);
 
-        // Status line mirrors the Go managerStatusText.
-        let status = if empty {
+        refresh_runtime_state();
+    }
+}
+
+/// Refresh live scheduling state without resetting selection or editing drafts.
+pub fn refresh_runtime_state() {
+    unsafe {
+        let mgr = mgr_from_list();
+        if mgr.is_invalid() {
+            return;
+        }
+        let empty = crate::runtime::lock(&crate::automation::RULES).is_empty();
+        let enabled = crate::cfg_map(|c| c.automation_enabled);
+        let master = get_dlg_item(mgr_from_list(), MGR_MASTER);
+        crate::accessibility::check(master, enabled);
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(master), None, true);
+        let status = if !enabled {
+            t_pub("automation_manager_paused")
+        } else if empty {
             t_pub("automation_no_upcoming")
         } else {
             match crate::automation::next_scheduled() {
@@ -1057,7 +1106,10 @@ fn refresh_list() {
                 None => t_pub("automation_no_upcoming"),
             }
         };
-        set_text(get_dlg_item(mgr_from_list(), MGR_NEXT), &status);
+        let label = get_dlg_item(mgr, MGR_NEXT);
+        if window_text(label) != status {
+            set_text(label, &status);
+        }
     }
 }
 
@@ -1279,6 +1331,17 @@ unsafe extern "system" fn mgr_proc(
                     let code = wparam.0 & 0xFFFF;
                     let hi = ((wparam.0 >> 16) & 0xFFFF) as u16;
                     match code {
+                        MGR_MASTER if hi == BN_CLICKED => {
+                            let before = crate::cfg_map(|c| c.automation_enabled);
+                            crate::on_toggle(crate::IDC_AUTOMATION);
+                            let after = crate::cfg_map(|c| c.automation_enabled);
+                            crate::start_switch_animation(
+                                get_dlg_item(hwnd, MGR_MASTER),
+                                before,
+                                after,
+                            );
+                            refresh_list();
+                        }
                         MGR_NEW if hi == BN_CLICKED => {
                             crate::log_line("automation: new rule menu");
                             show_new_menu(hwnd);
@@ -1537,6 +1600,20 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
         if focused {
             crate::paint::draw_focus_frame(dc, bounds, p.focus);
         }
+    } else if id == MGR_MASTER {
+        let mut state = crate::nativeform::control_state(item.control, item.state);
+        state.active = crate::cfg_map(|c| c.automation_enabled);
+        crate::paint::draw_compact_switch_row(
+            dc,
+            bounds,
+            form_font_body(),
+            &t_pub("automation_master"),
+            p,
+            p.window_bg,
+            state,
+            crate::scale_pub(96),
+            crate::switch_animation_progress(item.control),
+        );
     } else if crate::choice::is_choice(item.control) {
         // The New button hosts the template flyout and renders its closed
         // state like every other dropdown.
@@ -1727,17 +1804,19 @@ fn save_rules_to_config(base: &[auto::Rule], rules: Vec<auto::Rule>) -> Result<(
 
 // ---- New-task templates ---------------------------------------------------
 
-/// New-task recipes as prefilled partial rules. Data-driven on purpose: the
-/// planned single-window editor reuses these verbatim. The blank rule stays
-/// last, below a separator, as the escape hatch.
-const TEMPLATE_KEYS: [&str; 5] = [
+/// Shared prefilled recipes for the panel and manager. The blank rule stays
+/// last as the escape hatch.
+const TEMPLATE_KEYS: [&str; 8] = [
     "automation_template_process_awake",
     "automation_template_night_shutdown",
     "automation_template_work_awake",
     "automation_template_low_battery",
+    "automation_template_shutdown_30",
+    "automation_template_shutdown_60",
+    "automation_template_sleep_30",
     "automation_template_blank",
 ];
-const TEMPLATE_BLANK: usize = 4;
+const TEMPLATE_BLANK: usize = TEMPLATE_KEYS.len() - 1;
 static PENDING_TEMPLATE: Mutex<usize> = Mutex::new(TEMPLATE_BLANK);
 
 fn template_rule(index: usize) -> auto::Rule {
@@ -1773,9 +1852,81 @@ fn template_rule(index: usize) -> auto::Rule {
             rule.battery_level = 20;
             rule.warning_seconds = 60;
         }
+        4..=6 => {
+            rule.action = if index == 6 {
+                auto::ACTION_SLEEP
+            } else {
+                auto::ACTION_SHUTDOWN
+            }
+            .into();
+            rule.trigger = auto::TRIGGER_ONCE.into();
+            let minutes = if index == 5 { 60 } else { 30 };
+            if let Some((date, time)) = scheduled_after(minutes) {
+                rule.date = date;
+                rule.time = time;
+            } else {
+                // Leave invalid fields for the editor to flag, never silently
+                // substitute a different shutdown time if conversion fails.
+                rule.date.clear();
+                rule.time.clear();
+            }
+            // Let the editor derive a lasting name from the actual date/time,
+            // rather than leaving "in 30 minutes" on yesterday's task.
+            rule.warning_seconds = 60;
+        }
         _ => {}
     }
     rule
+}
+
+/// Resolve elapsed time in UTC before converting to local calendar time.
+/// Round up to the editor's minute precision so a preset never fires early.
+fn scheduled_after(minutes: u64) -> Option<(String, String)> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .div_ceil(1_000_000_000) as u64;
+    let ticks = ((seconds + minutes * 60).div_ceil(60) * 60 + 11_644_473_600) * 10_000_000;
+    let ft = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()?;
+    }
+    Some((
+        format!("{:04}-{:02}-{:02}", local.wYear, local.wMonth, local.wDay),
+        format!("{:02}:{:02}", local.wHour, local.wMinute),
+    ))
+}
+
+pub fn show_template(index: usize) {
+    if index >= TEMPLATE_KEYS.len() {
+        return;
+    }
+    show();
+    *crate::runtime::lock(&PENDING_TEMPLATE) = index;
+    begin_edit(-1, Vec::new());
+    show_editor();
+}
+
+pub fn show_template_menu(button: HWND, owner: HWND, id: usize) {
+    // Common shortcuts first; existing recipes keep stable indices.
+    let items: Vec<(String, String, bool)> = [4, 5, 6, 0, 1, 2, 3, TEMPLATE_BLANK]
+        .into_iter()
+        .map(|index| (index.to_string(), t_pub(TEMPLATE_KEYS[index]), false))
+        .collect();
+    crate::choice::set_menu_items(button, &items);
+    crate::choice::set_prefer_above(button, true);
+    crate::choice::set_centered(button, owner == crate::hwnd(&crate::PANEL));
+    crate::choice::select_index(button, -1);
+    crate::choice::toggle(button, owner, id as i32);
 }
 
 /// The New button opens the template list in the same choice flyout the
@@ -1789,17 +1940,7 @@ fn show_new_menu(owner: HWND) {
             show_editor();
             return;
         }
-        let items: Vec<(String, String, bool)> = TEMPLATE_KEYS
-            .iter()
-            .enumerate()
-            .map(|(index, key)| (index.to_string(), t_pub(key), false))
-            .collect();
-        // Atomic menu registration: caption kept, caret suppressed, no
-        // intermediate repaint with the dropdown look.
-        crate::choice::set_menu_items(button, &items);
-        crate::choice::set_prefer_above(button, true);
-        crate::choice::select_index(button, -1);
-        crate::choice::toggle(button, owner, MGR_NEW as i32);
+        show_template_menu(button, owner, MGR_NEW);
     }
 }
 
@@ -1810,6 +1951,7 @@ fn set_list_view_visible(visible: bool) {
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         for id in [
             MGR_TITLE,
+            MGR_MASTER,
             MGR_LIST_SURFACE,
             MGR_LIST,
             MGR_EMPTY_TITLE,
@@ -2606,6 +2748,26 @@ fn save_rule(ed: HWND) {
         return;
     }
     hide_editor();
+    // Select the record that was actually saved, including a newly appended task.
+    let rules = crate::runtime::lock(&MGR_DISPLAYED_RULES).clone();
+    if let Some(index) = rules.iter().position(|rule| rule.id == draft.id) {
+        let list = HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _);
+        unsafe {
+            let _ = SendMessageW(list, LB_SETCURSEL, Some(WPARAM(index)), None);
+        }
+        update_manager_actions(mgr_from_list(), &rules, index as isize);
+        present_control(list);
+    }
+    // Saving a rule never silently resumes every previously paused task.
+    // Keep the next action within this window and visible to keyboard users.
+    if draft.enabled && !crate::cfg_map(|c| c.automation_enabled) {
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(get_dlg_item(
+                mgr_from_list(),
+                MGR_MASTER,
+            )));
+        }
+    }
 }
 
 /// Go cancelEditor: confirm when unsaved work would be lost.
@@ -2624,10 +2786,7 @@ fn cancel_editor(ed: HWND) {
     hide_editor();
 }
 
-/// Go editorChangesRequireConfirmation: an edit always confirms when
-/// changed; a NEW rule confirms only when the newRuleIntent projection
-/// (identity/action/trigger/schedule/days/process targets) differs, so
-/// tweaking runtime-only options never nags.
+/// Every edited setting is part of the draft, including warning and battery options.
 fn editor_needs_discard_confirm(current: &auto::Rule, orig: &auto::Rule) -> bool {
     let mut current = current.clone();
     let mut orig = orig.clone();
@@ -2635,26 +2794,7 @@ fn editor_needs_discard_confirm(current: &auto::Rule, orig: &auto::Rule) -> bool
     orig.days = auto::normalize_days(&orig.days);
     current.processes = auto::normalize_targets(current.processes);
     orig.processes = auto::normalize_targets(orig.processes);
-    if current == orig {
-        return false;
-    }
-    if edit_index() >= 0 {
-        return true;
-    }
-    let intent = |r: &auto::Rule| {
-        (
-            r.name.clone(),
-            r.action.clone(),
-            r.trigger.clone(),
-            r.time.clone(),
-            r.end_time.clone(),
-            r.date.clone(),
-            r.days.clone(),
-            r.process_logic.clone(),
-            r.processes.clone(),
-        )
-    };
-    intent(&current) != intent(&orig)
+    current != orig
 }
 
 /// Repositions and shows/hides editor controls per the current trigger and
@@ -5375,6 +5515,7 @@ fn refresh_tooltips() {
             HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
             &[
                 (MGR_LIST, "tip_automation_list"),
+                (MGR_MASTER, "tip_automation_master"),
                 (MGR_NEW, "tip_automation_new"),
                 (MGR_EDIT, "tip_automation_edit"),
                 (MGR_TOGGLE, "tip_automation_toggle"),
@@ -5630,6 +5771,7 @@ pub fn refresh_language() {
         for &(id, key) in MANAGER_TEXTS {
             set_text(get_dlg_item(mgr, id), &t_pub(key));
         }
+        set_text(get_dlg_item(mgr, MGR_MASTER), &t_pub("automation_master"));
         refresh_list();
     }
     let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
