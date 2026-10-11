@@ -367,15 +367,7 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
                     &format!("{language}-{dark}-control-{id}"),
                 );
             }
-            unsafe {
-                show_system_controls_menu(panel);
-            }
-            pump(20);
-            capture::capture_client_bmp(
-                choice::open_popup(),
-                &folder.join(format!("{language}-system-menu-{dark}.bmp")),
-            )
-            .unwrap();
+
             choice::close(false);
             capture_native_popup(
                 panel,
@@ -1038,7 +1030,6 @@ fn interactive_controls_react_to_every_state() {
         IDC_THEME_REPAIR,
         IDC_NOSLEEP_TIMED_CANCEL,
         IDC_THEME_SNOOZE_CANCEL,
-        IDC_SYSTEM_BUTTON,
         IDC_SETTINGS_BUTTON,
         IDC_EXIT_BUTTON,
     ];

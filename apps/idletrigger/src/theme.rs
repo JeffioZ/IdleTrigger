@@ -17,6 +17,7 @@ use windows::core::{BOOL, PCWSTR};
 
 /// Full Go palette (colors/palette.go Palette) for owner-drawn controls.
 /// Values are COLORREF (0x00BBGGRR), converted to ARGB at the GDI+ edge.
+#[derive(Clone, Copy)]
 pub struct Palette {
     pub window_bg: u32,
     pub surface: u32,
@@ -40,10 +41,16 @@ pub struct Palette {
     pub link_pressed: u32,
     pub focus: u32,
     pub danger_bg: u32,
+    // Filled-button danger chrome: kept for the Go palette parity (and the
+    // contrast palette tests) even though the exit affordance is a
+    // danger-ink link on the footer card now.
+    #[allow(dead_code)]
     pub danger_hover: u32,
     pub danger_pressed: u32,
     pub danger_border: u32,
+    #[allow(dead_code)]
     pub danger_hover_border: u32,
+    #[allow(dead_code)]
     pub danger_pressed_border: u32,
     pub danger_text: u32,
     pub danger_surface_text: u32,

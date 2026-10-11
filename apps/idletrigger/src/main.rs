@@ -41,7 +41,7 @@ use windows::Win32::UI::Controls::{
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW,
@@ -71,13 +71,23 @@ const APP_ARCH: &str = "x86";
 const APP_ARCH: &str = "";
 
 /// Version with the running architecture's release-asset note, e.g.
-/// "2.5.0 (x64)" for the settings header; unshipped architectures return
+/// Compile-injected build number (".612" = commit count; the workflow may
+/// override it). Empty when the source tree has no git history.
+pub(crate) fn build_suffix() -> &'static str {
+    static SUFFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    match option_env!("IDLETRIGGER_BUILD") {
+        Some(build) if !build.is_empty() => SUFFIX.get_or_init(|| format!(".{build}")),
+        _ => "",
+    }
+}
+
+/// "2.5.0.7 (x64)" for the settings header; unshipped architectures return
 /// the bare version instead of an empty parenthetical.
 pub(crate) fn version_with_arch() -> String {
     if APP_ARCH.is_empty() {
-        APP_VERSION.to_string()
+        format!("{APP_VERSION}{}", build_suffix())
     } else {
-        format!("{APP_VERSION} ({APP_ARCH})")
+        format!("{APP_VERSION}{} ({APP_ARCH})", build_suffix())
     }
 }
 
@@ -91,8 +101,14 @@ const IDC_POWER_SUMMARY: usize = 211;
 const IDC_AUTOMATION_SUMMARY: usize = 212;
 const IDC_THEME_SCHEDULE: usize = 213;
 const IDC_AUTOMATION: usize = 141;
-const IDC_SYSTEM_BUTTON: usize = 146;
 const IDC_MANAGE_BUTTON: usize = 147;
+// 190: must stay clear of the owner-draw static ranges (201-219) and the
+// row-label range (221-229) — an id inside those draws as a static/label
+// instead of a link (that is how the footer ctx link lost its style).
+const IDC_CTX_BUTTON: usize = 190;
+/// Muted version label on the More card (footer convention; fills the row
+/// and keeps the chip group from stretching across the card).
+const IDC_FOOTER_VERSION: usize = 191;
 const IDC_SETTINGS_BUTTON: usize = 148;
 const IDC_THEME_ENABLE: usize = 149;
 const IDC_THEME_SWITCH: usize = 150;
@@ -127,11 +143,8 @@ const IDC_CARD_BASE: usize = 230;
 
 /// Go panel.create: "IdleTrigger" or "IdleTrigger v{version}".
 fn panel_title_text() -> String {
-    if APP_VERSION.is_empty() || APP_VERSION == "dev" {
-        "IdleTrigger".to_string()
-    } else {
-        format!("IdleTrigger v{APP_VERSION}")
-    }
+    // Version lives on the More card now; the header title stays bare.
+    "IdleTrigger".to_string()
 }
 
 fn panel_font_body() -> HFONT {
@@ -140,6 +153,12 @@ fn panel_font_body() -> HFONT {
 
 fn panel_font_section() -> HFONT {
     make_font(14, 700)
+}
+
+/// Quiet meta text (footer version tag): regular weight, subtitle size.
+fn panel_font_meta() -> HFONT {
+    static FONT: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+    HFONT(*FONT.get_or_init(|| make_font(12, 400).0 as isize) as *mut core::ffi::c_void)
 }
 
 fn panel_font_subtitle() -> HFONT {
@@ -159,12 +178,14 @@ fn panel_font_status() -> HFONT {
 const PANEL_CLIENT_WIDTH: i32 = 486;
 // Exact flow: pad12 + (title 18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
 // + (18 + 4 + card(8 + 36+6 + 20 + 8)) + 10
-// + (18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10 + 36 + pad12 = 458.
-// The update row (two links below the footer buttons) is an on-demand
-// extra row: the panel stays 458 without an update and grows upward by
-// (LINK_BOX_H + 2*LABEL_GAP − PAD) when one appears (see sync_update_row)
-// — the footer buttons never move.
-const PANEL_CLIENT_HEIGHT: i32 = 458;
+// + (18 + 4 + card(8 + 36+6 + 28+6 + 20 + 8)) + 10
+// + (18 + 4 + card(8 + 20 + 8 + 8)) + pad12 = 488
+// (the footer is a slim "More" card hosting the link row; the update row is
+// an on-demand extra row of links below it).
+// The panel stays 488 without an update and grows upward by
+// (LINK_BOX_H + CARD_GAP) when one appears (see sync_update_row)
+// — the footer card never moves.
+const PANEL_CLIENT_HEIGHT: i32 = 488;
 // Internal window messages (WM_APP range). 0x8001 is tray::CALLBACK_MSG.
 const WM_IDLE_WARN: u32 = 0x8002;
 const WM_IDLE_CANCEL: u32 = 0x8003;
@@ -173,6 +194,8 @@ const WM_ACTION_SHOW: u32 = 0x8005;
 const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
 const WM_IPC_REQUEST: u32 = 0x8008;
+/// A context-menu copy request arrived; the UI thread (re)arms the debounce.
+pub(crate) const WM_CTX_COLLECT: u32 = 0x800C;
 const WM_REFRESH_THEME: u32 = 0x8009;
 /// Queued focus-tip dismissal (see tooltips::dismiss_focus_tip).
 const WM_FOCUSTIP_DISMISS: u32 = 0x800A;
@@ -215,6 +238,9 @@ mod automation_ui;
 #[cfg(feature = "devtools")]
 mod capture;
 mod choice;
+mod ctx_ui;
+mod ctxexec;
+mod ctxmenu;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod display;
@@ -252,6 +278,8 @@ const WARN_TIMER: usize = 2;
 const POWER_STATUS_TIMER: usize = 3;
 const LOCK_POLL_TIMER: usize = 4;
 const NOSLEEP_TIMED_TIMER: usize = 5;
+/// Context-menu copy aggregation debounce (6 is the switch animation).
+const CTX_FLUSH_TIMER: usize = 7;
 const BATTERY_POLL_TICKS: u32 = 120; // 250ms * 120 = 30s
 
 // ---- Shared runtime state ------------------------------------------------
@@ -332,6 +360,9 @@ static SWITCH_FLIGHTS: Mutex<Vec<SwitchFlight>> = Mutex::new(Vec::new());
 const SWITCH_ANIM_MS: u64 = 180;
 const SWITCH_ANIM_TICK: u64 = 15;
 
+/// Every quiet chip on the panel: the power strip's timed presets, the theme
+/// strip's snooze presets and instant switch, and the More card's footer row
+/// — one draw path (the exit chip alone overrides to danger ink).
 fn is_chip_id(id: usize) -> bool {
     matches!(
         id,
@@ -341,6 +372,10 @@ fn is_chip_id(id: usize) -> bool {
             | IDC_THEME_SNOOZE_30M
             | IDC_THEME_SNOOZE_1H
             | IDC_THEME_SNOOZE_MORNING
+            | IDC_THEME_SWITCH
+            | IDC_SETTINGS_BUTTON
+            | IDC_CTX_BUTTON
+            | IDC_EXIT_BUTTON
     )
 }
 
@@ -440,6 +475,7 @@ fn refresh_language() {
         (STATIC_SECTION_BASE, "menu_power_management"),
         (STATIC_SECTION_BASE + 1, "menu_automation_section"),
         (STATIC_SECTION_BASE + 2, "menu_theme_switch"),
+        (STATIC_SECTION_BASE + 3, "panel_other_section"),
         (IDC_ROW_LABEL_BASE + 2, "power_nosleep"),
         (IDC_ROW_LABEL_BASE + 3, "power_idle"),
         // Switch controls carry the same text as their row labels for
@@ -461,8 +497,8 @@ fn refresh_language() {
         (IDC_NOSLEEP_TIMED_CANCEL, "menu_nosleep_timed_cancel"),
         (IDC_THEME_SNOOZE_CANCEL, "menu_theme_snooze_cancel"),
         (IDC_MANAGE_BUTTON, "panel_manage_link"),
+        (IDC_CTX_BUTTON, "panel_ctx_link"),
         (IDC_THEME_REPAIR, "panel_repair_link"),
-        (IDC_SYSTEM_BUTTON, "menu_system_controls"),
         (IDC_SETTINGS_BUTTON, "settings_open"),
         (IDC_EXIT_BUTTON, "menu_exit_panel"),
         (IDC_UPDATE_NOTES_LINK, "panel_update_notes"),
@@ -477,10 +513,14 @@ fn refresh_language() {
     // the new language (and re-place both update links).
     refresh_update_button();
     layout_header_links(panel);
+    layout_footer_links(panel);
     // The tray menu is rebuilt at popup time, so language changes apply on
     // the next right click without any explicit rebuild here.
+    // Registry verb titles carry the locale: re-sync after the swap.
+    ctxmenu::sync("language");
     settings_ui::refresh_language();
     automation_ui::refresh_language();
+    ctx_ui::refresh_language();
     tooltips::refresh_all(panel);
     refresh_status();
 }
@@ -517,18 +557,39 @@ fn main() {
     let mut start_minimized = false;
     let mut startup_delay = 0u64;
     let mut cli_args: Vec<String> = Vec::new();
-    for arg in std::env::args().skip(1) {
-        if arg == "--minimized" {
-            start_minimized = true;
-        } else if let Some(v) = arg.strip_prefix("--delay=") {
-            startup_delay = v.parse().unwrap_or(0).clamp(0, 60);
-        } else if arg.starts_with("--") {
-            // Unknown startup flags are for a newer build (an update script
-            // may relaunch this EXE with arguments it does not know); they
-            // must never fall into the CLI path and quit the tray.
-        } else {
-            cli_args.push(arg);
+    let mut ctx_args: Vec<std::ffi::OsString> = Vec::new();
+    for arg in std::env::args_os().skip(1) {
+        let raw = arg.clone().into_string();
+        match raw {
+            Ok(text) => {
+                if text == "--minimized" {
+                    start_minimized = true;
+                } else if let Some(v) = text.strip_prefix("--delay=") {
+                    startup_delay = v.parse().unwrap_or(0).clamp(0, 60);
+                } else if text.starts_with("--") {
+                    // Unknown startup flags are for a newer build (an update
+                    // script may relaunch this EXE with arguments it does not
+                    // know); they must never fall into the CLI path and quit
+                    // the tray.
+                } else {
+                    ctx_args.push(std::ffi::OsString::from(text.clone()));
+                    cli_args.push(text);
+                }
+            }
+            Err(raw) => {
+                // Explorer passes arbitrary paths; non-UTF-16-surrogate args
+                // would panic in args(), so only the ctx arm (which converts
+                // losslessly) may carry them.
+                if !raw.as_encoded_bytes().starts_with(b"--") {
+                    ctx_args.push(raw);
+                }
+            }
         }
+    }
+    // Registry verbs: `ctx copy <fmt> "<path>"` / `ctx rule <id> "<path>"`.
+    // Runs before the single-instance handshake; silent, always exits.
+    if ctx_args.first().is_some_and(|arg| arg == "ctx") {
+        std::process::exit(ctxexec::run_ctx(&ctx_args[1..]));
     }
     if !cli_args.is_empty() {
         let language = std::env::current_exe()
@@ -563,6 +624,11 @@ fn main() {
     CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
     *lock(&CONFIG_PATH) = Some(config_path.clone());
     apply_language(&effective_config.language);
+
+    // Publish the context-menu rules and self-heal their registry verbs
+    // (stale EXE paths after a move, entries lost to external tools).
+    ctxexec::reload_rules();
+    ctxmenu::sync("startup");
 
     let _instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
@@ -806,6 +872,12 @@ unsafe extern "system" fn hidden_proc(
                 popups::poll();
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == CTX_FLUSH_TIMER => {
+                // Context-menu copy burst settled: one clipboard write.
+                let _ = KillTimer(Some(hwnd_), CTX_FLUSH_TIMER);
+                ctxexec::flush_collected();
+                LRESULT(0)
+            }
             windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE => {
                 // WTS_SESSION_LOCK (0x7) / WTS_SESSION_UNLOCK (0x8) for this
                 // session. The lock pause re-merges the effective state; the
@@ -846,6 +918,12 @@ unsafe extern "system" fn hidden_proc(
             }
             WM_IPC_REQUEST => {
                 ipc::process_requests();
+                LRESULT(0)
+            }
+            WM_CTX_COLLECT => {
+                // More per-item copies may still be arriving; restart the
+                // debounce so the whole selection lands in one write.
+                let _ = SetTimer(Some(hwnd_), CTX_FLUSH_TIMER, ctxexec::FLUSH_DELAY_MS, None);
                 LRESULT(0)
             }
             WM_REFRESH_UI => {
@@ -1029,6 +1107,42 @@ pub(crate) fn guarded_proc(
     }
 }
 
+/// Windows holding the control panel modal (owner-disable pattern). Nested
+/// modals each hold independently — settings → rule manager → closing the
+/// manager must NOT re-enable the panel while settings is still open, and
+/// the reverse chain leaked the same way. The panel re-enables only when
+/// the last holder goes away.
+static PANEL_MODAL_HOLDERS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+/// Disables the panel for a modal secondary window (idempotent per holder).
+pub(crate) fn hold_panel_modal(holder: HWND) {
+    {
+        let mut holders = crate::runtime::lock(&PANEL_MODAL_HOLDERS);
+        let key = holder.0 as isize;
+        if holders.contains(&key) {
+            return;
+        }
+        holders.push(key);
+    }
+    unsafe {
+        let _ = EnableWindow(hwnd(&PANEL), false);
+    }
+}
+
+/// Releases one holder; the panel comes back only with the last one.
+pub(crate) fn release_panel_modal(holder: HWND) {
+    let last = {
+        let mut holders = crate::runtime::lock(&PANEL_MODAL_HOLDERS);
+        holders.retain(|key| *key != holder.0 as isize);
+        holders.is_empty()
+    };
+    if last {
+        unsafe {
+            let _ = EnableWindow(hwnd(&PANEL), true);
+        }
+    }
+}
+
 fn invalidate_control(id: usize) {
     unsafe {
         let control = GetDlgItem(Some(hwnd(&PANEL)), id as i32).unwrap_or_default();
@@ -1180,47 +1294,66 @@ fn draw_panel_item_impl(item: &nativeform::DrawItem, dc: HDC, bounds: &RECT) {
             accessibility::check(item.control, state.active);
             let progress = switch_animation_progress(item.control);
             paint::draw_switch(dc, bounds, p, p.surface, state, scale, progress);
-        } else if id == IDC_EXIT_BUTTON {
-            draw_exit_button(item, dc, bounds, &label, p, scale);
+        } else if id == IDC_FOOTER_VERSION {
+            // Muted meta text, regular weight, on the card face. The fill is
+            // mandatory: the buffered blit's bitmap starts black, and every
+            // other static arm paints its own background first.
+            crate::paint::fill_rect(dc, bounds, p.surface);
+            crate::paint::draw_label(dc, bounds, panel_font_meta(), &label, p.muted, false, 0, 0);
         } else if is_chip_id(id) {
+            // One quiet-chip grammar for every chip: normal ink at rest,
+            // tinted hover, deeper press, accent outline while an armed
+            // preset runs. The exit chip alone overrides to the danger ink
+            // family so the destructive action stays flagged.
             let mut state = nativeform::control_state(item.control, item.state);
             // The armed preset keeps an accent outline until it expires.
             state.active = chip_armed(id);
             accessibility::clear(item.control);
+            let mut ink = *p;
+            if id == IDC_EXIT_BUTTON {
+                ink.text2 = p.danger_surface_text;
+                // danger_text is the white label for FILLED danger buttons —
+                // on the light hover tint it vanishes. The red surface ink
+                // stays legible in every state.
+                ink.text = p.danger_surface_text;
+                ink.border = p.danger_border;
+                // The quiet grammar takes its pressed border from `accent`
+                // (accent_pressed only rides the emphasis variant) — swap it
+                // or the press flashes the normal accent blue. danger_focus
+                // is near-white in light mode; danger_border reads in both.
+                ink.accent = p.danger_pressed;
+                ink.accent_pressed = p.danger_pressed;
+                ink.focus = p.danger_border;
+            }
             paint::draw_chip(
                 dc,
                 bounds,
                 panel_font_body(),
                 &label,
-                p,
+                &ink,
                 p.surface,
                 state,
                 paint::control_radius(),
                 false,
             );
-        } else if id == IDC_THEME_SWITCH {
-            // Instant action sharing the snooze strip: link-colored ink.
-            let state = nativeform::control_state(item.control, item.state);
-            accessibility::clear(item.control);
-            paint::draw_chip(
-                dc,
-                bounds,
-                panel_font_body(),
-                &label,
-                p,
-                p.surface,
-                state,
-                paint::control_radius(),
-                true,
-            );
         } else if is_link_id(id) {
             let state = nativeform::control_state(item.control, item.state);
+            let mut ink = *p;
+            if id == IDC_UPDATE_NOTES_LINK {
+                // Secondary half of the update pair: muted ink that still
+                // reads as a link (underline on approach), stepping up in
+                // emphasis toward the press while the action link stays the
+                // primary.
+                ink.link = p.muted;
+                ink.link_hover = p.text2;
+                ink.link_pressed = p.text;
+            }
             paint::draw_text_link(
                 dc,
                 bounds,
                 panel_font_subtitle(),
                 &label,
-                p,
+                &ink,
                 p.window_bg,
                 state,
                 scale,
@@ -1329,61 +1462,6 @@ unsafe fn draw_subtitle_static(dc: HDC, bounds: &RECT, label: &str, p: &theme::P
                 | gdi::DT_END_ELLIPSIS,
         );
         gdi::SelectObject(dc, old);
-    }
-}
-
-/// The exit button keeps a quiet danger look that only commits on hover or
-/// press (Go drawing.go idExit branch).
-unsafe fn draw_exit_button(
-    item: &nativeform::DrawItem,
-    dc: HDC,
-    bounds: &RECT,
-    label: &str,
-    p: &theme::Palette,
-    scale: i32,
-) {
-    let state = nativeform::control_state(item.control, item.state);
-    let (mut fill, mut border, mut text) = (p.surface, p.border, p.danger_surface_text);
-    if state.hovered {
-        fill = p.danger_hover;
-        border = p.danger_hover_border;
-        text = p.danger_text;
-    }
-    if state.pressed {
-        fill = p.danger_pressed;
-        border = p.danger_pressed_border;
-        text = p.danger_text;
-    }
-    if state.disabled {
-        fill = p.disabled_surface;
-        border = p.subtle_border;
-        text = p.disabled_text;
-    }
-    paint::draw_surface(
-        dc,
-        bounds,
-        p.window_bg,
-        fill,
-        border,
-        paint::control_radius(),
-    );
-    paint::draw_button_label(dc, bounds, panel_font_body(), label, text, false, 8, 8);
-    if state.focused && !state.disabled {
-        let inset = paint::sp(2, scale);
-        paint::draw_focus_frame(
-            dc,
-            &RECT {
-                left: bounds.left + inset,
-                top: bounds.top + inset,
-                right: bounds.right - inset,
-                bottom: bounds.bottom - inset,
-            },
-            if state.hovered || state.pressed {
-                p.danger_focus
-            } else {
-                p.focus
-            },
-        );
     }
 }
 
@@ -1505,6 +1583,8 @@ unsafe extern "system" fn panel_proc(
                     clear_timed_nosleep();
                 } else if code == IDC_MANAGE_BUTTON {
                     automation_ui::show();
+                } else if code == IDC_CTX_BUTTON {
+                    ctx_ui::show();
                 } else if code == IDC_SETTINGS_BUTTON {
                     settings_ui::show();
                 } else if code == IDC_THEME_ENABLE {
@@ -1552,24 +1632,6 @@ unsafe extern "system" fn panel_proc(
                 } else if code == IDC_EXIT_BUTTON {
                     log_line("exit via panel button");
                     PostQuitMessage(0);
-                } else if code == IDC_SYSTEM_BUTTON {
-                    if (wparam.0 >> 16) == 1 {
-                        // CBN_SELCHANGE
-                        let button =
-                            GetDlgItem(Some(hwnd_), IDC_SYSTEM_BUTTON as i32).unwrap_or_default();
-                        if let Ok(id) = choice::value(button).parse::<usize>()
-                            && (900..=904).contains(&id)
-                        {
-                            execute_system_action(system::QUICK_MENU_ACTIONS[id - 900]);
-                        }
-                    } else {
-                        show_system_controls_menu(hwnd_);
-                    }
-                } else if (900..=904).contains(&code) {
-                    // Quick-action rows committed from the choice popup.
-                    let action = system::QUICK_MENU_ACTIONS[code - 900];
-                    log_line(&format!("quick action: {action}"));
-                    execute_system_action(action);
                 }
                 LRESULT(0)
             }
@@ -2226,69 +2288,60 @@ fn create_windows() {
         LBL_THEME_SCHEDULE.store(theme_schedule.0 as isize, Ordering::SeqCst);
         y += card_height(BUTTON_H + LABEL_GAP + CHIP_H + LABEL_GAP + SUBTITLE_H) + CARD_GAP;
 
-        // ---- Footer navigation (outside the cards) ----
-
-        let (footer_x, footer_w) = row_slot(card_w, 3, 0);
-        let system_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + footer_x),
-            scale(y),
-            scale(footer_w),
-            scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_SYSTEM_BUTTON as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("system button");
-        let _ = set_control_font(system_btn, font);
-        nativeform::track(system_btn);
-        let system_label = t("menu_system_controls");
-        set_control_text(system_btn, &system_label);
-
-        let (footer_x, footer_w) = row_slot(card_w, 3, 1);
-        let settings_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + footer_x),
-            scale(y),
-            scale(footer_w),
-            scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_SETTINGS_BUTTON as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("settings button");
-        let _ = set_control_font(settings_btn, font);
-        nativeform::track(settings_btn);
-        let settings_label = t("settings_open");
-        set_control_text(settings_btn, &settings_label);
-        let (footer_x, footer_w) = row_slot(card_w, 3, 2);
-        let exit_btn = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            w!("BUTTON"),
-            w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(PAD + footer_x),
-            scale(y),
-            scale(footer_w),
-            scale(BUTTON_H),
-            Some(panel),
-            Some(HMENU(IDC_EXIT_BUTTON as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("exit button");
-        let _ = set_control_font(exit_btn, font);
-        nativeform::track(exit_btn);
-        let exit_label = t("menu_exit_panel");
-        set_control_text(exit_btn, &exit_label);
+        // ---- 其他功能 / More (footer card) ----
+        // The footer entries ride their own section card: the card face
+        // groups them (a bare link row floated without structure beside the
+        // transient update row), while links keep the row light. The exit
+        // link stays the one danger-inked entry.
+        section_header(
+            panel,
+            &t("panel_other_section"),
+            y,
+            STATIC_SECTION_BASE + 3,
+            instance,
+            subtitle_font,
+        );
+        y += SECTION_H + TITLE_GAP;
+        let footer_card_h = CHIP_H + 2 * CARD_PAD_Y;
+        make_card(IDC_CARD_BASE + 3, y, footer_card_h);
+        FOOTER_LINK_Y.store(
+            scale(y + (footer_card_h - CHIP_H) / 2) as isize,
+            Ordering::SeqCst,
+        );
+        for (id, key) in FOOTER_LINKS {
+            owner_button(
+                &ControlSpec {
+                    parent: panel,
+                    label: t(key),
+                    x: 0,
+                    y: 0,
+                    width: scale(4),
+                    id,
+                    instance,
+                    font,
+                },
+                scale(CHIP_H),
+            );
+        }
+        // Four-part form (v2.5.0.37): the trailing number is the local
+        // compile counter from build.rs — dev iterations get distinguishable
+        // builds without touching the crate version.
+        let version_label = if APP_VERSION.is_empty() || APP_VERSION == "dev" {
+            String::new()
+        } else if APP_ARCH.is_empty() {
+            format!("v{APP_VERSION}{}", build_suffix())
+        } else {
+            format!("v{APP_VERSION}{} ({APP_ARCH})", build_suffix())
+        };
+        if !version_label.is_empty() {
+            mk_footer_version(
+                panel,
+                &version_label,
+                instance,
+                panel_font_meta(),
+                y + (footer_card_h - SUBTITLE_H) / 2,
+            );
+        }
 
         // On-demand update row below the footer buttons: two header-grammar
         // text links — the action (更新到 vX) centered in the left grid slot,
@@ -2327,6 +2380,7 @@ fn create_windows() {
 
         // Header links get their exact-fit geometry from the labels.
         layout_header_links(panel);
+        layout_footer_links(panel);
 
         // Tooltips for every panel control (Go tooltips.go parity).
         tooltips::create_for_panel(panel);
@@ -2603,6 +2657,16 @@ static HEADER_LINK_ROWS: [AtomicIsize; 3] = [
     AtomicIsize::new(0),
 ];
 
+/// Physical y of the footer link row (same re-fit-after-swap contract).
+static FOOTER_LINK_Y: AtomicIsize = AtomicIsize::new(0);
+
+/// Footer card row order: system actions, settings, context menu, exit.
+const FOOTER_LINKS: [(usize, &str); 3] = [
+    (IDC_SETTINGS_BUTTON, "settings_open"),
+    (IDC_CTX_BUTTON, "panel_ctx_link"),
+    (IDC_EXIT_BUTTON, "menu_exit_panel"),
+];
+
 /// Header action links wrap their text exactly (hit box == display box) and
 /// center on the switch column of the card below; the theme's snooze cancel
 /// parks in a fixed slot left of the repair link.
@@ -2640,7 +2704,7 @@ fn layout_header_links(panel: HWND) {
                 x,
                 y,
                 width,
-                scale(LINK_BOX_H),
+                scale(CHIP_H),
                 SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             )
         };
@@ -2651,6 +2715,112 @@ fn layout_header_links(panel: HWND) {
     place(IDC_MANAGE_BUTTON, 1, None);
     place(IDC_THEME_REPAIR, 2, None);
     place(IDC_THEME_SNOOZE_CANCEL, 2, Some(IDC_THEME_REPAIR));
+}
+
+/// Footer card row: the four links flow as one centered group with a fixed
+/// comfortable gap — edge-to-edge spreading left four short labels looking
+/// lost on the wide card.
+fn layout_footer_links(panel: HWND) {
+    let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
+    let row_x = PAD + CARD_PAD_X;
+    let y = FOOTER_LINK_Y.load(Ordering::SeqCst) as i32;
+    if y == 0 {
+        return;
+    }
+    let widths: Vec<i32> = FOOTER_LINKS
+        .iter()
+        .map(|(id, _)| {
+            let Ok(link) = (unsafe { GetDlgItem(Some(panel), *id as i32) }) else {
+                return 0;
+            };
+            let text = window_text(link);
+            scale(measured_text_width(panel, panel_font_body(), &text).max(16))
+        })
+        .collect();
+    // Chips + version flow as ONE centered cluster: the whole row re-balances
+    // as captions or the version string grow, so nothing ever drifts toward
+    // an edge (a fixed blank-zone center would, once digits accumulate).
+    let pad = scale(18);
+    let widths: Vec<i32> = widths.into_iter().map(|w| w + 2 * pad).collect();
+    let gap = scale(16);
+    let version = unsafe { GetDlgItem(Some(panel), IDC_FOOTER_VERSION as i32) }.unwrap_or_default();
+    let version_text = if version.is_invalid() {
+        String::new()
+    } else {
+        window_text(version)
+    };
+    let vw = if version_text.is_empty() {
+        0
+    } else {
+        scale(measured_text_width(panel, panel_font_meta(), &version_text).max(8))
+    };
+    let row_w = scale(card_w - 2 * CARD_PAD_X);
+    let count = widths.len() as i32;
+    let has_version = !version_text.is_empty();
+    let total: i32 = widths.iter().sum::<i32>() + vw + gap * (count - 1 + i32::from(has_version));
+    let mut x = scale(row_x) + (row_w - total).max(0) / 2;
+    for ((id, _), width) in FOOTER_LINKS.into_iter().zip(widths) {
+        let Ok(link) = (unsafe { GetDlgItem(Some(panel), id as i32) }) else {
+            continue;
+        };
+        let _ = unsafe {
+            SetWindowPos(
+                link,
+                None,
+                x,
+                y,
+                width,
+                scale(CHIP_H),
+                SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+            )
+        };
+        x += width + gap;
+    }
+    if has_version {
+        let _ = unsafe {
+            SetWindowPos(
+                version,
+                None,
+                x,
+                y + (scale(CHIP_H) - scale(SUBTITLE_H)) / 2,
+                vw,
+                scale(SUBTITLE_H),
+                SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+            )
+        };
+    }
+}
+
+/// Right-aligned muted version text on the More card. Owner-draw like every
+/// panel static, so the themed muted ink rides the normal draw dispatch.
+unsafe fn mk_footer_version(
+    panel: HWND,
+    text: &str,
+    instance: windows::Win32::Foundation::HMODULE,
+    font: HFONT,
+    y: i32,
+) -> HWND {
+    {
+        let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
+        let row_right = PAD + CARD_PAD_X + (card_w - 2 * CARD_PAD_X);
+        let width = scale(measured_text_width(panel, font, text).max(8));
+        owner_static(
+            &ControlSpec {
+                parent: panel,
+                label: text.to_string(),
+                // ControlSpec coordinates are PHYSICAL like every other
+                // creation site — the raw logical values placed the label
+                // at the panel's top-left corner.
+                x: scale(row_right) - width,
+                y: scale(y),
+                width,
+                id: IDC_FOOTER_VERSION,
+                instance,
+                font,
+            },
+            scale(SUBTITLE_H),
+        )
+    }
 }
 
 fn section_header(
@@ -2676,7 +2846,7 @@ fn section_header(
     )
 }
 
-fn set_control_text(control: HWND, text: &str) {
+pub fn set_control_text(control: HWND, text: &str) {
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     unsafe {
         let _ = SetWindowTextW(control, PCWSTR(wide.as_ptr()));
@@ -3201,7 +3371,9 @@ fn sync_update_row() {
     // Reopening the panel runs viewport::fit_work_area, which resets the
     // window to the viewport's recorded content height — a remembered flag
     // would skip the re-grow and drop the update row onto the footer.
-    let zone = LINK_BOX_H + 2 * LABEL_GAP;
+    // The zone buys CARD_GAP below the footer card, the link row, and a PAD
+    // bottom margin (the old LABEL_GAP rhythm hugged the rounded card).
+    let zone = LINK_BOX_H + CARD_GAP + PAD;
     let target = if want {
         PANEL_CLIENT_HEIGHT + zone - PAD
     } else {
@@ -3225,13 +3397,12 @@ fn sync_update_row() {
         if client.bottom - client.top == scale(target) {
             return; // Already at the demanded height.
         }
-        // The link row centers in a tight zone between the footer buttons
-        // and the panel's bottom border: LABEL_GAP above the link, LINK_BOX_H
-        // for the link, LABEL_GAP below. The zone REPLACES the footer's
-        // trailing PAD (counting both double-books 12px and pushes the link
-        // 20px off the buttons), so the grow delta is zone − PAD. The panel
-        // anchors at its bottom edge, so the window grows or shrinks UPWARD
-        // and the footer buttons never move.
+        // The link row sits in its own zone below the footer card: CARD_GAP
+        // above the link, LINK_BOX_H for the link, PAD below it. The zone
+        // REPLACES the footer's trailing PAD (counting both double-books
+        // 12px), so the grow delta is zone − PAD. The panel anchors at its
+        // bottom edge, so the window grows or shrinks UPWARD and the footer
+        // card never moves.
         let dy = scale(target) - (client.bottom - client.top);
         let mut window = RECT::default();
         if GetWindowRect(panel, &mut window).is_ok() {
@@ -3295,16 +3466,17 @@ fn refresh_update_button() {
         if GetClientRect(panel, &mut client).is_err() {
             return;
         }
-        // Visually centered in the tight zone: LABEL_GAP to the footer
-        // buttons above, LABEL_GAP to the bottom border below.
+        // Update-row rhythm: CARD_GAP below the footer card above (it is a
+        // separate block, not a card row), PAD to the bottom border like
+        // every other outer margin.
         let link_h = scale(LINK_BOX_H);
-        let link_y = client.bottom - scale(LABEL_GAP) - link_h;
+        let link_y = client.bottom - scale(PAD) - link_h;
         let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
-        // Grid continuation of the footer row, in link grammar: the action
-        // link centers in the left slot (under 系统操作), the notes link in
-        // the middle slot (under 设置); the right slot stays empty.
-        let (action_x, action_w_slot) = row_slot(card_w, 3, 0);
-        let (notes_x, notes_w_slot) = row_slot(card_w, 3, 1);
+        // Grid continuation of the footer's 4-slot row, in link grammar: the
+        // action + notes pair centers as one group across the two middle
+        // slots; the outer slots stay empty.
+        let (action_x, action_w_slot) = row_slot(card_w, 4, 1);
+        let (notes_x, notes_w_slot) = row_slot(card_w, 4, 2);
         let notes_text = window_text(notes);
         let action_w = scale(measured_text_width(panel, panel_font_subtitle(), &text).max(16));
         let notes_w = scale(measured_text_width(panel, panel_font_subtitle(), &notes_text).max(16));
@@ -3462,6 +3634,7 @@ fn hot_reload_config() -> Result<(), String> {
     *lock(&CONFIG_SOURCE) = loaded.source_text;
     CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
     automation::reload_rules();
+    ctxexec::reload_rules();
     drop(writer);
     // Same rule as commit_config: an external edit that turned the Stay
     // Awake switch off also drops the timed overlay; an edit that leaves
@@ -3470,6 +3643,7 @@ fn hot_reload_config() -> Result<(), String> {
         sync_timed_with_manual();
     }
     apply_language(&loaded.config.language);
+    ctxmenu::sync("reload");
     theme_engine::wake();
     sync_logging();
     system::unregister_all();
@@ -4374,41 +4548,6 @@ unsafe fn enable_shutdown_privilege() -> Result<(), String> {
         }
         Ok(())
     }
-}
-
-/// Native popup menu anchored to the system-controls button; selections run
-/// immediately like the Go quick-actions popup.
-/// Devtools helper: opens the system quick-actions popup for capture.
-#[cfg(feature = "devtools")]
-pub fn devtools_open_quick_menu() {
-    unsafe {
-        show_system_controls_menu(hwnd(&PANEL));
-    }
-}
-
-unsafe fn show_system_controls_menu(owner: HWND) {
-    // Go quick-actions: one owner-drawn choice popup above the button with
-    // danger styling on shutdown/restart (menus.go openQuickMenu).
-    const QUICK_ACTIONS: [(&str, bool); 5] = [
-        ("menu_action_lock", false),
-        ("menu_action_sleep", false),
-        ("menu_action_hibernate", false),
-        ("menu_action_shutdown", true),
-        ("menu_action_restart", true),
-    ];
-    let button = unsafe { GetDlgItem(Some(owner), IDC_SYSTEM_BUTTON as i32) }.unwrap_or_default();
-    if button.is_invalid() {
-        return;
-    }
-    let items: Vec<(String, String, bool)> = QUICK_ACTIONS
-        .iter()
-        .enumerate()
-        .map(|(index, (key, danger))| ((900 + index).to_string(), t(key), *danger))
-        .collect();
-    crate::choice::set_items_danger(button, &items);
-    crate::choice::set_prefer_above(button, true);
-    crate::choice::select_index(button, -1);
-    crate::choice::toggle(button, owner, IDC_SYSTEM_BUTTON as i32);
 }
 
 // ---- Module-facing helpers -----------------------------------------------

@@ -196,13 +196,9 @@ fn set_action_items(button: HWND, items: &[(String, String, bool)], menu: bool) 
 /// changes and never draws the dropdown caret. Rows, caption retention,
 /// and caret suppression commit in ONE registry write with no intermediate
 /// repaint - a split write let the old dropdown look flash for a frame.
+/// Danger carries per-row red ink (Go quick-actions menu).
 pub fn set_menu_items(button: HWND, items: &[(String, String, bool)]) {
     set_action_items(button, items, true);
-}
-
-/// Item list with per-row danger styling (Go quick-actions menu).
-pub fn set_items_danger(button: HWND, items: &[(String, String, bool)]) {
-    set_action_items(button, items, false);
 }
 
 /// Full row model replacement (options + danger + headers).
@@ -668,18 +664,6 @@ fn detach_popup(popup: HWND) {
             let _ = InvalidateRect(Some(HWND(button as *mut _)), None, false);
         }
     }
-}
-
-/// Devtools probe: sets the popup hover to `index` and repaints.
-#[cfg(feature = "devtools")]
-pub fn devtools_hover_row(popup: HWND, index: i32) {
-    let button = OPEN_BUTTON.load(Ordering::SeqCst);
-    if let Some(map) = choices().as_mut()
-        && let Some(data) = map.get_mut(&button)
-    {
-        data.hover = index;
-    }
-    let _ = unsafe { InvalidateRect(Some(popup), None, false) };
 }
 
 /// The popup window currently open, if any.

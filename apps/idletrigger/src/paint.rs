@@ -982,7 +982,9 @@ pub fn draw_chip(
         text = p.text;
     }
     if state.pressed {
-        fill = p.hover_surface;
+        // Pressed steps one shade deeper than hover (the tint alone read as
+        // a stuck hover); the quiet gray keeps both themes' ink legible.
+        fill = p.subtle_border;
         border = if emphasis { p.accent_pressed } else { p.accent };
         text = p.text;
     }

@@ -864,10 +864,7 @@ pub fn show() {
         refresh_list();
         theme::retheme_children(mgr);
         present_control(HWND(MGR_LIST_HWND.load(Ordering::SeqCst) as *mut _));
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-            crate::hwnd(&crate::PANEL),
-            false,
-        );
+        crate::hold_panel_modal(mgr);
         // Go BeginFirstFrame/Reveal: cloak, commit one full frame, uncloak.
         if crate::viewport::metrics(mgr).is_none() {
             crate::viewport::fit(mgr);
@@ -891,10 +888,7 @@ fn hide() {
     unsafe {
         let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
         let _ = ShowWindow(mgr, SW_HIDE);
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-            crate::hwnd(&crate::PANEL),
-            true,
-        );
+        crate::release_panel_modal(mgr);
         crate::refresh_status();
     }
 }
@@ -1407,10 +1401,7 @@ unsafe extern "system" fn mgr_proc(
                     // clear its slot so lazy creation can run again.
                     EDIT_HWND.store(0, Ordering::SeqCst);
                     crate::runtime::lock(&MGR_DISPLAYED_RULES).clear();
-                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                        crate::hwnd(&crate::PANEL),
-                        true,
-                    );
+                    crate::release_panel_modal(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _));
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -5464,8 +5455,9 @@ pub fn devtools_show_editor() {
     show_editor();
 }
 
-/// Devtools capture support: open the process picker from the editor.
-#[cfg(feature = "devtools")]
+/// Test support: open the process picker from the editor pane (the
+/// capture walk opens it inline now; the render-test walk still uses this).
+#[cfg(test)]
 pub fn devtools_show_picker() {
     let ed = HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _);
     show_picker(ed);

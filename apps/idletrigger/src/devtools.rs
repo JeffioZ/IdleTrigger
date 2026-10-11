@@ -310,65 +310,21 @@ pub fn handle_capture_timer() -> bool {
             );
         }
         17 => crate::choice::close(false),
-        20 => {
-            crate::choice::close(false);
-            crate::devtools_open_quick_menu();
-        }
+        20 => crate::settings_ui::devtools_select_page(5),
         21 => {
-            // A step apart: the popup paints its first frame on its own
-            // timer; shooting in the same tick grabs a blank surface.
-            let popup = crate::choice::open_popup();
             shoot(
-                popup,
-                out_dir.join("IdleTrigger-quick-menu-capture.bmp"),
-                "system quick menu",
-            );
-            // Hover the shutdown row (4th of 5): client y ≈ 3*36+6 = 114.
-            crate::choice::devtools_hover_row(popup, 3);
-        }
-        22 => {
-            let popup = crate::choice::open_popup();
-            shoot(
-                popup,
-                out_dir.join("IdleTrigger-quick-menu-hover-capture.bmp"),
-                "system quick menu hover",
+                crate::settings_ui::devtools_capture_hwnd(),
+                out_dir.join("IdleTrigger-settings-page5-capture.bmp"),
+                "settings page 5",
             );
         }
-        18 => {
-            // Close any open choice popup first (it captures mouse input
-            // and would prevent the timer from firing).
-            crate::choice::close(false);
-            crate::automation_ui::devtools_show_picker();
-        }
-        19 => {
-            let picker = crate::automation_ui::theme_hwnds()[2];
+        22 => crate::ctx_ui::show(),
+        23 => {
             shoot(
-                picker,
-                out_dir.join("IdleTrigger-picker-capture.bmp"),
-                "process picker",
+                crate::ctx_ui::devtools_hwnd(),
+                out_dir.join("IdleTrigger-ctx-manager-capture.bmp"),
+                "context-menu rule manager",
             );
-            if std::env::var("IDLETRIGGER_DEVTOOLS_VERIFY_LIST_THEME").as_deref() == Ok("1") {
-                let original = crate::theme::is_dark();
-                for (suffix, dark) in [("flipped", !original), ("restored", original)] {
-                    crate::theme::force_dark(dark);
-                    crate::theme::apply_to_all();
-                    unsafe {
-                        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
-                            Some(picker),
-                            None,
-                            None,
-                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
-                                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN
-                                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
-                        );
-                    }
-                    shoot(
-                        picker,
-                        out_dir.join(format!("IdleTrigger-picker-{suffix}.bmp")),
-                        "picker theme transition",
-                    );
-                }
-            }
         }
         _ => {
             crate::log_line("capture sequence complete");

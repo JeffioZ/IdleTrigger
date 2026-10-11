@@ -106,6 +106,23 @@ const ID_RESTORE_HINT: i32 = 212;
 // panel link).
 const ID_APP_UPDATE_AUTO: i32 = 214;
 const ID_APP_UPDATE_CHECK: i32 = 215;
+// Context-menu page (page 5).
+const ID_TAB_CTX: i32 = 217;
+const ID_PAGE_TITLE_CTX: i32 = 218;
+const ID_PAGE_SUB_CTX: i32 = 219;
+const ID_CTX_TITLE: i32 = 220;
+const ID_CTX_ENABLED: i32 = 222;
+const ID_CTX_SUBMENU: i32 = 235;
+const ID_CTX_STATUS: i32 = 223;
+const ID_CTX_FIX: i32 = 224;
+const ID_CTX_COPY_ENABLED: i32 = 225;
+const ID_CTX_QUOTE_LBL: i32 = 226;
+const ID_CTX_QUOTE: i32 = 227;
+const ID_CTX_SEP_LBL: i32 = 228;
+const ID_CTX_SEP: i32 = 229;
+const ID_CTX_RULES_HINT: i32 = 230;
+const ID_CTX_MANAGE: i32 = 231;
+const ID_CTX_WIN11: i32 = 233;
 
 /// Session state for the wallpaper library: seeded from the config when the
 /// settings window opens, mutated by Add/Remove, committed on Save.
@@ -171,6 +188,10 @@ static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
 static DRAFT_BASE: std::sync::Mutex<Option<idletrigger_core::config::Config>> =
     std::sync::Mutex::new(None);
 static PAGE: AtomicI32 = AtomicI32::new(0);
+/// Page a fresh settings window should paint first (open_ctx_page bakes its
+/// target in before creation; post-create page flips leave stale frames —
+/// the DWM stacked-statics quirk show() documents).
+static INITIAL_PAGE: AtomicI32 = AtomicI32::new(0);
 static AUTOSTART_BASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TOOLTIP_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Validation-line kind: true renders in the error color, false in normal
@@ -272,7 +293,7 @@ pub fn show() {
             return;
         }
         request_location_preview(hwnd);
-        let _ = EnableWindow(crate::hwnd(&crate::PANEL), false);
+        crate::hold_panel_modal(hwnd);
         // The radical fix for the invisible field wells: DWM's first
         // composition of this window's stacked owner-draw statics clips
         // the field surfaces, and no amount of invalidation repaints them.
@@ -368,7 +389,7 @@ fn create() {
 
         build_controls(hwnd, body, section, title_font);
         populate(hwnd);
-        PAGE.store(0, Ordering::SeqCst);
+        PAGE.store(INITIAL_PAGE.swap(0, Ordering::SeqCst), Ordering::SeqCst);
         apply_dependent_states(hwnd);
         theme::retheme_children(hwnd);
         create_tooltip(hwnd);
@@ -457,6 +478,12 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 "settings_tab_app",
                 "settings_app_page_hint",
             ),
+            (
+                ID_PAGE_TITLE_CTX,
+                ID_PAGE_SUB_CTX,
+                "settings_tab_ctx",
+                "settings_ctx_page_hint",
+            ),
         ] {
             label(
                 hwnd,
@@ -512,11 +539,19 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             &t_pub("settings_tab_notifications"),
             (20, 222, 128, BTN_H),
         );
+        // Context Menu sits above App settings: it is a feature surface,
+        // the app tab is trailing housekeeping.
+        tab_button(
+            hwnd,
+            ID_TAB_CTX,
+            &t_pub("settings_tab_ctx"),
+            (20, 266, 128, BTN_H),
+        );
         tab_button(
             hwnd,
             ID_TAB_APP,
             &t_pub("settings_tab_app"),
-            (20, 266, 128, BTN_H),
+            (20, 310, 128, BTN_H),
         );
 
         // Pages ride the panel card grammar: the section title sits outside
@@ -1030,6 +1065,105 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
                 (GetWindowLongPtrW(control, GWL_STYLE) | 0x00004000) as _, // SS_ENDELLIPSIS
             );
         }
+        // ---- 右键增强 / Context menu (page 5) ----
+        // Card grammar: switches and label rows at the shared pitch; the
+        // Windows 11 rollback is one switch row (not its own card); problem
+        // notices (registry drift, third-party conflicts) appear on demand
+        // as the card's last row — refresh_ctx_status resizes the card.
+        section_card(hwnd, CARD_BASE + 8, font, (CONTENT_X, 114, CARD_W, 276));
+        label(
+            hwnd,
+            ID_CTX_TITLE,
+            &t_pub("settings_ctx_title"),
+            section_font,
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
+            false,
+        );
+        checkbox(
+            hwnd,
+            ID_CTX_ENABLED,
+            &t_pub("settings_ctx_enable"),
+            (ROW_X, 130, ROW_W, CHECK_H),
+        );
+        checkbox(
+            hwnd,
+            ID_CTX_COPY_ENABLED,
+            &t_pub("settings_ctx_copy"),
+            (ROW_X, 164, ROW_W, CHECK_H),
+        );
+        label(
+            hwnd,
+            ID_CTX_QUOTE_LBL,
+            &t_pub("ctx_quote_label"),
+            font,
+            (ROW_X, 204, 208, 22),
+            false,
+        );
+        combo(
+            hwnd,
+            ID_CTX_QUOTE,
+            (420, 198, 220, FIELD_H),
+            &[
+                t_pub("ctx_quote_auto"),
+                t_pub("ctx_quote_always"),
+                t_pub("ctx_quote_none"),
+            ],
+        );
+        label(
+            hwnd,
+            ID_CTX_SEP_LBL,
+            &t_pub("ctx_sep_label"),
+            font,
+            (ROW_X, 242, 208, 22),
+            false,
+        );
+        combo(
+            hwnd,
+            ID_CTX_SEP,
+            (420, 236, 220, FIELD_H),
+            &[t_pub("ctx_sep_newline"), t_pub("ctx_sep_space")],
+        );
+        label(
+            hwnd,
+            ID_CTX_RULES_HINT,
+            &t_pub("ctx_rules_hint"),
+            font,
+            (ROW_X, 282, 300, 22),
+            false,
+        );
+        // Buttons stop 12px inside the card's right edge (combo alignment);
+        // flush-at-the-border read as poking past the card.
+        push_button(
+            hwnd,
+            ID_CTX_MANAGE,
+            &t_pub("ctx_manage_rules"),
+            (536, 278, 104, 28),
+        );
+        checkbox(
+            hwnd,
+            ID_CTX_SUBMENU,
+            &t_pub("ctx_submenu_label"),
+            (ROW_X, 312, ROW_W, CHECK_H),
+        );
+        checkbox(
+            hwnd,
+            ID_CTX_WIN11,
+            &t_pub("ctx_win11_switch"),
+            (ROW_X, 346, ROW_W, CHECK_H),
+        );
+        label(hwnd, ID_CTX_STATUS, "", font, (ROW_X, 396, 430, 22), false);
+        {
+            let issue = get(hwnd, ID_CTX_STATUS);
+            let _ = SetWindowLongPtrW(
+                issue,
+                GWL_STYLE,
+                (GetWindowLongPtrW(issue, GWL_STYLE) | 0x4000) as _, // SS_ENDELLIPSIS
+            );
+        }
+        // The drift notice doubles as its own fix action (link grammar);
+        // there is no standing repair button.
+        link(hwnd, ID_CTX_FIX, "", (ROW_X, 394, 430, 24));
+
         push_button(
             hwnd,
             ID_SAVE,
@@ -1172,7 +1306,7 @@ unsafe fn sits_on_card(hwnd: HWND, child: HWND) -> bool {
         if GetWindowRect(child, &mut control).is_err() {
             return false;
         }
-        for id in CARD_BASE..=CARD_BASE + 7 {
+        for id in CARD_BASE..=CARD_BASE + 9 {
             let card = get(hwnd, id);
             if card.is_invalid() {
                 continue;
@@ -1761,6 +1895,26 @@ fn populate(hwnd: HWND) {
         set_checked(hwnd, id, value);
     }
 
+    // Context-menu page: staged switches mirror the live config; the status
+    // and rollback lines always read the registry truth.
+    {
+        let (ctx_menu, ctx_copy, quote, separator) = crate::cfg_map(|c| {
+            (
+                c.ctx_menu_enabled,
+                c.ctx_copy_enabled,
+                c.ctx_copy_quote.clone(),
+                c.ctx_copy_separator.clone(),
+            )
+        });
+        set_checked(hwnd, ID_CTX_ENABLED, ctx_menu);
+        set_checked(hwnd, ID_CTX_COPY_ENABLED, ctx_copy);
+        let submenu = crate::cfg_map(|c| c.ctx_rules_submenu);
+        set_checked(hwnd, ID_CTX_SUBMENU, submenu);
+        crate::choice::select_index(get(hwnd, ID_CTX_QUOTE), quote_index(&quote) as i32);
+        crate::choice::select_index(get(hwnd, ID_CTX_SEP), separator_index(&separator) as i32);
+        refresh_ctx_status(hwnd);
+    }
+
     set_text(hwnd, ID_BATTERY_THRESH, &battery_threshold.to_string());
     set_text(hwnd, ID_IDLE_TIMEOUT, &idle_timeout.to_string());
     set_text(hwnd, ID_WARNING_SECONDS, &warning.to_string());
@@ -1839,6 +1993,233 @@ fn on_update_check_button() {
         _ => crate::selfupdate::manual_check_prompting(),
     }
     refresh_update_status();
+}
+
+/// Registry truth for the context-menu page. The card shows no status line
+/// while healthy: the enable switch already says what the user asked for.
+/// Two problems surface on demand as the card's last row — registry drift
+/// (switch and verbs disagree, with a repair button) and detected
+/// third-party menu managers. The card resizes to fit.
+fn refresh_ctx_status(hwnd: HWND) {
+    // Anchor s() at the settings window's live DPI: click paths arrive
+    // outside any scope and the panel-creation fallback resizes the card
+    // to a wrong physical height (the link then lands below the card).
+    let _dpi = crate::dpi::Scope::window(hwnd);
+    let (copy, rules) = crate::ctxmenu::registration_status();
+    let (copy_wanted, any_rules) = crate::cfg_map(|c| {
+        (
+            c.ctx_copy_enabled,
+            crate::runtime::lock(&crate::ctxexec::CTX_RULES)
+                .iter()
+                .any(|rule| rule.enabled),
+        )
+    });
+    // Read the switch the user SEES (the staged checkbox), not the saved
+    // config: a saved-on/staged-off user must not be told to "fix" anything.
+    // The reverse direction (off but verbs linger) is deliberately ignored —
+    // stale entries are harmless and self-heal at the next sync.
+    let enabled = is_checked(hwnd, ID_CTX_ENABLED);
+    let registered = copy || rules > 0;
+    let drift = enabled && (copy_wanted || any_rules) && !registered;
+    let conflict = conflict_text();
+
+    // The rollback switch mirrors the registry, not a staged draft.
+    set_checked(
+        hwnd,
+        ID_CTX_WIN11,
+        crate::ctxmenu::classic_state() != crate::ctxmenu::ClassicState::Off,
+    );
+
+    let issue = if !conflict.is_empty() {
+        conflict
+    } else {
+        String::new()
+    };
+    set_text(hwnd, ID_CTX_STATUS, &issue);
+    set_text(hwnd, ID_CTX_FIX, &t_pub("ctx_drift_fix"));
+    unsafe {
+        // The notice row lives BELOW the card at a fixed slot — the card
+        // never resizes (dynamic heights fought the stacked-statics quirk:
+        // flash on change, unpainted growth until hover).
+        let status = get(hwnd, ID_CTX_STATUS);
+        let fix = get(hwnd, ID_CTX_FIX);
+        let _ = ShowWindow(status, transmute_bool(!drift && !issue.is_empty()));
+        let _ = ShowWindow(fix, transmute_bool(drift));
+    }
+}
+
+/// Boolean → SHOW_WINDOW_CMD without naming the type twice at call sites.
+fn transmute_bool(on: bool) -> windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD {
+    if on {
+        windows::Win32::UI::WindowsAndMessaging::SW_SHOW
+    } else {
+        windows::Win32::UI::WindowsAndMessaging::SW_HIDE
+    }
+}
+
+/// One-line coexistence warning naming detected third-party menu managers;
+/// empty when none was found (no notice is shown at all then).
+fn conflict_text() -> String {
+    let hits = crate::ctxmenu::detect_conflicts();
+    if hits.is_empty() {
+        return String::new();
+    }
+    let names = hits
+        .iter()
+        .map(|hit| match hit.as_str() {
+            "nilesoft" => t_pub("ctx_conflict_nilesoft"),
+            "openxx" => t_pub("ctx_conflict_openxx"),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    crate::t_args("ctx_conflict_warning", &[&names])
+}
+
+/// Instant action (not staged): the rollback switch applies or reverts the
+/// Windows 11 classic menu after an explicit confirmation, then restarts
+/// Explorer. The switch mirrors the registry, so it re-reads the state
+/// afterwards — a declined confirm snaps back visually.
+fn on_win11_classic_switch(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONWARNING, MB_YESNO, MessageBoxW};
+    let state = crate::ctxmenu::classic_state();
+    let enable = state == crate::ctxmenu::ClassicState::Off;
+    if !enable && state == crate::ctxmenu::ClassicState::ByOther {
+        let note = t_pub("ctx_win11_other_tool");
+        unsafe {
+            let _ = MessageBoxW(
+                Some(hwnd),
+                PCWSTR(crate::wide(&note).as_ptr()),
+                PCWSTR(crate::wide(&t_pub("settings_tab_ctx")).as_ptr()),
+                windows::Win32::UI::WindowsAndMessaging::MB_OK
+                    | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+            );
+        }
+        rebuild_surface(hwnd);
+        refresh_ctx_status(hwnd);
+        return;
+    }
+    let prompt = if enable {
+        t_pub("ctx_win11_confirm_on")
+    } else {
+        t_pub("ctx_win11_confirm_off")
+    };
+    let answer = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            PCWSTR(crate::wide(&prompt).as_ptr()),
+            PCWSTR(crate::wide(&t_pub("settings_tab_ctx")).as_ptr()),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    };
+    if answer != IDYES {
+        rebuild_surface(hwnd);
+        refresh_ctx_status(hwnd);
+        return;
+    }
+    if let Err(err) = crate::ctxmenu::set_classic(enable) {
+        set_text(hwnd, ID_CTX_STATUS, &err);
+        return;
+    }
+    if let Err(err) = crate::edit_config(|c| c.ctx_win11_classic = enable) {
+        // The registry is authoritative; the flag only feeds self-heal.
+        crate::log_line(&format!("ctx win11 flag save failed: {err}"));
+    }
+    crate::ctxmenu::restart_explorer();
+    rebuild_surface(hwnd);
+    refresh_ctx_status(hwnd);
+}
+
+/// Post-modal repaint: after a MessageBox (or an Explorer restart) the
+/// stacked owner-draw statics keep stale or blank pixels until the window
+/// cycles off-screen — the DWM quirk show() documents.
+fn rebuild_surface(hwnd: HWND) {
+    let gate = crate::FirstFrameGate::begin(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
+    crate::present_frame(hwnd);
+    gate.reveal();
+}
+
+/// Opens the settings window straight to the context-menu page (manager's
+/// "More settings" link).
+pub fn open_ctx_page() {
+    // Skip show() entirely: its own reveal dance plus a surface rebuild
+    // flashes (two off-screen cycles with a composed frame between them).
+    // create() leaves the window hidden; the single rebuild cycle below
+    // reveals it atomically (FirstFrameGate is built for exactly that).
+    INITIAL_PAGE.store(5, Ordering::SeqCst);
+    if current().is_invalid() {
+        create();
+    }
+    INITIAL_PAGE.store(0, Ordering::SeqCst);
+    let hwnd = current();
+    if hwnd.is_invalid() {
+        return;
+    }
+    request_location_preview(hwnd);
+    crate::hold_panel_modal(hwnd);
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+    }
+    PAGE.store(5, Ordering::SeqCst);
+    apply_dependent_states(hwnd);
+    // One surface rebuild serves both paths: the fresh bake can still land
+    // blank behind the modal open, and a flip on an existing window leaves
+    // stale pixels (stacked owner-draw statics quirk).
+    rebuild_surface(hwnd);
+    // apply_dependent_states flips page CONTENT only; the nav strip keeps
+    // its stale highlight until repainted. The tab-click path invalidates
+    // the strip explicitly — same here, or the first tab still reads active.
+    for id in [
+        ID_TAB_POWER,
+        ID_TAB_THEME,
+        ID_TAB_APPEARANCE,
+        ID_TAB_NOTIFICATIONS,
+        ID_TAB_APP,
+        ID_TAB_CTX,
+    ] {
+        let control = get(hwnd, id);
+        if !control.is_invalid() {
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
+            }
+        }
+    }
+}
+
+/// When settings opened from another modal window (the rule manager's "More
+/// settings" link), that owner stays disabled until this window closes.
+static MODAL_OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// Opens the context-menu settings page modal to `owner`: the owner cannot
+/// take input while settings is up (the same contract the rule manager and
+/// process picker already hold with their owners).
+pub fn open_ctx_page_modal_to(owner: HWND) {
+    MODAL_OWNER.store(owner.0 as isize, Ordering::SeqCst);
+    unsafe {
+        let _ = EnableWindow(owner, false);
+        // The disabled owner keeps its z-position and would sit ON TOP of
+        // the settings window (same size class) — hide it for the duration
+        // so settings is actually readable.
+        let _ = ShowWindow(owner, SW_HIDE);
+    }
+    open_ctx_page();
+}
+
+/// Releases the modal owner on settings close; no-op for plain opens.
+fn release_modal_owner() {
+    let raw = MODAL_OWNER.swap(0, Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let owner = HWND(raw as *mut core::ffi::c_void);
+            let _ = ShowWindow(owner, SW_SHOW);
+            let _ = EnableWindow(owner, true);
+            let _ = SetForegroundWindow(owner);
+        }
+    }
 }
 
 /// Runtime refresh hook (WM_REFRESH_UI + language refresh): the check
@@ -1972,6 +2353,24 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_APP_UPDATE_AUTO,
             ID_APP_UPDATE_CHECK,
         ],
+        5 => &[
+            ID_PAGE_TITLE_CTX,
+            ID_PAGE_SUB_CTX,
+            CARD_BASE + 8,
+            ID_CTX_TITLE,
+            ID_CTX_ENABLED,
+            ID_CTX_STATUS,
+            ID_CTX_FIX,
+            ID_CTX_COPY_ENABLED,
+            ID_CTX_QUOTE_LBL,
+            ID_CTX_QUOTE,
+            ID_CTX_SEP_LBL,
+            ID_CTX_SEP,
+            ID_CTX_RULES_HINT,
+            ID_CTX_MANAGE,
+            ID_CTX_SUBMENU,
+            ID_CTX_WIN11,
+        ],
         _ => &[
             ID_PAGE_TITLE_NOTIFICATIONS,
             ID_PAGE_SUB_NOTIFICATIONS,
@@ -1998,10 +2397,14 @@ fn apply_dependent_states(hwnd: HWND) {
             visibility.insert(id, visible);
         };
         let page = PAGE.load(Ordering::SeqCst);
-        for p in 0..5 {
+        for p in 0..6 {
             for id in page_ids(p) {
                 show(*id, p == page);
             }
+        }
+        // The rollback switch only exists on Windows 11 builds.
+        if page == 5 {
+            show(ID_CTX_WIN11, crate::system::windows_build() >= 22000);
         }
         // Page 0 note: the battery threshold field has NO disabled state -
         // it always reads as editable and simply only takes effect while
@@ -2044,6 +2447,13 @@ fn apply_dependent_states(hwnd: HWND) {
         }
         for (id, visible) in visibility {
             crate::nativeform::set_visible_deferred(get(hwnd, id), visible);
+        }
+        // The issue row (drift/conflict) is conditional and MUST settle
+        // after the blanket page show above applies — running the refresh
+        // before it let the blanket force the repair link back on, floating
+        // it below the card no matter what the drift logic decided.
+        if page == 5 {
+            refresh_ctx_status(hwnd);
         }
         let lock_keys = is_checked(hwnd, ID_LOCK_KEYS);
         for id in [
@@ -2089,6 +2499,11 @@ struct Draft {
     autostart: bool,
     logging: bool,
     update_auto: bool,
+    ctx_menu: bool,
+    ctx_copy: bool,
+    ctx_submenu: bool,
+    ctx_quote_idx: usize,
+    ctx_sep_idx: usize,
 }
 
 fn collect_draft(hwnd: HWND) -> Draft {
@@ -2150,6 +2565,11 @@ fn collect_draft(hwnd: HWND) -> Draft {
         autostart: is_checked(hwnd, ID_AUTOSTART),
         logging: is_checked(hwnd, ID_LOGGING),
         update_auto: is_checked(hwnd, ID_APP_UPDATE_AUTO),
+        ctx_menu: is_checked(hwnd, ID_CTX_ENABLED),
+        ctx_copy: is_checked(hwnd, ID_CTX_COPY_ENABLED),
+        ctx_submenu: is_checked(hwnd, ID_CTX_SUBMENU),
+        ctx_quote_idx: combo_sel(hwnd, ID_CTX_QUOTE).min(2),
+        ctx_sep_idx: combo_sel(hwnd, ID_CTX_SEP).min(1),
     }
 }
 
@@ -2309,6 +2729,23 @@ fn draft_differs(draft: &Draft) -> bool {
         || draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst)
         || draft.logging != cfg_logging
         || draft.update_auto != base.update_check_enabled
+        || draft.ctx_menu != base.ctx_menu_enabled
+        || draft.ctx_copy != base.ctx_copy_enabled
+        || draft.ctx_submenu != base.ctx_rules_submenu
+        || draft.ctx_quote_idx != quote_index(&base.ctx_copy_quote)
+        || draft.ctx_sep_idx != separator_index(&base.ctx_copy_separator)
+}
+
+fn quote_index(value: &str) -> usize {
+    match value {
+        "always" => 1,
+        "none" => 2,
+        _ => 0,
+    }
+}
+
+fn separator_index(value: &str) -> usize {
+    if value == "space" { 1 } else { 0 }
 }
 
 /// Draft-vs-live comparison key that ignores the restore snapshot fields:
@@ -2381,6 +2818,11 @@ fn save() {
             c.hotkeys_enabled = draft.hotkeys;
             c.logging_enabled = draft.logging;
             c.update_check_enabled = draft.update_auto;
+            c.ctx_menu_enabled = draft.ctx_menu;
+            c.ctx_copy_enabled = draft.ctx_copy;
+            c.ctx_rules_submenu = draft.ctx_submenu;
+            c.ctx_copy_quote = ["auto", "always", "none"][draft.ctx_quote_idx].to_string();
+            c.ctx_copy_separator = ["newline", "space"][draft.ctx_sep_idx].to_string();
             Ok(())
         }) {
             set_validation(hwnd, &err, true);
@@ -2389,6 +2831,9 @@ fn save() {
         *crate::runtime::lock(&DRAFT_BASE) = Some(crate::cfg_map(Clone::clone));
         let mut failures = Vec::new();
         crate::log_line("settings changed");
+        // Context-menu verbs follow the saved switch/titles immediately.
+        crate::ctxmenu::sync("settings");
+        refresh_ctx_status(hwnd);
         // Appearance settings take effect for the current side right away:
         // configuring them shows the result, no switch needed.
         crate::theme_engine::apply_current_side();
@@ -2522,6 +2967,13 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_LOGGING, "tip_logging"),
         (ID_APP_UPDATE_AUTO, "tip_update_auto"),
         (ID_PROJECT_HOME, "tip_project_home"),
+        (ID_CTX_ENABLED, "tip_ctx_enabled"),
+        (ID_CTX_COPY_ENABLED, "tip_ctx_copy"),
+        (ID_CTX_SUBMENU, "tip_ctx_submenu"),
+        (ID_CTX_QUOTE, "tip_ctx_quote"),
+        (ID_CTX_SEP, "tip_ctx_sep"),
+        (ID_CTX_WIN11, "tip_ctx_win11"),
+        (ID_CTX_MANAGE, "tip_ctx_manage"),
         (ID_CANCEL, "tip_settings_cancel"),
         (ID_SAVE, "tip_settings_save"),
     ];
@@ -2605,7 +3057,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             WM_SETCURSOR => {
                 // Hand cursor over the project-home link (Go wmSetCursor).
                 let target = HWND(wparam.0 as *mut _);
-                if target == get(hwnd, ID_PROJECT_HOME)
+                if (target == get(hwnd, ID_PROJECT_HOME) || target == get(hwnd, ID_CTX_FIX))
                     && let Ok(hand) = LoadCursorW(None, IDC_HAND)
                 {
                     let _ = SetCursor(Some(hand));
@@ -2758,7 +3210,8 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 // Drop owner-draw checkbox states so a recreated window does
                 // not resurrect check marks on reused control ids.
                 *checks() = None;
-                let _ = EnableWindow(crate::hwnd(&crate::PANEL), true);
+                release_modal_owner();
+                crate::release_panel_modal(hwnd);
                 crate::refresh_status();
                 LRESULT(0)
             }
@@ -2778,7 +3231,7 @@ fn draw_settings_item(hwnd: HWND, item: &crate::nativeform::DrawItem) {
         // edits' rects out of the TARGET DC first; BitBlt honors the DC
         // clip, so neither the blit nor the direct fallback can touch
         // the edits, no matter who invalidated the card or how widely.
-        if (CARD_BASE..=CARD_BASE + 7).contains(&item.control_id) {
+        if (CARD_BASE..=CARD_BASE + 9).contains(&item.control_id) {
             let mut card_rect = RECT::default();
             if GetWindowRect(item.control, &mut card_rect).is_ok() {
                 for edit_id in card_field_ids(item.control_id) {
@@ -2818,7 +3271,7 @@ unsafe fn draw_settings_item_impl(
     let scale = crate::scale_pub(96);
     let id = item.control_id;
     let label = crate::window_text(item.control);
-    if (CARD_BASE..=CARD_BASE + 7).contains(&id) {
+    if (CARD_BASE..=CARD_BASE + 9).contains(&id) {
         // Section card face: rounded surface with the family hairline,
         // same grammar as the panel's cards.
         crate::paint::draw_surface(
@@ -2884,7 +3337,7 @@ unsafe fn draw_settings_item_impl(
                 );
             }
         }
-    } else if id == ID_PROJECT_HOME {
+    } else if id == ID_PROJECT_HOME || id == ID_CTX_FIX {
         let state = crate::nativeform::control_state(item.control, item.state);
         crate::paint::draw_text_link(
             dc,
@@ -2892,6 +3345,9 @@ unsafe fn draw_settings_item_impl(
             body_font(),
             &label,
             p,
+            // The fix link sits below the card on the window background;
+            // the project-home link rides the app page card face... both
+            // read fine on the window color, and CLIPC targets cards only.
             p.window_bg,
             state,
             scale,
@@ -2901,7 +3357,12 @@ unsafe fn draw_settings_item_impl(
         crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
     } else if matches!(
         id,
-        ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
+        ID_TAB_POWER
+            | ID_TAB_THEME
+            | ID_TAB_APP
+            | ID_TAB_NOTIFICATIONS
+            | ID_TAB_APPEARANCE
+            | ID_TAB_CTX
     ) {
         let mut state = crate::nativeform::control_state(item.control, item.state);
         let page = PAGE.load(Ordering::SeqCst);
@@ -2912,6 +3373,7 @@ unsafe fn draw_settings_item_impl(
                 ID_TAB_APPEARANCE,
                 ID_TAB_NOTIFICATIONS,
                 ID_TAB_APP,
+                ID_TAB_CTX,
             ][page as usize];
         crate::paint::draw_nav_item(
             dc,
@@ -2988,12 +3450,14 @@ unsafe fn draw_settings_item_impl(
 fn handle_click(hwnd: HWND, idc: i32) {
     unsafe {
         match idc {
-            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE => {
+            ID_TAB_POWER | ID_TAB_THEME | ID_TAB_APP | ID_TAB_NOTIFICATIONS | ID_TAB_APPEARANCE
+            | ID_TAB_CTX => {
                 let page = match idc {
                     ID_TAB_POWER => 0,
                     ID_TAB_THEME => 1,
                     ID_TAB_APPEARANCE => 2,
                     ID_TAB_NOTIFICATIONS => 3,
+                    ID_TAB_CTX => 5,
                     _ => 4,
                 };
                 PAGE.store(page, Ordering::SeqCst);
@@ -3008,6 +3472,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
                     ID_TAB_APP,
                     ID_TAB_NOTIFICATIONS,
                     ID_TAB_APPEARANCE,
+                    ID_TAB_CTX,
                 ] {
                     let control = get(hwnd, id);
                     if !control.is_invalid() {
@@ -3025,7 +3490,7 @@ fn handle_click(hwnd: HWND, idc: i32) {
             ID_KEEP_SCREEN | ID_BATTERY_ALLOWED | ID_PAUSE_ON_LOCK | ID_IDLE_ENHANCED
             | ID_THEME_BATTERY | ID_THEME_FULLSCREEN | ID_HOTKEYS | ID_AUTOSTART | ID_LOGGING
             | ID_APP_UPDATE_AUTO | ID_LOCK_KEYS | ID_LOCK_CAPS | ID_LOCK_NUM | ID_LOCK_SCROLL
-            | ID_LOCK_FULLSCREEN => {
+            | ID_LOCK_FULLSCREEN | ID_CTX_ENABLED | ID_CTX_COPY_ENABLED | ID_CTX_SUBMENU => {
                 // Owner-drawn checkboxes keep state in CHECKS. The flight
                 // animates the flip with the same glide the panel uses.
                 let before = is_checked(hwnd, idc);
@@ -3058,6 +3523,12 @@ fn handle_click(hwnd: HWND, idc: i32) {
             }
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_APP_UPDATE_CHECK => on_update_check_button(),
+            ID_CTX_FIX => {
+                crate::ctxmenu::sync("repair");
+                refresh_ctx_status(hwnd);
+            }
+            ID_CTX_WIN11 => on_win11_classic_switch(hwnd),
+            ID_CTX_MANAGE => crate::ctx_ui::show(),
             ID_SAVE => save(),
             ID_CANCEL => close_request(),
             _ => {}
@@ -3196,9 +3667,20 @@ pub fn refresh_language() {
         (ID_SAVE, "common_save"),
         (ID_CANCEL, "common_cancel"),
         (ID_PROJECT_HOME_LBL, "settings_project_home_label"),
+        (ID_TAB_CTX, "settings_tab_ctx"),
+        (ID_CTX_TITLE, "settings_ctx_title"),
+        (ID_CTX_ENABLED, "settings_ctx_enable"),
+        (ID_CTX_COPY_ENABLED, "settings_ctx_copy"),
+        (ID_CTX_QUOTE_LBL, "ctx_quote_label"),
+        (ID_CTX_SEP_LBL, "ctx_sep_label"),
+        (ID_CTX_RULES_HINT, "ctx_rules_hint"),
+        (ID_CTX_SUBMENU, "ctx_submenu_label"),
+        (ID_CTX_WIN11, "ctx_win11_switch"),
+        (ID_CTX_MANAGE, "ctx_manage_rules"),
     ] {
         set_text(hwnd, id, &t_pub(key));
     }
+    refresh_ctx_status(hwnd);
     set_text(
         hwnd,
         ID_VERSION,

@@ -21,16 +21,6 @@ pub const SYSTEM_ACTIONS: [&str; 7] = [
     idletrigger_core::automation::ACTION_LOGOFF,
 ];
 
-/// Quick-menu row order (the panel's system-actions flyout). The choice
-/// rows carry indices 900+i, so this table is the id → action mapping.
-pub const QUICK_MENU_ACTIONS: [&str; 5] = [
-    idletrigger_core::automation::ACTION_LOCK,
-    idletrigger_core::automation::ACTION_SLEEP,
-    idletrigger_core::automation::ACTION_HIBERNATE,
-    idletrigger_core::automation::ACTION_SHUTDOWN,
-    idletrigger_core::automation::ACTION_RESTART,
-];
-
 struct Binding {
     vk: u16,
     modifiers: u32,
