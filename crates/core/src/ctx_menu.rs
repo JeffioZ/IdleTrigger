@@ -5,8 +5,11 @@
 //! pure translations the registry sync consumes: pattern lists to
 //! `AppliesTo` filters, scopes to verb roots, and copy-path formatting.
 
+use crate::toml_rules::{self, Entry, Output};
 use serde::{Deserialize, Serialize};
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
+#[cfg(test)]
+use toml_edit::ArrayOfTables;
+use toml_edit::{DocumentMut, Item, Table};
 
 /// Registry verb names are prefixed so the sync engine can find and clean
 /// every key it owns by prefix alone.
@@ -460,35 +463,6 @@ pub fn prepare_rules(rules: Vec<CtxRule>) -> (Vec<CtxRule>, Vec<CtxIssue>) {
 
 // ---- Document layer ------------------------------------------------------
 
-#[derive(Clone)]
-struct Entry {
-    table: Option<Table>,
-    inline: Option<Value>,
-}
-
-fn tables(document: &DocumentMut) -> Result<Vec<Entry>, String> {
-    match document.get("ctx_rules") {
-        None => Ok(Vec::new()),
-        Some(Item::ArrayOfTables(tables)) => Ok(tables
-            .iter()
-            .cloned()
-            .map(|table| Entry {
-                table: Some(table),
-                inline: None,
-            })
-            .collect()),
-        Some(item) => Ok(item
-            .as_array()
-            .ok_or("ctx_rules must be an array")?
-            .iter()
-            .map(|v| Entry {
-                table: v.as_inline_table().cloned().map(|v| v.into_table()),
-                inline: Some(v.clone()),
-            })
-            .collect()),
-    }
-}
-
 fn decode(tables: &[Entry]) -> (Vec<CtxRule>, Vec<CtxIssue>) {
     let mut parse_errors = Vec::new();
     let raw: Vec<CtxRule> = tables
@@ -501,7 +475,7 @@ fn decode(tables: &[Entry]) -> (Vec<CtxRule>, Vec<CtxIssue>) {
             };
             let mut document = DocumentMut::new();
             *document.as_table_mut() = table.clone();
-            match toml_edit::de::from_str(&document.to_string()) {
+            match toml_edit::de::from_document(document) {
                 Ok(rule) => rule,
                 Err(error) => {
                     parse_errors.push((index, error.to_string()));
@@ -545,25 +519,13 @@ fn decode(tables: &[Entry]) -> (Vec<CtxRule>, Vec<CtxIssue>) {
 
 /// Reads the `[[ctx_rules]]` array with per-entry fault isolation.
 pub fn read_rules(document: &DocumentMut) -> Result<(Vec<CtxRule>, Vec<CtxIssue>), String> {
-    Ok(decode(&tables(document)?))
+    Ok(decode(&toml_rules::tables(document, "ctx_rules")?))
 }
 
 fn encoded(rule: &CtxRule) -> Result<Table, String> {
-    #[derive(Serialize)]
-    struct RulesDocument<'a> {
-        ctx_rules: &'a [CtxRule],
-    }
-    let doc = toml_edit::ser::to_document(&RulesDocument {
-        ctx_rules: std::slice::from_ref(rule),
-    })
-    .map_err(|error| format!("rule serialization failed: {error}"))?;
-    tables(&doc)
-        .map_err(|error| format!("serialized rule lookup failed: {error}"))?
-        .into_iter()
-        .next()
-        .ok_or("serialized rule entry is missing".to_string())?
-        .table
-        .ok_or("serialized rule entry is not a table".to_string())
+    toml_edit::ser::to_document(rule)
+        .map(DocumentMut::into_table)
+        .map_err(|error| format!("rule serialization failed: {error}"))
 }
 
 /// Refuses stale edits and patches only user-changed fields, mirroring
@@ -573,7 +535,7 @@ pub fn update_rules(
     base: &[CtxRule],
     proposed: &[CtxRule],
 ) -> Result<(), String> {
-    let existing = tables(document)?;
+    let existing = toml_rules::tables(document, "ctx_rules")?;
     let (current, existing_issues) = decode(&existing);
     if current != base {
         return Err("ctx_rules_changed_external".into());
@@ -595,71 +557,28 @@ pub fn update_rules(
     if current == proposed {
         return Ok(());
     }
-    let mut output = ArrayOfTables::new();
-    let mut inline = document.get("ctx_rules").and_then(Item::as_array).cloned();
-    if let Some(array) = &mut inline {
-        array.clear();
-    }
+    let mut output = Output::new(document, "ctx_rules");
     for rule in proposed {
         if let Some(index) = current.iter().position(|old| old.id == rule.id) {
             if current[index] == *rule {
-                // Untouched (including malformed) entries stay verbatim.
-                let table = existing[index].table.clone().unwrap_or_default();
-                if let (Some(array), Some(value)) = (&mut inline, &existing[index].inline) {
-                    array.push_formatted(value.clone());
-                } else {
-                    output.push(table);
-                }
+                output.unchanged(&existing[index]);
                 continue;
             }
             let mut table = existing[index].table.clone().unwrap_or_default();
             let previous = encoded(&current[index])?;
             let next = encoded(rule)?;
-            let keys: std::collections::BTreeSet<_> = previous
-                .iter()
-                .chain(next.iter())
-                .map(|(key, _)| key.to_owned())
-                .collect();
-            for key in keys {
-                if !existing_issues.iter().any(|issue| issue.index == index)
-                    && previous.get(&key).map(ToString::to_string)
-                        == next.get(&key).map(ToString::to_string)
-                {
-                    continue;
-                }
-                if let Some(mut value) = next.get(&key).cloned() {
-                    if let (Some(old), Some(new)) = (
-                        table.get(&key).and_then(Item::as_value),
-                        value.as_value_mut(),
-                    ) {
-                        *new.decor_mut() = old.decor().clone();
-                    }
-                    table.insert(&key, value);
-                } else {
-                    table.remove(&key);
-                }
-            }
-            if let Some(array) = &mut inline {
-                array.push_formatted(Value::InlineTable(table.into_inline_table()));
-            } else {
-                output.push(table);
-            }
+            toml_rules::patch(
+                &mut table,
+                &previous,
+                &next,
+                existing_issues.iter().any(|issue| issue.index == index),
+            );
+            output.push(table, true);
         } else {
-            let table = encoded(rule)?;
-            if let Some(array) = &mut inline {
-                array.push(Value::InlineTable(table.into_inline_table()));
-            } else {
-                output.push(table);
-            }
+            output.push(encoded(rule)?, false);
         }
     }
-    document["ctx_rules"] = if let Some(array) = inline {
-        toml_edit::value(array)
-    } else if output.is_empty() {
-        toml_edit::value(toml_edit::Array::new())
-    } else {
-        Item::ArrayOfTables(output)
-    };
+    document["ctx_rules"] = output.finish();
     Ok(())
 }
 
@@ -876,6 +795,8 @@ title = 42
         update_rules(&mut doc, &[], std::slice::from_ref(&rule)).unwrap();
         let (expected, issues) = read_rules(&doc).unwrap();
         assert!(issues.is_empty(), "{issues:?}");
+        let saved: DocumentMut = doc.to_string().parse().unwrap();
+        assert_eq!(read_rules(&saved).unwrap().0, expected);
         assert_eq!(expected, vec![rule]);
     }
 

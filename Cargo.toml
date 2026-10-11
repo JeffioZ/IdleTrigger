@@ -15,8 +15,9 @@ winresource = "0.1.31"
 toml_edit = { version = "0.25.17", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
-windows-core = "0.62.2"
-windows = { version = "0.62.2", features = [
+# Only alloc-backed bindings are needed; keep optional std/async helpers out.
+windows-core = { version = "0.62.2", default-features = false }
+windows = { version = "0.62.2", default-features = false, features = [
     "UI_ViewManagement",
     "Win32_System_WinRT",
     "Win32_Foundation",

@@ -1,31 +1,44 @@
 //! IdleTrigger i18n: locale loading and string lookup.
 //!
-//! Embeds `en.json` and `zh-CN.json`. Missing keys fall back to the key name;
+//! Compiles `en.json` and `zh-CN.json`. Missing keys fall back to the key name;
 //! the caller passes a resolved language.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
+#[cfg(test)]
 const EN: &str = include_str!("../locales/en.json");
+#[cfg(test)]
 const ZH_CN: &str = include_str!("../locales/zh-CN.json");
 
+const TEXT: &str = include_str!(concat!(env!("OUT_DIR"), "/locales.txt"));
+include!(concat!(env!("OUT_DIR"), "/locales.rs"));
+
 pub struct I18n {
-    map: HashMap<String, String>,
+    language: usize,
 }
 
 impl I18n {
     /// `lang` must already be resolved to `"en"` or `"zh-CN"`.
     pub fn load(lang: &str) -> I18n {
-        let text = if lang == "zh-CN" { ZH_CN } else { EN };
-        let (map, _) = parse_flat(text).unwrap_or_default();
-        I18n { map }
+        I18n {
+            language: if lang == "zh-CN" { 2 } else { 1 },
+        }
     }
 
     /// Looks up a key; missing keys return the key itself.
     pub fn t<'a>(&'a self, key: &'a str) -> &'a str {
-        self.map.get(key).map(String::as_str).unwrap_or(key)
+        ENTRIES
+            .binary_search_by(|entry| TEXT[entry[0] as usize..entry[1] as usize].cmp(key))
+            .map(|index| {
+                let entry = ENTRIES[index];
+                &TEXT[entry[self.language] as usize..entry[self.language + 1] as usize]
+            })
+            .unwrap_or(key)
     }
 }
 
+#[cfg(test)]
 fn parse_flat(text: &str) -> Option<(HashMap<String, String>, usize)> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
@@ -92,6 +105,11 @@ mod tests {
         assert_eq!(en_non_strings, 0, "en.json must be a flat string map");
         assert_eq!(zh_non_strings, 0, "zh-CN.json must be a flat string map");
         assert_eq!(en.len(), zh.len());
+        assert_eq!(ENTRIES.len(), en.len());
+        let compiled_en = I18n::load("en");
+        let compiled_zh = I18n::load("zh-CN");
+        let fallback = I18n::load("unknown");
+        assert_eq!(compiled_zh.t("missing-locale-key"), "missing-locale-key");
         let placeholders = |text: &str| {
             text.as_bytes()
                 .windows(2)
@@ -100,6 +118,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         for (key, value) in en {
+            assert_eq!(fallback.t(&key), value, "{key}");
+            assert_eq!(compiled_en.t(&key), value, "{key}");
+            assert_eq!(compiled_zh.t(&key), zh[&key], "{key}");
             assert_eq!(
                 placeholders(&value),
                 placeholders(zh.get(&key).unwrap()),

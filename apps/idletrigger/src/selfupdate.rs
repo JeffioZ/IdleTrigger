@@ -548,8 +548,10 @@ fn fetch_api_meta(version: &str) -> Result<ReleaseMeta, String> {
         );
         return Err(describe_api_rejection(response.status, &rejection));
     }
-    let json: Json =
-        serde_json::from_slice(&response.body).map_err(|_| crate::t_pub("update_err_read"))?;
+    // Share the string reader with IPC/state/IP lookup instead of linking
+    // another monomorphized JSON parser. Invalid UTF-8 is still rejected.
+    let text = std::str::from_utf8(&response.body).map_err(|_| crate::t_pub("update_err_read"))?;
+    let json: Json = serde_json::from_str(text).map_err(|_| crate::t_pub("update_err_read"))?;
     let (asset_url, sha256) = parse_api_asset(&json, version)?;
     Ok(ReleaseMeta {
         url: asset_url,
@@ -1512,7 +1514,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
                 .ok()
                 .map_err(|error| error.to_string())?;
         }
-        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        Ok(idletrigger_core::encoding::hex_lower(&digest))
     })();
     unsafe {
         let _ = BCryptCloseAlgorithmProvider(algorithm, 0);

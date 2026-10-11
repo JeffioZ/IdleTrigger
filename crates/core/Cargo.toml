@@ -10,3 +10,6 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }
+
+[build-dependencies]
+serde_json = { workspace = true }

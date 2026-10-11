@@ -42,11 +42,18 @@ pub(crate) fn reload_rules() {
 /// path so trailing spaces and tabs survive (':' stays raw; the parser takes
 /// the remainder after the third colon).
 fn pct_encode(text: &str) -> String {
-    text.replace('%', "%25")
-        .replace(' ', "%20")
-        .replace('\t', "%09")
-        .replace('\r', "%0D")
-        .replace('\n', "%0A")
+    let mut output = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '%' => output.push_str("%25"),
+            ' ' => output.push_str("%20"),
+            '\t' => output.push_str("%09"),
+            '\r' => output.push_str("%0D"),
+            '\n' => output.push_str("%0A"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn pct_decode(text: &str) -> String {
@@ -405,10 +412,7 @@ fn rule_chunk(rule: &core_ctx::CtxRule, offset: usize) -> Option<String> {
         end -= 1;
     }
     // Hex avoids the pipe's whitespace trimming changing a chunk boundary.
-    let chunk: String = json.as_bytes()[offset..end]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let chunk = idletrigger_core::encoding::hex_lower(&json.as_bytes()[offset..end]);
     Some(format!(
         "ok ctx-rule:{}:{}:{chunk}",
         rule_revision(&json),

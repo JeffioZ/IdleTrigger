@@ -7,5 +7,7 @@
 pub mod automation;
 pub mod config;
 pub mod ctx_menu;
+pub mod encoding;
 pub mod i18n;
 pub mod rule_document;
+mod toml_rules;

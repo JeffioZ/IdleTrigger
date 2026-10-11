@@ -50,6 +50,18 @@ Use `pwsh -NoProfile -File build/build.ps1` for x64, `-Architecture x86` for x86
 
 `IDLETRIGGER_VERSION` 设置显示及资源版本，本地默认包版本。依赖变化需同步提交 `Cargo.lock`。
 
+Release size is measured on the normal `dist` executables with the same compiler and features. The release profile uses `opt-level = "z"`, full LTO, one codegen unit, and stripped symbols. Keep unwinding: window and worker guards depend on `catch_unwind`. Build dependencies and unused Windows bindings do not imply equivalent code in the linked EXE; inspect a linker map before removing functionality or dependencies.
+
+比较 Release 体积时，使用相同编译器和功能集构建的 `dist` 正式 EXE。Release 已采用 `opt-level = "z"`、完整 LTO、单代码生成单元和符号剥离。窗口与工作线程通过 `catch_unwind` 恢复异常，因此保留栈展开。构建依赖和未使用的 Windows 绑定不等于最终 EXE 中的代码体积；精简前应结合链接映射判断。
+
+Keep the Windows binding crates' default features disabled; the application uses explicit API features and does not need their optional standard-library/async extensions. Full COM error information remains enabled. Runtime JSON uses the string reader consistently to avoid linking both string and byte-slice parser instances. Automation and context-menu rules share `toml_rules` for table preservation and field patches; their validation policies remain separate.
+
+Windows 绑定关闭默认功能，仅启用需要的 API，不引入其可选标准库/异步扩展；COM 完整错误信息仍保留。运行时 JSON 统一使用字符串解析入口，避免链接字符串和字节切片两套解析器实例。自动任务与右键规则通过 `toml_rules` 共用表格式保留和字段补丁实现，各自的校验策略保持独立。
+
+Locale JSON files remain the editable source. `crates/core/build.rs` validates matching string-map keys and generates sorted byte offsets plus UTF-8 text in Cargo's `OUT_DIR`. The EXE shares keys between languages and looks up text without parsing JSON or allocating a translation map. Generated files stay in `target`; `serde_json` is reused as a build dependency and remains needed at runtime for IPC, update metadata, and automation state.
+
+双语 JSON 仍是文案维护入口。`crates/core/build.rs` 校验字符串映射及双语键名，向 Cargo 的 `OUT_DIR` 生成有序偏移表和 UTF-8 文本。EXE 中双语共用键名，查询无需解析 JSON 或分配翻译哈希表。生成文件保留在 `target`；构建阶段复用 `serde_json`，运行时的 IPC、更新元数据和自动任务状态仍需要该依赖。
+
 CI follows stable Rust and uses `--locked` to prevent implicit dependency changes. It runs tests on both architectures with all features, checks normal release artifacts with `.github/scripts/verify-windows-artifact.ps1`, then builds the diagnostic variant. The artifact check covers PE architecture, GUI subsystem, version fields, manifest markers, imported DLLs, and exclusion of diagnostic switches. It does not replace testing on the oldest supported Windows version.
 
 CI 使用 stable Rust，通过 `--locked` 阻止隐式依赖变更；双架构启用全部功能运行测试，用 `.github/scripts/verify-windows-artifact.ps1` 检查正式产物，再构建诊断版。产物检查覆盖 PE 架构、GUI 子系统、版本字段、manifest 标记、DLL 导入及诊断开关排除，不能替代最低支持 Windows 版本上的运行验证。
