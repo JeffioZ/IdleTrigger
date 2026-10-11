@@ -79,8 +79,6 @@ jobs:
       - name: Build
         env:
           IDLETRIGGER_VERSION: ${{ env.RELEASE_VERSION }}
-          # Monotonic across releases; one value shared by both artifacts.
-          IDLETRIGGER_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           ./build/build.ps1 -Architecture all
 
