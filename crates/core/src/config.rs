@@ -53,6 +53,21 @@ pub struct Config {
     /// per minute); manual checks from the tray menu or settings stay
     /// available regardless.
     pub update_check_enabled: bool,
+    /// Explorer context-menu integration master switch: on registers every
+    /// `IdleTrigger.*` verb, off removes them all (install/uninstall).
+    pub ctx_menu_enabled: bool,
+    /// Shows the built-in copy-path cascade among the context-menu entries.
+    pub ctx_copy_enabled: bool,
+    /// Copy-path quoting: "auto" (quotes when spaces), "always", "none".
+    pub ctx_copy_quote: String,
+    /// Multi-selection join for copy-path: "newline" or "space".
+    pub ctx_copy_separator: String,
+    /// Intent behind the Windows 11 classic-menu rollback key; the registry
+    /// stays the source of truth for what is actually in effect.
+    pub ctx_win11_classic: bool,
+    /// Group the custom rules under one cascade submenu (required for
+    /// separator rows; flat top-level verbs cannot draw separators).
+    pub ctx_rules_submenu: bool,
 }
 
 impl Default for Config {
@@ -92,6 +107,12 @@ impl Default for Config {
             theme_restore_wallpaper: String::new(),
             theme_restore_cursor: String::new(),
             update_check_enabled: true,
+            ctx_menu_enabled: false,
+            ctx_copy_enabled: true,
+            ctx_copy_quote: "auto".to_string(),
+            ctx_copy_separator: "newline".to_string(),
+            ctx_win11_classic: false,
+            ctx_rules_submenu: false,
         }
     }
 }
@@ -128,6 +149,20 @@ impl Config {
         }
         if !crate::automation::valid_hhmm(&self.theme_dark_time) {
             self.theme_dark_time = "19:00".into();
+        }
+        if !matches!(
+            self.ctx_copy_quote.as_str(),
+            crate::ctx_menu::QUOTE_AUTO
+                | crate::ctx_menu::QUOTE_ALWAYS
+                | crate::ctx_menu::QUOTE_NONE
+        ) {
+            self.ctx_copy_quote = crate::ctx_menu::QUOTE_AUTO.into();
+        }
+        if !matches!(
+            self.ctx_copy_separator.as_str(),
+            crate::ctx_menu::SEPARATOR_NEWLINE | crate::ctx_menu::SEPARATOR_SPACE
+        ) {
+            self.ctx_copy_separator = crate::ctx_menu::SEPARATOR_NEWLINE.into();
         }
         self
     }
@@ -356,6 +391,20 @@ fn read_config(
             .to_string(),
         update_check_enabled: as_bool(document, "update_check_enabled", bad_fields)
             .unwrap_or(defaults.update_check_enabled),
+        ctx_menu_enabled: as_bool(document, "ctx_menu_enabled", bad_fields)
+            .unwrap_or(defaults.ctx_menu_enabled),
+        ctx_copy_enabled: as_bool(document, "ctx_copy_enabled", bad_fields)
+            .unwrap_or(defaults.ctx_copy_enabled),
+        ctx_copy_quote: as_str(document, "ctx_copy_quote", bad_fields)
+            .unwrap_or(&defaults.ctx_copy_quote)
+            .to_string(),
+        ctx_copy_separator: as_str(document, "ctx_copy_separator", bad_fields)
+            .unwrap_or(&defaults.ctx_copy_separator)
+            .to_string(),
+        ctx_win11_classic: as_bool(document, "ctx_win11_classic", bad_fields)
+            .unwrap_or(defaults.ctx_win11_classic),
+        ctx_rules_submenu: as_bool(document, "ctx_rules_submenu", bad_fields)
+            .unwrap_or(defaults.ctx_rules_submenu),
     }
 }
 
@@ -532,6 +581,12 @@ fn save_candidate(
         "update_check_enabled",
         config.update_check_enabled,
     );
+    set_bool(document, "ctx_menu_enabled", config.ctx_menu_enabled);
+    set_bool(document, "ctx_copy_enabled", config.ctx_copy_enabled);
+    set_str(document, "ctx_copy_quote", &config.ctx_copy_quote);
+    set_str(document, "ctx_copy_separator", &config.ctx_copy_separator);
+    set_bool(document, "ctx_win11_classic", config.ctx_win11_classic);
+    set_bool(document, "ctx_rules_submenu", config.ctx_rules_submenu);
     set_str(document, "language", &config.language);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -690,6 +745,12 @@ mod save_tests {
             theme_restore_wallpaper: "picture\tfill\tMON1\tC:\\walls\\orig.jpg".into(),
             theme_restore_cursor: "No Scheme\t\tC:\\c\\a.cur".into(),
             update_check_enabled: false,
+            ctx_menu_enabled: true,
+            ctx_copy_enabled: false,
+            ctx_copy_quote: "always".into(),
+            ctx_copy_separator: "space".into(),
+            ctx_win11_classic: true,
+            ctx_rules_submenu: true,
         };
         let path = std::env::temp_dir().join(format!(
             "idletrigger-full-field-{}-{}.toml",

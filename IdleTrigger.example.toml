@@ -91,6 +91,41 @@ theme_skip_fullscreen = true
 # theme_restore_wallpaper = ""
 # theme_restore_cursor = ""
 
+# -- 右键菜单 / Context Menu --
+# 在资源管理器右键菜单中加入「复制路径」子菜单与自定义打开规则；关闭即移除全部注册项 / Adds a copy-path cascade and custom open-with rules to the Explorer context menu; turning it off removes every registered entry
+ctx_menu_enabled = false
+# 显示内置「复制路径」子菜单（完整路径/文件名/所在文件夹） / Show the built-in copy-path cascade (full path / file name / parent folder)
+ctx_copy_enabled = true
+# 复制路径引号策略："auto" 含空格才加引号，"always" 始终加，"none" 从不加 / Quote policy: "auto" quotes only paths with spaces, "always" always, "none" never
+ctx_copy_quote = "auto"
+# 多选拼接分隔符："newline" 换行，"space" 空格 / Multi-selection join: "newline" or "space"
+ctx_copy_separator = "newline"
+# 仅 Windows 11：回退为经典右键菜单，让菜单项直接显示在第一层（切换会重启资源管理器） / Windows 11 only: roll back to the classic context menu so entries appear on the first level (switching restarts File Explorer)
+ctx_win11_classic = false
+# 将自定义规则收入「自定义规则」子菜单（分隔线需要此模式；存在分隔线时自动启用） / Group custom rules under one cascade submenu (separators need it; any separator forces it)
+ctx_rules_submenu = false
+#
+# 自定义打开规则（通常由规则管理器维护）。一条完整示例：
+# Custom open-with rules (normally maintained by the rule manager). One full example:
+#
+# 分隔线条目（仅子菜单模式下渲染为分割线） / A separator entry (renders as a line in submenu mode only):
+# [[ctx_rules]]
+# id = "sep-1"
+# separator = true
+#
+# [[ctx_rules]]
+# id = "reshack"                 # 唯一标识，程序生成，无需手写 / unique id, generated automatically
+# title = "Resource Hacker 打开"   # 菜单标题 / menu title
+# enabled = true
+# scope = "file"                 # file | dir | file_dir | background | all
+# patterns = ["*.exe", "*.dll"]  # 匹配的扩展名，空 = 全部 / extensions to match, empty = all
+# command = 'D:\tools\reshack.exe'
+# args = '"%1"'                  # %1/%L/%V = 选中项路径 / %1/%L/%V = selected path
+# icon = ""                      # 留空自动取目标程序图标 / empty = target program's icon
+# hidden_console = false         # 隐藏控制台窗口（py/bat 类） / hide the console window
+# working_dir = ""               # 留空 = 选中项所在目录 / empty = the selection's folder
+#
+
 # -- 设置 / Settings --
 # 每次显示控制面板时在后台检查一次 GitHub Releases 的新版本（每分钟最多一次；托盘菜单与设置中的手动检查不受此开关限制）；确认后自动下载、校验并重启更新 / Check GitHub Releases in the background each time the control panel is shown (at most once a minute; manual checks from the tray menu or settings ignore this switch); after one confirmation the update downloads, verifies, and restarts automatically
 update_check_enabled = true
