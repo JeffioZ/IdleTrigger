@@ -1505,11 +1505,21 @@ fn settings_toggle_keeps_neighbor_field_text() {
         eprintln!("ink before: {before}");
         assert!(before > 0, "battery field has no initial text ink");
 
-        // BM_CLICK rides the exact real-click path (state dance, focus,
-        // WM_COMMAND -> handle_click -> toggle + flight + dependents).
-        for (step, id) in [("pause-on", 177), ("keep-screen", 111), ("pause-off", 177)] {
+        // Switch rows accept pointer clicks only in the right-hand pill.
+        // BM_CLICK synthesizes a press outside that column and starts a
+        // caption drag instead, so exercise the actual pill coordinates.
+        let click_switch = |id| {
             let button = GetDlgItem(Some(settings), id).unwrap();
-            SendMessageW(button, BM_CLICK, None, None);
+            let mut rect = RECT::default();
+            GetClientRect(button, &mut rect).unwrap();
+            let x = rect.right - crate::scale_pub(20);
+            let y = rect.bottom / 2;
+            let point = LPARAM(((y as isize) << 16) | x as isize);
+            SendMessageW(button, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(point));
+            SendMessageW(button, WM_LBUTTONUP, Some(WPARAM(0)), Some(point));
+        };
+        for (step, id) in [("pause-on", 177), ("keep-screen", 111), ("pause-off", 177)] {
+            click_switch(id);
             pump(400); // outlast the 180ms switch flight and deferred work
             let after = text_ink_pixels(battery);
             let mut probe = [0u16; 32];
@@ -1561,8 +1571,7 @@ fn settings_toggle_keeps_neighbor_field_text() {
             hits
         };
         for (step, expected_enabled) in [("battery-on", true), ("battery-off", false)] {
-            let button = GetDlgItem(Some(settings), 112).unwrap(); // ID_BATTERY_ALLOWED
-            SendMessageW(button, BM_CLICK, None, None);
+            click_switch(112); // ID_BATTERY_ALLOWED
             pump(400);
             let enabled =
                 windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(battery).as_bool();
