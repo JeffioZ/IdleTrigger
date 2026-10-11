@@ -34,6 +34,13 @@ static REQUEST_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// Window/configuration work belongs to the UI thread. A timed-out queued
 /// request is discarded before it can mutate anything.
 fn dispatch(request: String) -> String {
+    // Context-menu verbs answer on the pipe server thread: copy requests
+    // only collect here (the UI thread flushes after the burst), so a
+    // multi-select burst never queues behind window work.
+    if request.starts_with("ctx:") {
+        return crate::ctxexec::handle_ipc(&request)
+            .unwrap_or_else(|| "err: unknown ctx request".into());
+    }
     let hidden = crate::hwnd(&crate::HIDDEN);
     if hidden.is_invalid() {
         // Posting to a null HWND lands in this thread's queue, where the

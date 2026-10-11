@@ -175,6 +175,7 @@ pub(crate) fn commit_config(
     // Rule publication is inside the writer boundary, preventing a later
     // reload from being overwritten by an older save's publication.
     crate::automation::reload_rules();
+    crate::ctxexec::reload_rules();
     drop(writer);
     // "Off" always means off: a save that turned the Stay Awake switch off —
     // a direct toggle or the monitor's mutual exclusion — also drops the
@@ -212,4 +213,23 @@ pub(crate) fn save_automation_rules(
             }
         })
     })
+}
+
+/// Saves the context-menu rule list and resyncs the registry verbs; rule
+/// publication itself happens inside commit_config like automation's.
+pub(crate) fn save_ctx_rules(
+    base: &[idletrigger_core::ctx_menu::CtxRule],
+    rules: &[idletrigger_core::ctx_menu::CtxRule],
+) -> Result<(), String> {
+    commit_config(|_, doc| {
+        idletrigger_core::ctx_menu::update_rules(doc, base, rules).map_err(|err| {
+            if err == "ctx_rules_changed_external" {
+                crate::t_pub("ctx_changed_external")
+            } else {
+                crate::t_args("ctx_save_failed", &[&err])
+            }
+        })
+    })?;
+    crate::ctxmenu::sync("rules");
+    Ok(())
 }
