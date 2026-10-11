@@ -177,6 +177,14 @@ pub(crate) fn manual_check() {
 /// round answers it; up-to-date and failure answers arrive via the existing
 /// feedback and error boxes.
 pub(crate) fn manual_check_prompting() {
+    // Only a live check round drains the prompt flag. BUSY held by an apply
+    // (Downloading) has no round that would ever answer it — a latched flag
+    // would leak into a later, unrelated check popping a stale dialog — so
+    // the request is dropped instead: the download already in flight is the
+    // answer.
+    if is_busy() && !matches!(&*lock(&PHASE), Phase::Checking) {
+        return;
+    }
     PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
     manual_check();
 }
@@ -205,11 +213,10 @@ fn spawn_check(manual: bool) {
 }
 
 /// The panel link was confirmed: download (if needed), apply and request the
-/// exit. Runs the whole tail on a worker; failures surface via `take_error`.
+/// exit. Runs the whole tail on a worker; a confirm landing while a check
+/// round is mid-flight waits that round out (see `apply_flow`) instead of
+/// vanishing. Failures surface via `take_error`.
 pub(crate) fn begin_update() {
-    if is_busy() {
-        return;
-    }
     let Some(version) = pending_update_version() else {
         return;
     };
@@ -300,13 +307,43 @@ fn run_check(manual: bool) {
     notify_ui(true);
 }
 
+/// Bounded patient acquisition of the BUSY gate for a confirmed apply. The
+/// only realistic competitor is one check round, whose WinHTTP timeouts sum
+/// to roughly 23 seconds; 30 seconds of polling covers it with margin.
+fn acquire_busy_for_apply() -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while BUSY.swap(true, Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
 /// Download (unless already staged), verify and request the exit. One confirm
-/// covers the whole tail — no second click before the restart.
+/// covers the whole tail — no second click before the restart. A confirm that
+/// lands while a check round is still mid-flight waits for that round; if it
+/// withdraws the offer while we waited, the apply exits without touching
+/// anything.
 fn apply_flow(version: String) {
-    if BUSY.swap(true, Ordering::SeqCst) {
+    if !acquire_busy_for_apply() {
+        crate::log_line("self-update: the busy gate never freed; the confirmed update was dropped");
         return;
     }
     let _reset = BusyGuard;
+
+    // The offer may have been withdrawn by the round we waited out; the
+    // confirm only counts while the phase still presents this version.
+    match &*lock(&PHASE) {
+        Phase::Available(offered) | Phase::Ready(offered) if offered == &version => {}
+        _ => {
+            crate::log_line(&format!(
+                "self-update: {version} is no longer offered; the confirmed apply was skipped"
+            ));
+            return;
+        }
+    }
 
     let outcome = (|| -> Result<(), String> {
         if lock(&PHASE).clone() != Phase::Ready(version.clone()) {
@@ -510,20 +547,21 @@ fn classify_api_rejection(
 }
 
 fn describe_api_rejection(status: u16, rejection: &ApiRejection) -> String {
-    match rejection {
-        ApiRejection::RateLimit { minutes } if *minutes > 0 => {
-            crate::t_args("update_err_rate_limit", &[&minutes.to_string()])
-        }
-        ApiRejection::RetryAfter { minutes } if *minutes > 0 => {
-            crate::t_args("update_err_secondary_limit", &[&minutes.to_string()])
-        }
-        // The zero-minute guards fall through here too: a reset that already
-        // passed reads as a plain rejection with the original status code.
-        _ => t_http_error(match rejection {
-            ApiRejection::Status(code) => *code,
-            _ => status,
-        }),
+    // Both limit tiers share one wording (primary reset and secondary
+    // retry-after read identically to the user).
+    let minutes = match rejection {
+        ApiRejection::RateLimit { minutes } | ApiRejection::RetryAfter { minutes } => *minutes,
+        ApiRejection::Status(_) => 0,
+    };
+    if minutes > 0 {
+        return crate::t_args("update_err_rate_limit", &[&minutes.to_string()]);
     }
+    // A reset that already passed reads as a plain rejection with the
+    // original status code.
+    t_http_error(match rejection {
+        ApiRejection::Status(code) => *code,
+        _ => status,
+    })
 }
 
 fn t_http_error(status: u16) -> String {
@@ -968,7 +1006,11 @@ fn apply_ready_update() -> Result<(), String> {
 /// Stages the new EXE beside the running one and atomically replaces via
 /// `File.Replace`, re-verifying the digest inside the script before the swap.
 /// `File.Replace` fails while the running EXE locks the target, hence the
-/// bounded retry loop instead of an unconditional rename.
+/// bounded retry loop instead of an unconditional rename. Every failure path
+/// relaunches the executable at `$dst` (rolled back or intact) — the old
+/// process already exited on the script's behalf, so a failed round must not
+/// leave the machine without a running app; the sole exception is an updated
+/// build still alive when its startup confirmation times out.
 fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> String {
     let ps_quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
     format!(
@@ -1009,8 +1051,11 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
            $failure | Out-File -LiteralPath (Join-Path (Split-Path -Parent $src) '{REPLACE_ERROR_LOG}') -Encoding utf8\n\
            if ($replaced -and ($null -eq $process -or $process.HasExited) -and (Test-Path -LiteralPath $old)) {{\n\
              if (Test-Path -LiteralPath $dst) {{ [System.IO.File]::Replace($old, $dst, $null, $true) }} else {{ Move-Item -LiteralPath $old -Destination $dst -Force }}\n\
-             Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -WindowStyle Hidden\n\
            }} elseif ((-not (Test-Path -LiteralPath $dst)) -and (Test-Path -LiteralPath $old)) {{ Copy-Item -LiteralPath $old -Destination $dst -Force }}\n\
+           $updatedAlive = $replaced -and $null -ne $process -and -not $process.HasExited\n\
+           if (-not $updatedAlive -and (Test-Path -LiteralPath $dst)) {{\n\
+             Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -WindowStyle Hidden\n\
+           }}\n\
            exit 1\n\
          }} finally {{\n\
            if (Test-Path -LiteralPath $new) {{ Remove-Item -LiteralPath $new -Force }}\n\
@@ -1046,6 +1091,10 @@ pub(crate) fn cleanup_on_startup() {
         crate::log_line(&format!(
             "self-update: the previous replace script failed (old version restored or kept for retry):\n{error}"
         ));
+        // The relaunched app comes up silently (rolled back or intact), so
+        // the trail is surfaced once here — without it a failed round leaves
+        // no user-visible trace beyond the panel still offering the update.
+        crate::warn_dialog("", &crate::t_args("update_rollback_notice", &[&error]));
     }
     let part = part_path();
     if part.exists() {
@@ -1053,9 +1102,16 @@ pub(crate) fn cleanup_on_startup() {
         let _ = std::fs::remove_file(&part);
     }
     // A crash between the writability probe's write and remove leaves this
-    // marker file beside the EXE; reclaim it with the other leftovers.
+    // marker file beside the EXE; a hard-killed replace script equally never
+    // reaches its finally, stranding the copied candidate. Reclaim both with
+    // the other leftovers — after any successful swap the candidate is gone,
+    // so a leftover here is always junk (the staged original lives on in the
+    // update folder until its own cleanup).
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe.with_file_name(".idletrigger-update-probe"));
+        let mut leftover = exe.into_os_string();
+        leftover.push(".new");
+        let _ = std::fs::remove_file(PathBuf::from(leftover));
     }
     let exe_old = std::env::current_exe().ok().map(|exe| {
         let mut old = exe.into_os_string();
@@ -1352,7 +1408,7 @@ fn query_headers_block(
     unsafe {
         let mut buffer = vec![0u16; 16 * 1024];
         let mut size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
-        WinHttpQueryHeaders(
+        if WinHttpQueryHeaders(
             request,
             WINHTTP_QUERY_RAW_HEADERS_CRLF,
             PCWSTR::null(),
@@ -1360,7 +1416,26 @@ fn query_headers_block(
             &mut size,
             std::ptr::null_mut(),
         )
-        .map_err(|error| network_error(error.to_string()))?;
+        .is_err()
+        {
+            // Proxy chains can pad the block past the 16K default; the failed
+            // query reports the required size — retry once, memory-bounded.
+            let needed = (size as usize).div_ceil(std::mem::size_of::<u16>());
+            if needed <= buffer.len() || needed > 256 * 1024 {
+                return Err(network_error("WinHttpQueryHeaders failed".into()));
+            }
+            buffer = vec![0u16; needed];
+            size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
+            WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                PCWSTR::null(),
+                Some(buffer.as_mut_ptr().cast()),
+                &mut size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|error| network_error(error.to_string()))?;
+        }
         let text = String::from_utf16_lossy(&buffer);
         let mut headers = Vec::new();
         for line in text.split("\r\n") {
@@ -1726,6 +1801,11 @@ mod tests {
         assert!(script.contains("Start-Process -FilePath $dst"));
         assert!(script.contains(REPLACE_ERROR_LOG));
         assert!(!script.contains("Move-Item -LiteralPath $dst -Destination $old"));
+        // The failure path relaunches whatever $dst holds — a failed round
+        // must never leave the app down — except an updated build that is
+        // still alive (startup-confirmation timeout keeps it running).
+        assert!(script.contains("$updatedAlive"));
+        assert_eq!(script.matches("Start-Process -FilePath $dst").count(), 2);
     }
 
     #[test]

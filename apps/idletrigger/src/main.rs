@@ -3713,7 +3713,7 @@ fn on_toggle(code: usize) {
 }
 
 /// Keep warnings modal to this thread's active window when one exists.
-fn warn_dialog(heading: &str, body: &str) {
+pub(crate) fn warn_dialog(heading: &str, body: &str) {
     let text = match (heading.is_empty(), body.is_empty()) {
         (true, _) => body.to_string(),
         (_, true) => heading.to_string(),
