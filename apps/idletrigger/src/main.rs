@@ -238,6 +238,7 @@ mod choice;
 mod ctx_ui;
 mod ctxexec;
 mod ctxmenu;
+mod ctxselection;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod display;
@@ -550,6 +551,13 @@ fn main() {
         }
     }));
     let mut start_minimized = false;
+    // COM activation must precede both CLI parsing and the tray mutex.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "ctx-selection")
+    {
+        std::process::exit(ctxselection::run());
+    }
     let mut startup_delay = 0u64;
     let mut cli_args: Vec<String> = Vec::new();
     let mut ctx_args: Vec<std::ffi::OsString> = Vec::new();

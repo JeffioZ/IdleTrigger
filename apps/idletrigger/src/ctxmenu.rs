@@ -1,8 +1,7 @@
 //! Registry sync engine for the Explorer context-menu integration.
 //!
-//! Every key this module owns sits under `HKCU\Software\Classes\<root>\shell`
-//! and starts with the `IdleTrigger` verb prefix, so a prefix scan is the
-//! complete ownership set: sync computes the desired key/value map from the
+//! Owned keys are prefixed verbs/cascades plus the six fixed copy-handler
+//! CLSIDs under HKCU\Software\Classes. Sync computes the desired map from
 //! live configuration, deletes stale owned keys, and rewrites changed ones.
 //! Nothing here ever touches keys owned by other software.
 
@@ -434,6 +433,19 @@ fn build_entries(
     }
     let app_icon = format!("{exe},-1");
     if copy {
+        for index in 0..crate::ctxselection::FORMATS.len() {
+            let class = format!(
+                "{CLASSES}\\CLSID\\{}",
+                crate::ctxselection::class_name(index)
+            );
+            let mut values = ValueMap::new();
+            text_value(&mut values, None, "IdleTrigger copy selection");
+            desired.insert(class.clone(), values);
+            let mut server = ValueMap::new();
+            text_value(&mut server, None, format!("\"{exe}\" ctx-selection"));
+            text_value(&mut server, Some("ServerExecutable"), exe);
+            desired.insert(format!("{class}\\LocalServer32"), server);
+        }
         for root in COPY_ROOTS {
             let placeholder = if root == "Directory\\Background" {
                 "%V"
@@ -444,7 +456,7 @@ fn build_entries(
             let mut values = ValueMap::new();
             text_value(&mut values, None, crate::t("ctx_menu_copy_title"));
             text_value(&mut values, Some("Icon"), &app_icon);
-            text_value(&mut values, Some("MultiSelectModel"), "Single");
+            text_value(&mut values, Some("MultiSelectModel"), "Player");
             text_value(
                 &mut values,
                 Some("ExtendedSubCommandsKey"),
@@ -461,10 +473,7 @@ fn build_entries(
                 let mut values = ValueMap::new();
                 text_value(&mut values, None, crate::t(key));
                 text_value(&mut values, Some("Icon"), &app_icon);
-                // Static verbs cannot identify selection batches. Copy is
-                // deliberately single-selection until a real selection
-                // handler can provide a complete IShellItemArray.
-                text_value(&mut values, Some("MultiSelectModel"), "Single");
+                text_value(&mut values, Some("MultiSelectModel"), "Player");
                 if *format == core_ctx::COPY_FORMAT_TARGET {
                     text_value(
                         &mut values,
@@ -487,6 +496,19 @@ fn build_entries(
                     // trailing slash from escaping the argument's quote.
                     format!("\"{exe}\" ctx copy {format} \"{placeholder}|\""),
                 );
+                // Background verbs retain %V; file/drive verbs receive the
+                // complete IShellItemArray in one out-of-process COM call.
+                if root != "Directory\\Background" {
+                    let class_index = crate::ctxselection::FORMATS
+                        .iter()
+                        .position(|candidate| candidate == format)
+                        .expect("known copy format");
+                    text_value(
+                        &mut command,
+                        Some("DelegateExecute"),
+                        crate::ctxselection::class_name(class_index),
+                    );
+                }
                 desired.insert(format!("{child}\\command"), command);
             }
         }
@@ -574,9 +596,18 @@ fn collect_tree(path: String, keys: &mut Vec<String>) {
     keys.push(path);
 }
 
-/// Enumerate only our verbs and our two cascade containers, children first.
+/// Enumerate only our verbs, cascade containers and fixed COM classes.
 fn owned_keys() -> Vec<String> {
     let mut owned = Vec::new();
+    for index in 0..crate::ctxselection::FORMATS.len() {
+        let path = format!(
+            "{CLASSES}\\CLSID\\{}",
+            crate::ctxselection::class_name(index)
+        );
+        if key_exists(&path) {
+            collect_tree(path, &mut owned);
+        }
+    }
     for root in ALL_ROOTS {
         let shell = format!("{CLASSES}\\{root}\\shell");
         for name in subkeys(&shell) {
@@ -606,6 +637,8 @@ fn current_values(path: &str) -> ValueMap {
         Some("ExtendedSubCommandsKey"),
         Some("MUIVerb"),
         Some("MultiSelectModel"),
+        Some("DelegateExecute"),
+        Some("ServerExecutable"),
     ] {
         if let Some(value) = read_sz(path, name) {
             text_value(&mut values, name, value);
@@ -634,9 +667,20 @@ pub fn sync(reason: &str) -> (bool, usize) {
         }
     };
     let mut failed = false;
+    let mut changed = false;
     // Publish children/commands before removing stale keys. A failed write
     // must not remove the previous working menu.
-    for (path, values) in desired.iter().rev() {
+    let is_class = |path: &String| path.starts_with(&format!("{CLASSES}\\CLSID\\"));
+    // Make COM activation available before publishing DelegateExecute verbs.
+    let entries = desired
+        .iter()
+        .rev()
+        .filter(|(path, _)| is_class(path))
+        .chain(desired.iter().rev().filter(|(path, _)| !is_class(path)));
+    for (path, values) in entries {
+        if failed && !is_class(path) {
+            break;
+        }
         let current = current_values(path);
         for (name, value) in values {
             if current.get(name) == Some(value) {
@@ -647,16 +691,31 @@ pub fn sync(reason: &str) -> (bool, usize) {
                 RegistryValue::Dword(value) => write_dword(path, name.as_deref(), *value),
             };
             failed |= !written;
+            changed |= written;
         }
         for name in current.keys().filter(|name| !values.contains_key(*name)) {
-            failed |= !delete_value(path, name.as_deref().unwrap_or(""));
+            let removed = delete_value(path, name.as_deref().unwrap_or(""));
+            failed |= !removed;
+            changed |= removed;
         }
     }
     if !failed {
         for path in owned_keys() {
             if !contains_registry_path(&desired, &path) {
-                failed |= !delete_tree(&path);
+                let removed = delete_tree(&path);
+                failed |= !removed;
+                changed |= removed;
             }
+        }
+    }
+    if changed {
+        unsafe {
+            windows::Win32::UI::Shell::SHChangeNotify(
+                windows::Win32::UI::Shell::SHCNE_ASSOCCHANGED,
+                windows::Win32::UI::Shell::SHCNF_IDLIST,
+                None,
+                None,
+            );
         }
     }
     crate::log_line(&format!("ctx sync ({reason}): failed={failed}"));
@@ -1161,15 +1220,29 @@ mod tests {
     }
 
     #[test]
-    fn copy_entries_declare_single_selection_and_stable_group_order() {
+    fn copy_entries_delegate_complete_selections_and_preserve_background_commands() {
         let map = build_entries(true, true, false, "app.exe", &[]);
         for (path, values) in &map {
             if path.contains("\\shell\\00") && !path.ends_with("\\command") {
                 assert_eq!(
                     values[&Some("MultiSelectModel".into())],
-                    RegistryValue::Text("Single".into())
+                    RegistryValue::Text("Player".into())
                 );
             }
+            if path.ends_with("\\command") {
+                assert_eq!(
+                    values.contains_key(&Some("DelegateExecute".into())),
+                    !path.contains("Directory\\Background")
+                );
+            }
+        }
+        for index in 0..crate::ctxselection::FORMATS.len() {
+            let class = crate::ctxselection::class_name(index);
+            let server = &map[&format!("{CLASSES}\\CLSID\\{class}\\LocalServer32")];
+            assert_eq!(
+                server[&None],
+                RegistryValue::Text("\"app.exe\" ctx-selection".into())
+            );
         }
         assert!(
             !map.keys()

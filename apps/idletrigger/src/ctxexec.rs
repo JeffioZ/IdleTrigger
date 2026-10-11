@@ -23,6 +23,8 @@ use crate::wide;
 
 /// IPC message arm prefix, kept in sync with `ipc::dispatch`.
 const IPC_PREFIX: &str = "ctx:";
+const COPY_SETTINGS_REQUEST: &str = "ctx:copy-settings";
+const COPY_SETTINGS_REPLY: &str = "ok ctx-settings:";
 
 /// The rule list published by every config commit (mirrors how automation
 /// rules are reloaded from the document inside the writer boundary).
@@ -247,6 +249,45 @@ fn local_copy_settings() -> (String, String) {
     (config.ctx_copy_quote, config.ctx_copy_separator)
 }
 
+fn selection_copy_settings() -> Option<(String, String)> {
+    let reply = crate::ipc::send(COPY_SETTINGS_REQUEST);
+    copy_settings_reply(reply.as_deref(), || {
+        // No reply can also mean a busy pipe or a tray that is still starting.
+        // Fall back only after checking both current and legacy singletons.
+        match crate::single_instance::running() {
+            Ok(false) => Some(local_copy_settings()),
+            _ => None,
+        }
+    })
+}
+
+fn copy_settings_reply(
+    reply: Option<&str>,
+    without_tray: impl FnOnce() -> Option<(String, String)>,
+) -> Option<(String, String)> {
+    let Some(reply) = reply else {
+        return without_tray();
+    };
+    let (quote, separator) = reply.strip_prefix(COPY_SETTINGS_REPLY)?.split_once(':')?;
+    if !matches!(quote, "auto" | "always" | "none") || !matches!(separator, "newline" | "space") {
+        return None;
+    }
+    Some((quote.into(), separator.into()))
+}
+
+/// A complete Shell selection is formatted before opening the clipboard.
+/// Never send individual paths through IPC: that would lose batch identity.
+pub(crate) fn copy_selection(format: &str, paths: &[String]) -> bool {
+    if paths.is_empty() || !valid_copy_format(format) {
+        return false;
+    }
+    let Some((quote, separator)) = selection_copy_settings() else {
+        return false;
+    };
+    let values: Vec<_> = paths.iter().map(|path| formatted(format, path)).collect();
+    copy_to_clipboard(&core_ctx::format_paths(&values, &quote, &separator))
+}
+
 /// Registry entry point. Failure is visible and returns nonzero; an
 /// ambiguous IPC reply is never replayed locally.
 pub fn run_ctx(args: &[OsString]) -> i32 {
@@ -327,6 +368,14 @@ fn local_rule(id: &str) -> Option<core_ctx::CtxRule> {
 /// IPC fast path: called on the pipe server thread before the UI queue, so
 /// per-item copy bursts never wait behind window work.
 pub(crate) fn handle_ipc(request: &str) -> Option<String> {
+    if request == COPY_SETTINGS_REQUEST {
+        return Some(crate::cfg_map(|config| {
+            format!(
+                "{COPY_SETTINGS_REPLY}{}:{}",
+                config.ctx_copy_quote, config.ctx_copy_separator
+            )
+        }));
+    }
     let rest = request.strip_prefix(IPC_PREFIX)?;
     match rest.split_once(':') {
         Some(("copy", tail)) => {
@@ -430,6 +479,37 @@ pub(crate) fn spawn_rule(rule: &core_ctx::CtxRule, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_settings_use_runtime_snapshot_and_never_mask_ipc_errors() {
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let old = crate::runtime::lock(&crate::CONFIG).replace(idletrigger_core::config::Config {
+            ctx_copy_quote: "none".into(),
+            ctx_copy_separator: "space".into(),
+            ..Default::default()
+        });
+        let reply = handle_ipc(COPY_SETTINGS_REQUEST).unwrap();
+        *crate::runtime::lock(&crate::CONFIG) = old;
+        let must_not_read_disk = || panic!("connected instance must not fall back to disk");
+        assert_eq!(
+            copy_settings_reply(Some(&reply), must_not_read_disk),
+            Some(("none".into(), "space".into()))
+        );
+        for reply in [
+            "err: IPC response unavailable",
+            "err: unknown ctx request",
+            "ok ctx-settings:none:bogus",
+            "ok ctx-settings:bogus:newline",
+            "",
+        ] {
+            assert!(copy_settings_reply(Some(reply), must_not_read_disk).is_none());
+        }
+        assert_eq!(
+            copy_settings_reply(None, || Some(("always".into(), "newline".into()))),
+            Some(("always".into(), "newline".into()))
+        );
+        assert!(copy_settings_reply(None, || None).is_none());
+    }
 
     #[test]
     fn percent_roundtrip_keeps_spaces_and_trailing_tabs() {

@@ -490,7 +490,7 @@
   "ctx_conflict_nilesoft": "Nilesoft Shell",
   "ctx_conflict_openxx": "Open++",
   "tip_ctx_enabled": "After saving, add the enabled copy features and custom rules to File Explorer. Turn this off and save to remove entries added by IdleTrigger",
-  "tip_ctx_copy": "Copy one selected item: full path, shortcut target, parent folder, file name, stem, or extension. Multi-selection is not supported.",
+  "tip_ctx_copy": "Copy selected files or folders: full paths, shortcut targets, parent folders, file names, stems, or extensions. Multiple items are supported, one per line by default.",
   "tip_ctx_quote": "Quoting policy for copied paths",
   "tip_ctx_sep": "How multiple selected paths join on the clipboard",
   "tip_ctx_win11": "Switch to the Windows 11 classic context menu immediately and restart File Explorer. Entries available only in the modern menu may no longer appear",

@@ -1,7 +1,11 @@
 //! One resident application per Windows session, independent of EXE path.
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE,
+};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows::Win32::System::Threading::{CreateEventW, CreateMutexW};
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, OpenEventW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE,
+};
 use windows::core::PCWSTR;
 
 pub struct Guard(Vec<HANDLE>);
@@ -20,6 +24,40 @@ pub fn acquire() -> Result<Option<Guard>, String> {
         &format!("Local\\IdleTrigger-{session}"),
         "Local\\IdleTriggerSingleton",
     )
+}
+
+/// Read-only presence check: a busy or inaccessible pipe is not proof that
+/// the tray is absent. Do not create singleton objects in a copy helper.
+pub(crate) fn running() -> Result<bool, String> {
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }.map_err(|e| e.to_string())?;
+    running_named(
+        &format!("Local\\IdleTrigger-{session}"),
+        "Local\\IdleTriggerSingleton",
+    )
+}
+
+fn running_named(mutex: &str, legacy_event: &str) -> Result<bool, String> {
+    for (name, is_mutex) in [(mutex, true), (legacy_event, false)] {
+        let name = crate::wide(name);
+        let result = unsafe {
+            if is_mutex {
+                OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr()))
+            } else {
+                OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr()))
+            }
+        };
+        match result {
+            Ok(handle) => {
+                let _ = unsafe { CloseHandle(handle) };
+                return Ok(true);
+            }
+            Err(err)
+                if err.code() == windows::core::HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0) => {}
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Ok(false)
 }
 
 fn acquire_named(mutex: &str, legacy_event: &str) -> Result<Option<Guard>, String> {
@@ -56,15 +94,18 @@ mod tests {
         let event = format!("Local\\IdleTrigger-event-test-{}", std::process::id());
         let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
         let old = unsafe { CreateMutexW(None, false, PCWSTR(wide(&mutex).as_ptr())) }.unwrap();
+        assert!(running_named(&mutex, &event).unwrap());
         assert!(acquire_named(&mutex, &event).unwrap().is_none());
         unsafe { CloseHandle(old) }.unwrap();
         let old =
             unsafe { CreateEventW(None, true, false, PCWSTR(wide(&event).as_ptr())) }.unwrap();
+        assert!(running_named(&mutex, &event).unwrap());
         assert!(acquire_named(&mutex, &event).unwrap().is_none());
         unsafe { CloseHandle(old) }.unwrap();
         let guard = acquire_named(&mutex, &event).unwrap().unwrap();
         assert!(acquire_named(&mutex, &event).unwrap().is_none());
         drop(guard);
+        assert!(!running_named(&mutex, &event).unwrap());
         assert!(acquire_named(&mutex, &event).unwrap().is_some());
         assert!(acquire_named("invalid\0name", &event).is_err());
     }
