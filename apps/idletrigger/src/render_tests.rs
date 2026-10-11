@@ -1004,16 +1004,11 @@ fn interactive_controls_react_to_every_state() {
     let panel = hwnd(&PANEL);
     show_panel();
     pump(30);
-    unsafe {
-        // The armed-only cancel links join the audit.
-        for id in [IDC_NOSLEEP_TIMED_CANCEL, IDC_THEME_SNOOZE_CANCEL] {
-            let _ = ShowWindow(
-                GetDlgItem(Some(panel), id as i32).unwrap_or_default(),
-                SW_SHOW,
-            );
-        }
-        pump(10);
-    }
+    // Use real runtime state: a queued status refresh correctly hides
+    // unarmed cancel links, undoing a test-only ShowWindow.
+    theme_engine::snooze(30);
+    set_timed_nosleep(1800, false);
+    pump(30);
     let ids = [
         IDC_NOSLEEP,
         IDC_IDLE,
@@ -1031,6 +1026,7 @@ fn interactive_controls_react_to_every_state() {
         IDC_NOSLEEP_TIMED_CANCEL,
         IDC_THEME_SNOOZE_CANCEL,
         IDC_SETTINGS_BUTTON,
+        IDC_CTX_BUTTON,
         IDC_EXIT_BUTTON,
     ];
     unsafe {
@@ -1065,6 +1061,10 @@ fn interactive_controls_react_to_every_state() {
                 failures.push(format!("{id}: missing"));
                 continue;
             };
+            assert!(
+                IsWindowVisible(ctl).as_bool(),
+                "{id}: not visible for state audit"
+            );
             let rest = signature(ctl);
             // Hover.
             let _ = SendMessageW(
@@ -1119,6 +1119,8 @@ fn interactive_controls_react_to_every_state() {
                 failures.push(format!("{id}: keyboard focus is invisible"));
             }
         }
+        clear_timed_nosleep();
+        theme_engine::snooze_cancel();
         tray::remove();
         DestroyWindow(panel).unwrap();
         DestroyWindow(hwnd(&HIDDEN)).unwrap();
@@ -1501,6 +1503,7 @@ fn settings_toggle_keeps_neighbor_field_text() {
         );
         let before = text_ink_pixels(battery);
         eprintln!("ink before: {before}");
+        assert!(before > 0, "battery field has no initial text ink");
 
         // BM_CLICK rides the exact real-click path (state dance, focus,
         // WM_COMMAND -> handle_click -> toggle + flight + dependents).
@@ -1516,10 +1519,14 @@ fn settings_toggle_keeps_neighbor_field_text() {
                 String::from_utf16_lossy(&probe[..n.max(0) as usize]),
                 windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(battery).as_bool()
             );
+            // Disabled text has fewer dark pixels than enabled text. Compare
+            // with its own unchanged-state baseline, not an enabled-style
+            // absolute pixel count (which also depends on font/DPI).
             assert!(
-                after >= 30,
-                "battery field lost its text after clicking {step}"
+                after * 100 >= before * 90,
+                "battery field lost its text after clicking {step}: {before} -> {after}"
             );
+            assert_eq!(probe, text, "{step} changed the threshold value");
         }
 
         // The threshold follows the allowance switch. Both transitions
