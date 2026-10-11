@@ -117,6 +117,7 @@ struct ListState {
     painted: Cell<(i32, i32, i32, bool)>,
     lane: Cell<i32>,
     redraw: Cell<bool>,
+    row_height: Cell<i32>,
 }
 struct BarState {
     list: HWND,
@@ -167,6 +168,18 @@ pub fn set_lane_card(list: HWND, card: HWND) {
             existing.1 = key.1;
         } else {
             lanes.push(key);
+        }
+    }
+}
+
+/// Logical row height for a listbox; retained across DPI and theme refreshes.
+pub fn set_row_height(list: HWND, height: i32) {
+    unsafe {
+        let mut data = 0;
+        if GetWindowSubclass(list, Some(list_proc), SUBCLASS, Some(&mut data)).as_bool() {
+            let state = &*(data as *const ListState);
+            state.row_height.set(height.max(30));
+            sync(list, state);
         }
     }
 }
@@ -608,6 +621,7 @@ pub fn install(list: HWND) {
             painted: Cell::new((0, 0, 0, false)),
             lane: Cell::new(0),
             redraw: Cell::new(true),
+            row_height: Cell::new(30),
         }));
         if !SetWindowSubclass(list, Some(list_proc), SUBCLASS, state as usize).as_bool() {
             drop(Box::from_raw(state));
@@ -727,7 +741,7 @@ unsafe fn sync(list: HWND, state: &ListState) {
             // reads as an empty line once scrolled to the bottom. Applied
             // here via LB_SETITEMHEIGHT (sizes have settled); WM_MEASUREITEM
             // alone fires too early, while the client rect is still empty.
-            let design = px(list, 30);
+            let design = px(list, state.row_height.get());
             if client.bottom >= design {
                 let rows = ((client.bottom as f64) / design as f64).round().max(1.0) as i32;
                 let fill = (client.bottom / rows).clamp(design - 4, design + 4);

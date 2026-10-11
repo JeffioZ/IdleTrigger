@@ -18,11 +18,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, CreateWindowExW, DefWindowProcW, GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetDlgItem,
     GetWindow, GetWindowRect, GetWindowTextW, IDC_ARROW, IsWindowVisible, LBN_DBLCLK,
-    LBN_SELCHANGE, LoadCursorW, MB_ICONQUESTION, MB_YESNO, MessageBoxW, RegisterClassW, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST, WM_SETFONT, WNDCLASSW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
+    LBN_SELCHANGE, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
+    RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST,
+    WM_SETFONT, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{HMENU, IDYES, SendMessageW, SetWindowTextW};
 use windows::core::PCWSTR;
@@ -74,6 +74,8 @@ const ID_WORK_L: usize = 731;
 pub const FIELD_WORK: usize = 732;
 const ID_PREVIEW: usize = 733;
 const ID_STATUS: usize = 734;
+pub const ID_WORK_B: usize = 735;
+const ID_DETAILS: usize = 736;
 static RULE_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Tooltip anchors for the manager's form fields.
@@ -431,6 +433,8 @@ pub fn refresh_language() {
     }
     set_text(ID_PROG_B, &crate::t_pub("ctx_field_browse"));
     set_text(ID_ICON_B, &crate::t_pub("ctx_field_browse"));
+    set_text(ID_WORK_B, &crate::t_pub("ctx_field_browse"));
+    set_text(ID_DETAILS, &crate::t_pub("ctx_details"));
     let title = crate::t_pub("ctx_manager_title");
     unsafe {
         let _ = SetWindowTextW(window, PCWSTR(wide(&title).as_ptr()));
@@ -726,6 +730,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
         );
         LIST_HWND.store(list.0 as isize, Ordering::SeqCst);
         crate::list_style::install(list);
+        crate::list_style::set_row_height(list, 52);
         crate::list_style::set_lane_card(list, surf);
         mk_control(
             window,
@@ -774,10 +779,20 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             ID_VALID,
             CLIENT_W - EDGE - 420,
             FORM_TITLE_Y + 2,
-            420,
+            340,
             LABEL_H,
             label_font(),
         );
+        owner_button(
+            window,
+            ID_DETAILS,
+            "ctx_details",
+            CLIENT_W - EDGE - 72,
+            FORM_TITLE_Y - 2,
+            72,
+            BTN_H,
+        );
+        let _ = ShowWindow(get_dlg_item(window, ID_DETAILS), SW_HIDE);
 
         // Form card hosts every field row below.
         // Card closes 8px under the action row.
@@ -845,7 +860,16 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
         let f4 = field3 + FIELD_H + SLOT_GAP - 2;
         let field4 = f4 + LABEL_H + LABEL_GAP;
         form_label(window, ID_WORK_L, "ctx_working_dir", COL_A, f4, COL_W);
-        form_edit(window, FIELD_WORK, COL_A, field4, COL_W);
+        form_edit(window, FIELD_WORK, COL_A, field4, COL_W - BROWSE_W - 8);
+        owner_button(
+            window,
+            ID_WORK_B,
+            "ctx_field_browse",
+            COL_A + COL_W - BROWSE_W,
+            field4,
+            BROWSE_W,
+            FIELD_H,
+        );
         let enabled = owner_button(
             window,
             ID_ENABLED,
@@ -974,6 +998,28 @@ unsafe extern "system" fn mgr_proc(
                                 windows::Win32::UI::WindowsAndMessaging::MB_OK
                                     | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
                             );
+                            LRESULT(0)
+                        }
+                        ID_DETAILS if code == BN_CLICKED as usize => {
+                            let text = text_of(hwnd, ID_VALID);
+                            if !text.is_empty() {
+                                let body = format!(
+                                    "{}\n\n{}",
+                                    text,
+                                    crate::t_pub("ctx_details_copy_hint")
+                                );
+                                let _ = MessageBoxW(
+                                    Some(hwnd),
+                                    PCWSTR(wide(&body).as_ptr()),
+                                    PCWSTR(wide(&crate::t_pub("ctx_details_title")).as_ptr()),
+                                    MB_OK | MB_ICONINFORMATION,
+                                );
+                            }
+                            LRESULT(0)
+                        }
+                        ID_WORK_B if code == BN_CLICKED as usize => {
+                            browse_for_folder();
+                            refresh_form_buttons();
                             LRESULT(0)
                         }
                         ID_ENABLED if code == BN_CLICKED as usize => {
@@ -1377,23 +1423,39 @@ unsafe fn draw_item_impl(
             let mut row = *bounds;
             row.left += crate::scale_pub(12);
             row.right -= crate::scale_pub(8);
-            crate::paint::draw_label(
-                dc,
-                &row,
-                body_font(),
-                text.as_str(),
-                if selected { p.text } else { p.text2 },
-                true,
-                0,
-                0,
-            );
+            if let Some((title, summary)) = text.split_once('\n') {
+                let middle = (row.top + row.bottom) / 2;
+                let title_box = RECT {
+                    top: row.top + s(3),
+                    bottom: middle,
+                    ..row
+                };
+                let summary_box = RECT {
+                    top: middle,
+                    bottom: row.bottom - s(3),
+                    ..row
+                };
+                crate::paint::draw_label(dc, &title_box, body_font(), title, p.text, true, 0, 0);
+                crate::paint::draw_label(
+                    dc,
+                    &summary_box,
+                    label_font(),
+                    summary,
+                    p.text2,
+                    true,
+                    0,
+                    0,
+                );
+            } else {
+                crate::paint::draw_label(dc, &row, body_font(), &text, p.text2, true, 0, 0);
+            }
             if focused {
                 crate::paint::draw_focus_frame(dc, bounds, p.focus);
             }
         } else if crate::choice::is_choice(item.control) {
             let state = crate::nativeform::control_state(item.control, item.state);
             crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
-        } else if id == ID_MORE || id == ID_PREVIEW {
+        } else if id == ID_MORE || id == ID_PREVIEW || id == ID_DETAILS {
             let label = text_of(mgr(), id);
             let background = if id == ID_PREVIEW {
                 p.surface
@@ -1442,7 +1504,11 @@ unsafe fn draw_item_impl(
         } else {
             let label = text_of(mgr(), id);
             // Buttons riding a card face erase with the card color.
-            let on_card = id == ID_PROG_B || id == ID_ICON_B || id == ID_SAVE || id == ID_DISCARD;
+            let on_card = id == ID_PROG_B
+                || id == ID_ICON_B
+                || id == ID_WORK_B
+                || id == ID_SAVE
+                || id == ID_DISCARD;
             let background = if on_card { p.surface } else { p.window_bg };
             // Save carries the accent fill of a default action (settings and
             // editor footer parity).
@@ -1496,7 +1562,7 @@ fn row_text(rule: &core_ctx::CtxRule) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| rule.command.clone());
     format!(
-        "{}  ·  {}  ·  {}  ·  {}",
+        "{}\n{}  ·  {}  ·  {}",
         if rule.enabled {
             rule.title.clone()
         } else {
@@ -1622,6 +1688,10 @@ fn set_valid(text: &str) {
     set_text(ID_VALID, text);
     let control = get_dlg_item(mgr(), ID_VALID);
     unsafe {
+        let _ = ShowWindow(
+            get_dlg_item(mgr(), ID_DETAILS),
+            if text.is_empty() { SW_HIDE } else { SW_SHOW },
+        );
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
     }
 }
@@ -1667,10 +1737,9 @@ fn load_form() {
     let window = mgr();
     let draft = crate::runtime::lock(&DRAFT).clone();
     let editable = draft.as_ref().is_some_and(|rule| !rule.separator);
-    for id in FIELD_EDITS
-        .into_iter()
-        .chain([ID_SCOPE_C, ID_PROG_B, ID_ICON_B, ID_CONSOLE, ID_PREVIEW])
-    {
+    for id in FIELD_EDITS.into_iter().chain([
+        ID_SCOPE_C, ID_PROG_B, ID_ICON_B, ID_WORK_B, ID_CONSOLE, ID_PREVIEW,
+    ]) {
         unsafe {
             let _ = EnableWindow(get_dlg_item(window, id), editable);
         }
@@ -1991,6 +2060,66 @@ fn move_selected(delta: i32) {
     selection_changed();
 }
 
+fn browse_for_folder() {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+        IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+    };
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+    let picked = (|| -> windows::core::Result<Option<String>> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let _apartment = Apartment;
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetOptions(
+                dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST,
+            )?;
+            dialog.SetTitle(PCWSTR(
+                wide(&crate::t_pub("ctx_browse_work_title")).as_ptr(),
+            ))?;
+            let initial = text_of(mgr(), FIELD_WORK);
+            if !initial.is_empty() {
+                let folder: windows::core::Result<IShellItem> =
+                    SHCreateItemFromParsingName(PCWSTR(wide(&initial).as_ptr()), None);
+                if let Ok(folder) = folder {
+                    let _ = dialog.SetFolder(&folder);
+                }
+            }
+            if let Err(err) = dialog.Show(Some(mgr())) {
+                if err.code()
+                    == windows::core::HRESULT::from_win32(
+                        windows::Win32::Foundation::ERROR_CANCELLED.0,
+                    )
+                {
+                    return Ok(None);
+                }
+                return Err(err);
+            }
+            let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let text = path.to_string();
+            CoTaskMemFree(Some(path.0.cast()));
+            Ok(Some(text?))
+        }
+    })();
+    match picked {
+        Ok(Some(path)) => set_text(FIELD_WORK, &path),
+        Ok(None) => {}
+        Err(err) => set_valid(&crate::t_args("ctx_folder_failed", &[&err.to_string()])),
+    }
+}
+
 fn browse_for_file(edit_id: usize, filter_key: &str) {
     let filters = crate::t_pub(filter_key);
     let mut filter_wide: Vec<u16> = filters
@@ -2070,6 +2199,7 @@ mod tests {
         assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
         assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
         assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_TITLE_E)).as_bool() });
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_WORK_B)).as_bool() });
         *crate::runtime::lock(&DRAFT) = None;
         let rule = core_ctx::CtxRule {
             id: "a".into(),
@@ -2083,6 +2213,33 @@ mod tests {
         render_list();
         select_index(0);
         load_form();
+        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_WORK_B)).as_bool() });
+        // Shared theme refreshes must not collapse this two-line list back
+        // to the default row height used by other native lists.
+        crate::list_style::refresh(list_hwnd());
+        assert!(unsafe {
+            SendMessageW(
+                list_hwnd(),
+                windows::Win32::UI::WindowsAndMessaging::LB_GETITEMHEIGHT,
+                Some(WPARAM(0)),
+                None,
+            )
+            .0 >= s(48) as isize
+        });
+        let details_visible = || unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongW(
+                get_dlg_item(mgr(), ID_DETAILS),
+                windows::Win32::UI::WindowsAndMessaging::GWL_STYLE,
+            ) as u32
+                & WS_VISIBLE.0
+                != 0
+        };
+        let long_message = "long validation message ".repeat(80);
+        set_valid(&long_message);
+        assert_eq!(text_of(mgr(), ID_VALID), long_message);
+        assert!(details_visible());
+        set_valid("");
+        assert!(!details_visible());
         assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
         assert!(!can_append_separator(&[core_ctx::CtxRule {
             separator: true,

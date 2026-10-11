@@ -578,5 +578,10 @@
   "ctx_classic_legacy": "An older IdleTrigger ownership record exists, but the source of the current classic-menu setting cannot be confirmed. Turn off this system setting and restart Explorer? Open Explorer windows may close.",
   "ctx_config_blocked": "Configuration errors prevent menu updates. Fix the configuration and save again.",
   "ctx_restart_failed": "The classic-menu setting was changed, but Explorer restart could not be confirmed. Restart Windows Explorer in Task Manager, or sign out and sign in again.",
-  "ctx_classic_partial": "The classic-menu change could not be completed or safely rolled back. Check the Windows setting before retrying; other menu tools may have changed it."
+  "ctx_classic_partial": "The classic-menu change could not be completed or safely rolled back. Check the Windows setting before retrying; other menu tools may have changed it.",
+  "ctx_browse_work_title": "Choose a working directory",
+  "ctx_details": "Details",
+  "ctx_details_copy_hint": "Press Ctrl+C to copy this dialog.",
+  "ctx_details_title": "Message details",
+  "ctx_folder_failed": "Could not open the folder picker: %s"
 }

@@ -202,7 +202,11 @@ fn status_theme_schedule() -> String {
 /// Every panel tool: control id plus its caption source. Action buttons
 /// describe what they do; only real toggles carry the enabled/disabled
 /// state line.
-const TOOLS: [(usize, TipSource); 30] = [
+const TOOLS: [(usize, TipSource); 31] = [
+    (
+        crate::ctx_ui::ID_WORK_B,
+        TipSource::Key("ctx_browse_work_title"),
+    ),
     (
         crate::ctx_ui::FIELD_WORK,
         TipSource::Key("tip_ctx_working_dir"),
