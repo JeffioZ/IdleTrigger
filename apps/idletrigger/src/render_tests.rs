@@ -1522,9 +1522,8 @@ fn settings_toggle_keeps_neighbor_field_text() {
             );
         }
 
-        // The battery threshold field has no disabled state anymore: it
-        // stays editable regardless of the allowance switch, so no toggle
-        // may ever leave disabled gray (238,242,245) on its interior.
+        // The threshold follows the allowance switch. Both transitions
+        // must repaint the interior without losing the configured value.
         let near = |c: u32, r: u32, g: u32, b: u32, tol: u32| -> bool {
             (c & 0xff).abs_diff(r) <= tol
                 && ((c >> 8) & 0xff).abs_diff(g) <= tol
@@ -1554,18 +1553,26 @@ fn settings_toggle_keeps_neighbor_field_text() {
             let _ = ReleaseDC(None, screen);
             hits
         };
-        for step in ["battery-on", "battery-off"] {
+        for (step, expected_enabled) in [("battery-on", true), ("battery-off", false)] {
             let button = GetDlgItem(Some(settings), 112).unwrap(); // ID_BATTERY_ALLOWED
             SendMessageW(button, BM_CLICK, None, None);
             pump(400);
             let enabled =
                 windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(battery).as_bool();
-            // Light theme: the interior must stay enabled surface white;
-            // disabled gray (238,242,245) means a stale disabled fill.
-            let stale = count_fill(battery, 238, 242, 245);
-            eprintln!("{step}: enabled={enabled} stale_pixels={stale}");
-            assert!(enabled, "battery field must stay editable after {step}");
-            assert!(stale < 50, "{step} left disabled gray on the battery field");
+            let disabled_fill = count_fill(battery, 238, 242, 245);
+            assert_eq!(enabled, expected_enabled, "wrong field state after {step}");
+            if expected_enabled {
+                assert!(disabled_fill < 50, "{step} left disabled gray on the field");
+            } else {
+                assert!(
+                    disabled_fill > 50,
+                    "{step} did not paint the disabled field"
+                );
+            }
+            let mut probe = [0u16; 32];
+            let probe_len = GetWindowTextW(battery, &mut probe);
+            assert_eq!(probe_len, n, "{step} changed the threshold text length");
+            assert_eq!(probe, text, "{step} changed the threshold value");
         }
 
         tray::remove();

@@ -94,13 +94,13 @@ theme_skip_fullscreen = true
 # -- 右键菜单 / Context Menu --
 # 在资源管理器右键菜单中加入「复制路径」子菜单与自定义打开规则；关闭即移除全部注册项 / Adds a copy-path cascade and custom open-with rules to the Explorer context menu; turning it off removes every registered entry
 ctx_menu_enabled = false
-# 显示内置「复制路径」子菜单（完整路径/文件名/所在文件夹） / Show the built-in copy-path cascade (full path / file name / parent folder)
+# 显示内置「复制路径」子菜单（单选；完整路径/快捷方式目标/所在文件夹/文件名/不含扩展名的名称/扩展名） / Single-selection copy cascade: full path, shortcut target, parent, name, stem, extension
 ctx_copy_enabled = true
 # 复制路径引号策略："auto" 含空格才加引号，"always" 始终加，"none" 从不加 / Quote policy: "auto" quotes only paths with spaces, "always" always, "none" never
 ctx_copy_quote = "auto"
-# 多选拼接分隔符："newline" 换行，"space" 空格 / Multi-selection join: "newline" or "space"
+# 兼容保留项；当前复制菜单仅支持单选 / Retained for compatibility; the copy menu currently supports single selection only
 ctx_copy_separator = "newline"
-# 仅 Windows 11：回退为经典右键菜单，让菜单项直接显示在第一层（切换会重启资源管理器） / Windows 11 only: roll back to the classic context menu so entries appear on the first level (switching restarts File Explorer)
+# 仅记录设置窗口中的经典菜单操作；手工改此值不修改系统。请在设置中切换并确认重启 Explorer / Records the last classic-menu action. Editing this value does not change Windows; use Settings and confirm the Explorer restart
 ctx_win11_classic = false
 # 将自定义规则收入「自定义规则」子菜单（分隔线需要此模式；存在分隔线时自动启用） / Group custom rules under one cascade submenu (separators need it; any separator forces it)
 ctx_rules_submenu = false
@@ -112,6 +112,8 @@ ctx_rules_submenu = false
 # [[ctx_rules]]
 # id = "sep-1"
 # separator = true
+# title = ""
+# command = ""
 #
 # [[ctx_rules]]
 # id = "reshack"                 # 唯一标识，程序生成，无需手写 / unique id, generated automatically

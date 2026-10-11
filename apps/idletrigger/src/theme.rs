@@ -374,6 +374,7 @@ fn apply_to_all_with_force(force: bool) {
         crate::hwnd(&crate::ACTION_WARN_HWND),
         crate::hwnd(&crate::LOCK_NOTIFY_HWND),
         crate::settings_ui::theme_hwnd(),
+        crate::ctx_ui::theme_hwnd(),
     ];
     windows.extend(crate::automation_ui::theme_hwnds());
     windows.retain(|hwnd| unsafe {

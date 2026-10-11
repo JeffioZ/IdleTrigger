@@ -64,6 +64,7 @@ pub struct Config {
     pub ctx_copy_separator: String,
     /// Intent behind the Windows 11 classic-menu rollback key; the registry
     /// stays the source of truth for what is actually in effect.
+    /// Last classic-menu action recorded by Settings, not a startup system policy.
     pub ctx_win11_classic: bool,
     /// Group the custom rules under one cascade submenu (required for
     /// separator rows; flat top-level verbs cannot draw separators).

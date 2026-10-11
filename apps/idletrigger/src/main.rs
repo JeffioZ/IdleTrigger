@@ -157,8 +157,7 @@ fn panel_font_section() -> HFONT {
 
 /// Quiet meta text (footer version tag): regular weight, subtitle size.
 fn panel_font_meta() -> HFONT {
-    static FONT: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
-    HFONT(*FONT.get_or_init(|| make_font(12, 400).0 as isize) as *mut core::ffi::c_void)
+    make_font(12, 400)
 }
 
 fn panel_font_subtitle() -> HFONT {
@@ -194,8 +193,6 @@ const WM_ACTION_SHOW: u32 = 0x8005;
 const WM_LOCK_NOTIFY: u32 = 0x8006;
 const WM_EXTERNAL_RELOAD: u32 = 0x8007;
 const WM_IPC_REQUEST: u32 = 0x8008;
-/// A context-menu copy request arrived; the UI thread (re)arms the debounce.
-pub(crate) const WM_CTX_COLLECT: u32 = 0x800C;
 const WM_REFRESH_THEME: u32 = 0x8009;
 /// Queued focus-tip dismissal (see tooltips::dismiss_focus_tip).
 const WM_FOCUSTIP_DISMISS: u32 = 0x800A;
@@ -278,8 +275,6 @@ const WARN_TIMER: usize = 2;
 const POWER_STATUS_TIMER: usize = 3;
 const LOCK_POLL_TIMER: usize = 4;
 const NOSLEEP_TIMED_TIMER: usize = 5;
-/// Context-menu copy aggregation debounce (6 is the switch animation).
-const CTX_FLUSH_TIMER: usize = 7;
 const BATTERY_POLL_TICKS: u32 = 120; // 250ms * 120 = 30s
 
 // ---- Shared runtime state ------------------------------------------------
@@ -625,11 +620,6 @@ fn main() {
     *lock(&CONFIG_PATH) = Some(config_path.clone());
     apply_language(&effective_config.language);
 
-    // Publish the context-menu rules and self-heal their registry verbs
-    // (stale EXE paths after a move, entries lost to external tools).
-    ctxexec::reload_rules();
-    ctxmenu::sync("startup");
-
     let _instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
         Ok(None) => {
@@ -648,6 +638,13 @@ fn main() {
         init_log(&exe_dir);
     }
     log_line("IdleTrigger starting");
+    // Publish the context-menu rules and self-heal their registry verbs
+    // (stale EXE paths after a move, entries lost to external tools).
+    ctxexec::reload_rules();
+    if loaded.load_error.is_none() && loaded.field_errors.is_none() {
+        ctxmenu::sync("startup");
+    }
+
     // Reclaim the previous round's update staging (logs a replace failure
     // trail when present) and restore a staged-update phase so the panel
     // link can offer "restart and update" without waiting for a fresh check.
@@ -872,12 +869,7 @@ unsafe extern "system" fn hidden_proc(
                 popups::poll();
                 LRESULT(0)
             }
-            WM_TIMER if wparam.0 == CTX_FLUSH_TIMER => {
-                // Context-menu copy burst settled: one clipboard write.
-                let _ = KillTimer(Some(hwnd_), CTX_FLUSH_TIMER);
-                ctxexec::flush_collected();
-                LRESULT(0)
-            }
+
             windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE => {
                 // WTS_SESSION_LOCK (0x7) / WTS_SESSION_UNLOCK (0x8) for this
                 // session. The lock pause re-merges the effective state; the
@@ -920,12 +912,7 @@ unsafe extern "system" fn hidden_proc(
                 ipc::process_requests();
                 LRESULT(0)
             }
-            WM_CTX_COLLECT => {
-                // More per-item copies may still be arriving; restart the
-                // debounce so the whole selection lands in one write.
-                let _ = SetTimer(Some(hwnd_), CTX_FLUSH_TIMER, ctxexec::FLUSH_DELAY_MS, None);
-                LRESULT(0)
-            }
+
             WM_REFRESH_UI => {
                 settings_ui::refresh_location_status();
                 refresh_update_button();
@@ -1770,7 +1757,8 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
         if root.is_invalid() {
             return false;
         }
-        let default = automation_ui::default_button(root)
+        let default = ctx_ui::default_button(root)
+            .or_else(|| automation_ui::default_button(root))
             .or_else(|| (root == settings_ui::theme_hwnd()).then(settings_ui::default_button))
             .or_else(|| {
                 (root == hwnd(&WARNING))
@@ -1971,7 +1959,7 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
-        HEADER_LINK_ROWS[0].store(scale(y) as isize, Ordering::SeqCst);
+        HEADER_LINK_ROWS[0].store(y as isize, Ordering::SeqCst);
         // Section actions share the outside title line, right-aligned to
         // the card's right border (the standard "header + action" pattern);
         // the timed cancel link occupies a fixed slot that stays hidden
@@ -2101,7 +2089,7 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
-        HEADER_LINK_ROWS[1].store(scale(y) as isize, Ordering::SeqCst);
+        HEADER_LINK_ROWS[1].store(y as isize, Ordering::SeqCst);
         owner_button(
             &ControlSpec {
                 parent: panel,
@@ -2178,7 +2166,7 @@ fn create_windows() {
             instance,
             subtitle_font,
         );
-        HEADER_LINK_ROWS[2].store(scale(y) as isize, Ordering::SeqCst);
+        HEADER_LINK_ROWS[2].store(y as isize, Ordering::SeqCst);
         let snooze_cancel = owner_button(
             &ControlSpec {
                 parent: panel,
@@ -2305,7 +2293,7 @@ fn create_windows() {
         let footer_card_h = CHIP_H + 2 * CARD_PAD_Y;
         make_card(IDC_CARD_BASE + 3, y, footer_card_h);
         FOOTER_LINK_Y.store(
-            scale(y + (footer_card_h - CHIP_H) / 2) as isize,
+            (y + (footer_card_h - CHIP_H) / 2) as isize,
             Ordering::SeqCst,
         );
         for (id, key) in FOOTER_LINKS {
@@ -2695,7 +2683,7 @@ fn layout_header_links(panel: HWND) {
             }
             None => scale(center) - width / 2,
         };
-        let row = HEADER_LINK_ROWS[section].load(Ordering::SeqCst) as i32;
+        let row = scale(HEADER_LINK_ROWS[section].load(Ordering::SeqCst) as i32);
         let y = row + (scale(SECTION_H) - scale(LINK_BOX_H)) / 2;
         let _ = unsafe {
             SetWindowPos(
@@ -2723,7 +2711,7 @@ fn layout_header_links(panel: HWND) {
 fn layout_footer_links(panel: HWND) {
     let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
     let row_x = PAD + CARD_PAD_X;
-    let y = FOOTER_LINK_Y.load(Ordering::SeqCst) as i32;
+    let y = scale(FOOTER_LINK_Y.load(Ordering::SeqCst) as i32);
     if y == 0 {
         return;
     }
@@ -2741,15 +2729,15 @@ fn layout_footer_links(panel: HWND) {
     // as captions or the version string grow, so nothing ever drifts toward
     // an edge (a fixed blank-zone center would, once digits accumulate).
     let pad = scale(18);
-    let widths: Vec<i32> = widths.into_iter().map(|w| w + 2 * pad).collect();
-    let gap = scale(16);
+    let mut widths: Vec<i32> = widths.into_iter().map(|w| w + 2 * pad).collect();
+    let mut gap = scale(16);
     let version = unsafe { GetDlgItem(Some(panel), IDC_FOOTER_VERSION as i32) }.unwrap_or_default();
     let version_text = if version.is_invalid() {
         String::new()
     } else {
         window_text(version)
     };
-    let vw = if version_text.is_empty() {
+    let mut vw = if version_text.is_empty() {
         0
     } else {
         scale(measured_text_width(panel, panel_font_meta(), &version_text).max(8))
@@ -2757,7 +2745,15 @@ fn layout_footer_links(panel: HWND) {
     let row_w = scale(card_w - 2 * CARD_PAD_X);
     let count = widths.len() as i32;
     let has_version = !version_text.is_empty();
-    let total: i32 = widths.iter().sum::<i32>() + vw + gap * (count - 1 + i32::from(has_version));
+    let gap_count = count - 1 + i32::from(has_version);
+    if widths.iter().sum::<i32>() + vw + gap * gap_count > row_w {
+        gap = scale(6);
+        for width in &mut widths {
+            *width -= 2 * scale(10);
+        }
+        vw = vw.min((row_w - widths.iter().sum::<i32>() - gap * gap_count).max(0));
+    }
+    let total: i32 = widths.iter().sum::<i32>() + vw + gap * gap_count;
     let mut x = scale(row_x) + (row_w - total).max(0) / 2;
     for ((id, _), width) in FOOTER_LINKS.into_iter().zip(widths) {
         let Ok(link) = (unsafe { GetDlgItem(Some(panel), id as i32) }) else {
@@ -3310,7 +3306,7 @@ fn active_modal_window() -> Option<HWND> {
     automation_ui::theme_hwnds()
         .into_iter()
         .rev()
-        .chain([settings_ui::theme_hwnd()])
+        .chain([ctx_ui::theme_hwnd(), settings_ui::theme_hwnd()])
         .find(|window| !window.is_invalid() && unsafe { IsWindowVisible(*window).as_bool() })
 }
 
@@ -3644,6 +3640,7 @@ fn hot_reload_config() -> Result<(), String> {
     }
     apply_language(&loaded.config.language);
     ctxmenu::sync("reload");
+    ctx_ui::refresh_config_state();
     theme_engine::wake();
     sync_logging();
     system::unregister_all();

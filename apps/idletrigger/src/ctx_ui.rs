@@ -4,8 +4,8 @@
 //! wells (settings field grammar).
 
 use idletrigger_core::ctx_menu as core_ctx;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::UI::Controls::Dialogs::{
@@ -45,7 +45,7 @@ const ID_ADD: usize = 704;
 const ID_DELETE: usize = 705;
 const ID_UP: usize = 706;
 const ID_DOWN: usize = 707;
-const ID_ADD_SEP: usize = 709;
+pub(crate) const ID_ADD_SEP: usize = 709;
 const ID_EMPTY: usize = 708; // centered empty-state hint on the list card
 const ID_FORM_TITLE: usize = 710; // "rule details" section title
 const ID_VALID: usize = 711; // guidance / validation line (title row right)
@@ -69,6 +69,12 @@ const ID_ICON_B: usize = 726;
 const ID_CONSOLE: usize = 727; // hide-console switch row
 const ID_DISCARD: usize = 728;
 const ID_SAVE: usize = 729;
+const ID_ENABLED: usize = 730;
+const ID_WORK_L: usize = 731;
+pub const FIELD_WORK: usize = 732;
+const ID_PREVIEW: usize = 733;
+const ID_STATUS: usize = 734;
+static RULE_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Tooltip anchors for the manager's form fields.
 pub const FIELD_ID_TITLE: usize = ID_TITLE_E;
@@ -80,16 +86,18 @@ pub const FIELD_SCOPE: usize = ID_SCOPE_C;
 pub const FIELD_CONSOLE: usize = ID_CONSOLE;
 
 /// Every edit hosted on the form card (they get the card-painted well).
-const FIELD_EDITS: [usize; 5] = [ID_TITLE_E, ID_PROG_E, ID_ARGS_E, ID_ICON_E, ID_MATCH_E];
+const FIELD_EDITS: [usize; 6] = [
+    ID_TITLE_E, ID_PROG_E, ID_ARGS_E, ID_ICON_E, ID_MATCH_E, FIELD_WORK,
+];
 /// Statics whose background must erase with the card face.
-const ON_CARD_STATICS: [usize; 7] = [
-    ID_TITLE_L, ID_PROG_L, ID_MATCH_L, ID_SCOPE_L, ID_ARGS_L, ID_ICON_L, ID_EMPTY,
+const ON_CARD_STATICS: [usize; 8] = [
+    ID_TITLE_L, ID_PROG_L, ID_MATCH_L, ID_SCOPE_L, ID_ARGS_L, ID_ICON_L, ID_EMPTY, ID_WORK_L,
 ];
 
 // ---- geometry (logical px, scaled at creation) ------------------------------
 
 const CLIENT_W: i32 = 680;
-const CLIENT_H: i32 = 546;
+const CLIENT_H: i32 = 632;
 const EDGE: i32 = 16;
 const IN_X: i32 = EDGE + 12;
 const COL_GAP: i32 = 8;
@@ -99,13 +107,13 @@ const COL_B: i32 = IN_X + COL_W + COL_GAP;
 
 const HEADER_Y: i32 = 16;
 const HEADER_H: i32 = 24;
-const LIST_Y: i32 = 44;
+const LIST_Y: i32 = 68;
 const LIST_H: i32 = 168;
-const ACTIONS_Y: i32 = 224;
+const ACTIONS_Y: i32 = 248;
 const ACT_H: i32 = 30;
 const ACT_W: i32 = 104;
-const FORM_TITLE_Y: i32 = 268;
-const FORM_Y: i32 = 288;
+const FORM_TITLE_Y: i32 = 292;
+const FORM_Y: i32 = 312;
 
 const LABEL_H: i32 = 18;
 const LABEL_GAP: i32 = 4;
@@ -130,18 +138,15 @@ fn s(v: i32) -> i32 {
 }
 
 fn body_font() -> HFONT {
-    static FONT: OnceLock<isize> = OnceLock::new();
-    HFONT(*FONT.get_or_init(|| crate::make_font_pub(14, 400).0 as isize) as *mut core::ffi::c_void)
+    crate::make_font_pub(14, 400)
 }
 
 fn label_font() -> HFONT {
-    static FONT: OnceLock<isize> = OnceLock::new();
-    HFONT(*FONT.get_or_init(|| crate::make_font_pub(13, 400).0 as isize) as *mut core::ffi::c_void)
+    crate::make_font_pub(13, 400)
 }
 
 fn section_font() -> HFONT {
-    static FONT: OnceLock<isize> = OnceLock::new();
-    HFONT(*FONT.get_or_init(|| crate::make_font_pub(14, 600).0 as isize) as *mut core::ffi::c_void)
+    crate::make_font_pub(14, 600)
 }
 
 fn mgr() -> HWND {
@@ -167,7 +172,8 @@ fn text_of(parent: HWND, id: usize) -> String {
     if control.is_invalid() {
         return String::new();
     }
-    let mut buffer = [0u16; 1024];
+    let len = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW(control) };
+    let mut buffer = vec![0u16; len.max(0) as usize + 1];
     let copied = unsafe { GetWindowTextW(control, &mut buffer) };
     String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
 }
@@ -286,14 +292,45 @@ fn scope_row_index(scope: &str) -> i32 {
     .unwrap_or(0) as i32
 }
 
+pub fn theme_hwnd() -> HWND {
+    mgr()
+}
+
+pub fn default_button(window: HWND) -> Option<HWND> {
+    (window == mgr() && !window.is_invalid()).then(|| get_dlg_item(window, ID_SAVE))
+}
+
+static MODAL_OWNER: AtomicIsize = AtomicIsize::new(0);
+
+pub fn show_modal_to(owner: HWND) {
+    MODAL_OWNER.store(owner.0 as isize, Ordering::SeqCst);
+    unsafe {
+        let _ = EnableWindow(owner, false);
+    }
+    show();
+}
+
 pub fn show() {
     let _dpi = crate::dpi::Scope::window(crate::hwnd(&crate::PANEL));
     unsafe {
         ensure_created();
         let window = mgr();
-        refresh_list();
-        load_form();
+        let owner = MODAL_OWNER.load(Ordering::SeqCst);
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            window,
+            windows::Win32::UI::WindowsAndMessaging::GWLP_HWNDPARENT,
+            if owner == 0 {
+                crate::hwnd(&crate::PANEL).0 as _
+            } else {
+                owner as _
+            },
+        );
+        if crate::runtime::lock(&DRAFT).is_none() {
+            refresh_list();
+            load_form();
+        }
         theme::retheme_children(window);
+        refresh_manager_status();
         crate::tooltips::refresh_all(window);
         crate::hold_panel_modal(window);
         if crate::viewport::metrics(window).is_none() {
@@ -318,9 +355,18 @@ pub fn show() {
 }
 
 fn hide() {
+    if !leave_draft() {
+        return;
+    }
+    *crate::runtime::lock(&DRAFT) = None;
     unsafe {
         let _ = ShowWindow(mgr(), SW_HIDE);
         crate::release_panel_modal(mgr());
+        let owner = HWND(MODAL_OWNER.swap(0, Ordering::SeqCst) as *mut _);
+        if !owner.is_invalid() {
+            let _ = EnableWindow(owner, true);
+            let _ = SetForegroundWindow(owner);
+        }
         // Rules may have changed behind the panel's status line.
         crate::refresh_status();
     }
@@ -357,7 +403,13 @@ pub fn refresh_language() {
     if window.is_invalid() {
         return;
     }
+    let has_draft = crate::runtime::lock(&DRAFT).is_some();
+    let edited = has_draft.then(draft_from_form);
+    let selected = selected_index();
     for (id, key) in [
+        (ID_ENABLED, "ctx_rule_enabled"),
+        (ID_WORK_L, "ctx_working_dir"),
+        (ID_PREVIEW, "ctx_preview"),
         (ID_FORM_TITLE, "ctx_form_title"),
         (ID_TITLE_L, "ctx_field_title"),
         (ID_SCOPE_L, "ctx_field_scope"),
@@ -388,8 +440,42 @@ pub fn refresh_language() {
         );
     }
     crate::choice::set_rows(get_dlg_item(window, ID_SCOPE_C), &scope_items());
-    refresh_list();
-    load_form();
+    // Repaint captions from the existing snapshot; language changes must
+    // neither adopt a new conflict baseline nor discard typed fields.
+    render_list();
+    if let Some(index) = selected {
+        select_index(index as i32);
+    }
+    if let Some(edited) = edited {
+        crate::choice::select_index(
+            get_dlg_item(window, ID_SCOPE_C),
+            scope_row_index(&edited.scope),
+        );
+    }
+    refresh_manager_status();
+    crate::tooltips::refresh_all(window);
+}
+
+fn refresh_manager_status() {
+    let key = if !crate::cfg_map(|c| c.ctx_menu_enabled) {
+        "ctx_manager_disabled"
+    } else if !crate::ctxmenu::registration_healthy() {
+        "ctx_manager_drift"
+    } else {
+        "ctx_manager_ready"
+    };
+    set_text(ID_STATUS, &crate::t_pub(key));
+}
+
+/// Refresh live state without replacing the user's draft or conflict baseline.
+pub fn refresh_config_state() {
+    let window = mgr();
+    if window.is_invalid() {
+        return;
+    }
+    let _dpi = crate::dpi::Scope::window(window);
+    refresh_form_buttons();
+    refresh_manager_status();
 }
 
 /// Centers the manager over the control panel (settings parity).
@@ -425,7 +511,6 @@ unsafe fn ensure_created() {
     let icon_resource = PCWSTR(1usize as *const u16);
     unsafe {
         if !mgr().is_invalid() {
-            let _ = ShowWindow(mgr(), SW_SHOW);
             return;
         }
         let instance =
@@ -491,6 +576,7 @@ unsafe fn ensure_created() {
         theme::apply_to_window(window);
         crate::set_window_icons_pub(window);
         build_controls(window, instance);
+        crate::tooltips::register_controls(window);
         theme::retheme_children(window);
         let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
             Some(window),
@@ -593,6 +679,15 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             HEADER_Y - 2,
             120,
             BTN_H,
+        );
+
+        form_label(
+            window,
+            ID_STATUS,
+            "ctx_manager_disabled",
+            EDGE,
+            44,
+            CLIENT_W - 2 * EDGE,
         );
 
         // List card, then the list above it.
@@ -745,9 +840,24 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             FIELD_H,
         );
 
+        let f4 = field3 + FIELD_H + SLOT_GAP - 2;
+        let field4 = f4 + LABEL_H + LABEL_GAP;
+        form_label(window, ID_WORK_L, "ctx_working_dir", COL_A, f4, COL_W);
+        form_edit(window, FIELD_WORK, COL_A, field4, COL_W);
+        let enabled = owner_button(
+            window,
+            ID_ENABLED,
+            "ctx_rule_enabled",
+            COL_B,
+            field4,
+            COL_W,
+            BTN_H,
+        );
+        crate::nativeform::set_hover_column(enabled, s(crate::layout::SWITCH_HIT_W));
+
         // Bottom row: console switch left, discard/save flush right.
         let right = COL_B + COL_W;
-        let bottom = field3 + FIELD_H + SLOT_GAP;
+        let bottom = field4 + FIELD_H + SLOT_GAP;
         let console = mk_control(
             window,
             windows::core::w!("BUTTON"),
@@ -763,6 +873,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
         crate::nativeform::track(console);
         // Switch rows hover on the pill column alone (panel parity).
         crate::nativeform::set_hover_column(console, s(crate::layout::SWITCH_HIT_W));
+        owner_button(window, ID_PREVIEW, "ctx_preview", 296, bottom, 136, BTN_H);
         owner_button(
             window,
             ID_DISCARD,
@@ -790,195 +901,298 @@ unsafe extern "system" fn mgr_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_COMMAND => {
-                let id = wparam.0 & 0xFFFF;
-                let code = wparam.0 >> 16;
-                match id {
-                    ID_MORE if code == BN_CLICKED as usize => {
-                        // Modal to the manager: settings must not leave this
-                        // window interactive behind it.
-                        crate::settings_ui::open_ctx_page_modal_to(hwnd);
-                        LRESULT(0)
+    crate::guarded_proc(
+        "context manager",
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        move || unsafe {
+            let _dpi = crate::dpi::Scope::window(hwnd);
+            match msg {
+                WM_COMMAND => {
+                    let id = wparam.0 & 0xFFFF;
+                    let code = wparam.0 >> 16;
+                    match id {
+                        ID_MORE if code == BN_CLICKED as usize => {
+                            // Modal to the manager: settings must not leave this
+                            // window interactive behind it.
+                            let owner = HWND(MODAL_OWNER.load(Ordering::SeqCst) as *mut _);
+                            if !owner.is_invalid() {
+                                hide();
+                            } else if leave_draft() {
+                                crate::settings_ui::open_ctx_page_modal_to(hwnd);
+                            }
+                            LRESULT(0)
+                        }
+                        ID_ADD if code == BN_CLICKED as usize => {
+                            begin_new_rule();
+                            LRESULT(0)
+                        }
+                        ID_ADD_SEP if code == BN_CLICKED as usize => {
+                            begin_new_separator();
+                            LRESULT(0)
+                        }
+                        ID_DELETE if code == BN_CLICKED as usize => {
+                            delete_selected();
+                            LRESULT(0)
+                        }
+                        ID_UP if code == BN_CLICKED as usize => {
+                            move_selected(-1);
+                            LRESULT(0)
+                        }
+                        ID_DOWN if code == BN_CLICKED as usize => {
+                            move_selected(1);
+                            LRESULT(0)
+                        }
+                        ID_SAVE if code == BN_CLICKED as usize => {
+                            apply_form();
+                            LRESULT(0)
+                        }
+                        ID_DISCARD if code == BN_CLICKED as usize => {
+                            discard_form();
+                            LRESULT(0)
+                        }
+                        ID_PREVIEW if code == BN_CLICKED as usize => {
+                            let rule = draft_from_form();
+                            let sample = r"C:\Example\Sample.txt";
+                            let text = crate::t_args(
+                                "ctx_preview_body",
+                                &[
+                                    sample,
+                                    &rule.command,
+                                    &core_ctx::substitute_args(&rule.args, sample),
+                                    &rule.working_dir,
+                                ],
+                            );
+                            let _ = MessageBoxW(
+                                Some(hwnd),
+                                PCWSTR(wide(&text).as_ptr()),
+                                PCWSTR(wide(&crate::t_pub("ctx_preview")).as_ptr()),
+                                windows::Win32::UI::WindowsAndMessaging::MB_OK
+                                    | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+                            );
+                            LRESULT(0)
+                        }
+                        ID_ENABLED if code == BN_CLICKED as usize => {
+                            let before = RULE_ENABLED.load(Ordering::SeqCst);
+                            RULE_ENABLED.store(!before, Ordering::SeqCst);
+                            let control = get_dlg_item(hwnd, ID_ENABLED);
+                            crate::accessibility::check(control, !before);
+                            crate::start_switch_animation(control, before, !before);
+                            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                Some(control),
+                                None,
+                                true,
+                            );
+                            refresh_form_buttons();
+                            LRESULT(0)
+                        }
+                        ID_CONSOLE if code == BN_CLICKED as usize => {
+                            let before = CONSOLE_HIDE.load(Ordering::SeqCst);
+                            let next = !before;
+                            CONSOLE_HIDE.store(next, Ordering::SeqCst);
+                            let control = get_dlg_item(hwnd, ID_CONSOLE);
+                            crate::accessibility::check(control, next);
+                            // Same glide as the panel/settings switches.
+                            crate::start_switch_animation(control, before, next);
+                            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                Some(control),
+                                None,
+                                true,
+                            );
+                            refresh_form_buttons();
+                            LRESULT(0)
+                        }
+                        ID_PROG_B if code == BN_CLICKED as usize => {
+                            browse_for_file(ID_PROG_E, "ctx_filter_programs");
+                            LRESULT(0)
+                        }
+                        ID_ICON_B if code == BN_CLICKED as usize => {
+                            browse_for_file(ID_ICON_E, "ctx_filter_icons");
+                            LRESULT(0)
+                        }
+                        ID_LIST if code == LBN_DBLCLK as usize => {
+                            let _ = SetFocus(Some(get_dlg_item(hwnd, ID_TITLE_E)));
+                            LRESULT(0)
+                        }
+                        ID_LIST if code == LBN_SELCHANGE as usize => {
+                            selection_changed();
+                            LRESULT(0)
+                        }
+                        _ if code == EN_CHANGE && FIELD_EDITS.contains(&id) => {
+                            refresh_form_buttons();
+                            DefWindowProcW(hwnd, msg, wparam, lparam)
+                        }
+                        ID_SCOPE_C
+                            if code
+                                == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE
+                                    as usize =>
+                        {
+                            refresh_form_buttons();
+                            LRESULT(0)
+                        }
+                        ID_SCOPE_C if code == BN_CLICKED as usize => {
+                            // The choice button opens its popup only when the
+                            // owner toggles it (settings combo parity); the
+                            // selection read-back doubles as the dirty check.
+                            crate::choice::toggle(
+                                get_dlg_item(hwnd, ID_SCOPE_C),
+                                hwnd,
+                                ID_SCOPE_C as i32,
+                            );
+                            refresh_form_buttons();
+                            DefWindowProcW(hwnd, msg, wparam, lparam)
+                        }
+                        _ if (code == EN_SETFOCUS || code == EN_KILLFOCUS)
+                            && FIELD_EDITS.contains(&id) =>
+                        {
+                            // The well's focus ring is card pixels: repaint just
+                            // that well, never the whole card face.
+                            let edit = HWND(lparam.0 as *mut core::ffi::c_void);
+                            crate::tooltips::set_focus_tip(edit, code == EN_SETFOCUS);
+                            let _ = crate::nativeform::invalidate_field_well(
+                                get_dlg_item(hwnd, ID_FORM),
+                                edit,
+                            );
+                            DefWindowProcW(hwnd, msg, wparam, lparam)
+                        }
+                        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
                     }
-                    ID_ADD if code == BN_CLICKED as usize => {
-                        begin_new_rule();
-                        LRESULT(0)
-                    }
-                    ID_ADD_SEP if code == BN_CLICKED as usize => {
-                        begin_new_separator();
-                        LRESULT(0)
-                    }
-                    ID_DELETE if code == BN_CLICKED as usize => {
-                        delete_selected();
-                        LRESULT(0)
-                    }
-                    ID_UP if code == BN_CLICKED as usize => {
-                        move_selected(-1);
-                        LRESULT(0)
-                    }
-                    ID_DOWN if code == BN_CLICKED as usize => {
-                        move_selected(1);
-                        LRESULT(0)
-                    }
-                    ID_SAVE if code == BN_CLICKED as usize => {
-                        apply_form();
-                        LRESULT(0)
-                    }
-                    ID_DISCARD if code == BN_CLICKED as usize => {
-                        discard_form();
-                        LRESULT(0)
-                    }
-                    ID_CONSOLE if code == BN_CLICKED as usize => {
-                        let before = CONSOLE_HIDE.load(Ordering::SeqCst);
-                        let next = !before;
-                        CONSOLE_HIDE.store(next, Ordering::SeqCst);
-                        let control = get_dlg_item(hwnd, ID_CONSOLE);
-                        crate::accessibility::check(control, next);
-                        // Same glide as the panel/settings switches.
-                        crate::start_switch_animation(control, before, next);
-                        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
-                            Some(control),
-                            None,
-                            true,
-                        );
-                        refresh_form_buttons();
-                        LRESULT(0)
-                    }
-                    ID_PROG_B if code == BN_CLICKED as usize => {
-                        browse_for_file(ID_PROG_E, "ctx_filter_programs");
-                        LRESULT(0)
-                    }
-                    ID_ICON_B if code == BN_CLICKED as usize => {
-                        browse_for_file(ID_ICON_E, "ctx_filter_icons");
-                        LRESULT(0)
-                    }
-                    ID_LIST if code == LBN_DBLCLK as usize => {
-                        let _ = SetFocus(Some(get_dlg_item(hwnd, ID_TITLE_E)));
-                        LRESULT(0)
-                    }
-                    ID_LIST if code == LBN_SELCHANGE as usize => {
-                        selection_changed();
-                        LRESULT(0)
-                    }
-                    _ if code == EN_CHANGE && FIELD_EDITS.contains(&id) => {
-                        refresh_form_buttons();
-                        DefWindowProcW(hwnd, msg, wparam, lparam)
-                    }
-                    ID_SCOPE_C if code == BN_CLICKED as usize => {
-                        // The choice button opens its popup only when the
-                        // owner toggles it (settings combo parity); the
-                        // selection read-back doubles as the dirty check.
-                        crate::choice::toggle(
-                            get_dlg_item(hwnd, ID_SCOPE_C),
-                            hwnd,
-                            ID_SCOPE_C as i32,
-                        );
-                        refresh_form_buttons();
-                        DefWindowProcW(hwnd, msg, wparam, lparam)
-                    }
-                    _ if (code == EN_SETFOCUS || code == EN_KILLFOCUS)
-                        && FIELD_EDITS.contains(&id) =>
-                    {
-                        // The well's focus ring is card pixels: repaint just
-                        // that well, never the whole card face.
-                        let edit = HWND(lparam.0 as *mut core::ffi::c_void);
-                        let _ = crate::nativeform::invalidate_field_well(
-                            get_dlg_item(hwnd, ID_FORM),
-                            edit,
-                        );
-                        DefWindowProcW(hwnd, msg, wparam, lparam)
-                    }
-                    _ => DefWindowProcW(hwnd, msg, wparam, lparam),
                 }
-            }
-            WM_NCHITTEST => {
-                if crate::list_style::lane_hit(hwnd, lparam) {
-                    return LRESULT(1);
+                WM_NCHITTEST => {
+                    if crate::list_style::lane_hit(hwnd, lparam) {
+                        return LRESULT(1);
+                    }
+                    crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
                 }
-                crate::nativeform::blank_drag_hit(hwnd, msg, wparam, lparam)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN
-            | windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE
-            | windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP
-            | windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE
-            | windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED
-            | windows::Win32::UI::Controls::WM_MOUSELEAVE => {
-                if crate::list_style::lane_pointer(hwnd, msg, wparam, lparam) {
-                    LRESULT(0)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
-            }
-            WM_CLOSE => {
-                hide();
-                LRESULT(0)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
-                // Any size pass (viewport fit, DPI rescale) may reorder
-                // siblings; re-lower the hosted cards before the next paint.
-                lower_cards(hwnd);
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-            WM_DRAWITEM => {
-                if let Some(item) = crate::nativeform::draw_item(lparam) {
-                    draw_item(hwnd, &item);
-                    LRESULT(1)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
-            }
-            WM_ERASEBKGND => {
-                crate::popups::erase_theme_bg(hwnd, wparam);
-                LRESULT(1)
-            }
-            WM_CTLCOLORSTATIC => {
-                let palette = theme::palette();
-                let control = HWND(lparam.0 as *mut core::ffi::c_void);
-                let id = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-                    control,
-                    windows::Win32::UI::WindowsAndMessaging::GWL_ID,
-                ) as usize;
-                let on_surface = ON_CARD_STATICS.contains(&id);
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(palette.muted));
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(
-                    hdc,
-                    COLORREF(if on_surface {
-                        palette.surface
+                windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN
+                | windows::Win32::UI::WindowsAndMessaging::WM_MOUSEMOVE
+                | windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP
+                | windows::Win32::UI::WindowsAndMessaging::WM_CANCELMODE
+                | windows::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED
+                | windows::Win32::UI::Controls::WM_MOUSELEAVE => {
+                    if crate::list_style::lane_pointer(hwnd, msg, wparam, lparam) {
+                        LRESULT(0)
                     } else {
-                        theme::bg_color()
-                    }),
-                );
-                if on_surface {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_SHOWWINDOW => {
+                    if wparam.0 != 0 {
+                        refresh_config_state();
+                    }
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+                WM_CLOSE => {
+                    hide();
+                    LRESULT(0)
+                }
+                windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
+                    // Any size pass (viewport fit, DPI rescale) may reorder
+                    // siblings; re-lower the hosted cards before the next paint.
+                    lower_cards(hwnd);
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+                WM_DRAWITEM => {
+                    if let Some(item) = crate::nativeform::draw_item(lparam) {
+                        draw_item(hwnd, &item);
+                        LRESULT(1)
+                    } else {
+                        DefWindowProcW(hwnd, msg, wparam, lparam)
+                    }
+                }
+                WM_ERASEBKGND => {
+                    crate::popups::erase_theme_bg(hwnd, wparam);
+                    LRESULT(1)
+                }
+                WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC
+                    if FIELD_EDITS.contains(
+                        &(windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(HWND(
+                            lparam.0 as *mut _,
+                        )) as usize),
+                    ) =>
+                {
+                    // Disabled edits send STATIC instead of EDIT. Both must
+                    // use the same fill and erase brush as the card's well.
+                    let p = theme::palette();
+                    let control = HWND(lparam.0 as *mut _);
+                    let disabled = !IsWindowEnabled(control).as_bool();
+                    let (fill, color) = if disabled {
+                        (p.disabled_surface, p.disabled_text)
+                    } else {
+                        (p.surface, p.text)
+                    };
+                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(color));
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(fill));
+                    let (light, dark) = theme::surface_brush_pairs();
+                    let pair = if theme::is_dark() { dark } else { light };
+                    LRESULT(if disabled { pair.1.0 } else { pair.0.0 } as isize)
+                }
+                WM_CTLCOLORSTATIC => {
+                    let palette = theme::palette();
+                    let control = HWND(lparam.0 as *mut core::ffi::c_void);
+                    let id = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                        control,
+                        windows::Win32::UI::WindowsAndMessaging::GWL_ID,
+                    ) as usize;
+                    let on_surface = ON_CARD_STATICS.contains(&id);
+                    let hdc =
+                        windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
+                    let _ = windows::Win32::Graphics::Gdi::SetTextColor(
+                        hdc,
+                        COLORREF(
+                            if control == get_dlg_item(hwnd, ID_VALID)
+                                || control == get_dlg_item(hwnd, ID_STATUS)
+                                || control == get_dlg_item(hwnd, ID_EMPTY)
+                            {
+                                palette.muted
+                            } else {
+                                palette.text
+                            },
+                        ),
+                    );
+                    let _ = windows::Win32::Graphics::Gdi::SetBkColor(
+                        hdc,
+                        COLORREF(if on_surface {
+                            palette.surface
+                        } else {
+                            theme::bg_color()
+                        }),
+                    );
+                    if on_surface {
+                        let (light, dark) = theme::surface_brush_pairs();
+                        let pair = if theme::is_dark() { dark } else { light };
+                        LRESULT(pair.0.0 as isize)
+                    } else {
+                        LRESULT(theme::bg_brush().0 as isize)
+                    }
+                }
+                WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT => {
+                    let palette = theme::palette();
+                    let hdc =
+                        windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
+                    let _ =
+                        windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(palette.text));
+                    let _ =
+                        windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(palette.surface));
                     let (light, dark) = theme::surface_brush_pairs();
                     let pair = if theme::is_dark() { dark } else { light };
                     LRESULT(pair.0.0 as isize)
-                } else {
-                    LRESULT(theme::bg_brush().0 as isize)
                 }
+                WM_DESTROY => {
+                    MGR_HWND.store(0, Ordering::SeqCst);
+                    LIST_HWND.store(0, Ordering::SeqCst);
+                    crate::runtime::lock(&DISPLAYED).clear();
+                    *crate::runtime::lock(&DRAFT) = None;
+                    crate::release_panel_modal(hwnd);
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT => {
-                let palette = theme::palette();
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
-                let _ = windows::Win32::Graphics::Gdi::SetTextColor(hdc, COLORREF(palette.text));
-                let _ = windows::Win32::Graphics::Gdi::SetBkColor(hdc, COLORREF(palette.surface));
-                let (light, dark) = theme::surface_brush_pairs();
-                let pair = if theme::is_dark() { dark } else { light };
-                LRESULT(pair.0.0 as isize)
-            }
-            WM_DESTROY => {
-                MGR_HWND.store(0, Ordering::SeqCst);
-                LIST_HWND.store(0, Ordering::SeqCst);
-                crate::runtime::lock(&DISPLAYED).clear();
-                *crate::runtime::lock(&DRAFT) = None;
-                crate::release_panel_modal(hwnd);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
+        },
+    )
 }
 
 unsafe fn draw_item(hwnd: HWND, item: &crate::nativeform::DrawItem) {
@@ -1177,11 +1391,40 @@ unsafe fn draw_item_impl(
         } else if crate::choice::is_choice(item.control) {
             let state = crate::nativeform::control_state(item.control, item.state);
             crate::choice::draw_button(item.control, dc, bounds, state, p.surface);
-        } else if id == ID_CONSOLE {
+        } else if id == ID_MORE || id == ID_PREVIEW {
+            let label = text_of(mgr(), id);
+            let background = if id == ID_PREVIEW {
+                p.surface
+            } else {
+                p.window_bg
+            };
+            let mut text_bounds = *bounds;
+            if id == ID_MORE {
+                // Keep the caption aligned to the card's right edge in
+                // either language, rather than the left of a wide button.
+                crate::paint::fill_rect(dc, bounds, background);
+                let width = s(crate::measured_text_width(mgr(), body_font(), &label));
+                text_bounds.left = (bounds.right - width).max(bounds.left);
+            }
+            crate::paint::draw_text_link(
+                dc,
+                &text_bounds,
+                body_font(),
+                &label,
+                p,
+                background,
+                crate::nativeform::control_state(item.control, item.state),
+                scale,
+            );
+        } else if id == ID_CONSOLE || id == ID_ENABLED {
             // Panel switch grammar on the card face.
-            let label = text_of(mgr(), ID_CONSOLE);
+            let label = text_of(mgr(), id);
             let mut state = crate::nativeform::control_state(item.control, item.state);
-            state.active = CONSOLE_HIDE.load(Ordering::SeqCst);
+            state.active = if id == ID_CONSOLE {
+                CONSOLE_HIDE.load(Ordering::SeqCst)
+            } else {
+                RULE_ENABLED.load(Ordering::SeqCst)
+            };
             let progress = crate::switch_animation_progress(item.control);
             crate::paint::draw_switch_row(
                 dc,
@@ -1238,7 +1481,10 @@ fn row_text(rule: &core_ctx::CtxRule) -> String {
     if rule.separator {
         return crate::t_pub("ctx_separator_row");
     }
-    let matched = if rule.patterns.is_empty() {
+    let (_, issues) = core_ctx::prepare_rules(vec![rule.clone()]);
+    let matched = if !issues.is_empty() {
+        crate::t_pub("ctx_invalid_short")
+    } else if rule.patterns.is_empty() {
         crate::t_pub("ctx_match_all_short")
     } else {
         rule.patterns.join(";")
@@ -1247,12 +1493,33 @@ fn row_text(rule: &core_ctx::CtxRule) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| rule.command.clone());
-    format!("{}  ·  {}  ·  {}", rule.title, matched, program)
+    format!(
+        "{}  ·  {}  ·  {}  ·  {}",
+        if rule.enabled {
+            rule.title.clone()
+        } else {
+            format!("{} ({})", rule.title, crate::t_pub("ctx_disabled_short"))
+        },
+        crate::t_pub(match rule.scope.as_str() {
+            core_ctx::SCOPE_DIR => "ctx_scope_dir",
+            core_ctx::SCOPE_FILE_DIR => "ctx_scope_file_dir",
+            core_ctx::SCOPE_BACKGROUND => "ctx_scope_background",
+            core_ctx::SCOPE_ALL => "ctx_scope_all",
+            _ => "ctx_scope_file",
+        }),
+        matched,
+        program
+    )
 }
 
 fn refresh_list() {
+    *crate::runtime::lock(&DISPLAYED) = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
+    render_list();
+}
+
+fn render_list() {
     unsafe {
-        let rules = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
+        let rules = crate::runtime::lock(&DISPLAYED).clone();
         LIST_ROW_COUNT.store(rules.len(), Ordering::SeqCst);
         let list = list_hwnd();
         if list.is_invalid() {
@@ -1291,19 +1558,32 @@ fn refresh_list() {
             if empty { SW_SHOW } else { SW_HIDE },
         );
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, true);
-        *crate::runtime::lock(&DISPLAYED) = rules;
         refresh_action_states();
     }
 }
 
 /// Row buttons follow the selection: delete/reorder need a selected rule.
 fn refresh_action_states() {
-    let has_selection = selected_index().is_some();
-    for id in [ID_DELETE, ID_UP, ID_DOWN] {
+    let selected = selected_index();
+    let (count, can_append_separator) = {
+        let rules = crate::runtime::lock(&DISPLAYED);
+        (rules.len(), can_append_separator(&rules))
+    };
+    for (id, enabled) in [
+        (ID_DELETE, selected.is_some()),
+        (ID_UP, selected.is_some_and(|index| index > 0)),
+        (ID_DOWN, selected.is_some_and(|index| index + 1 < count)),
+        (ID_ADD, count < core_ctx::MAX_CTX_RULES),
+        (ID_ADD_SEP, can_append_separator),
+    ] {
         unsafe {
-            let _ = EnableWindow(get_dlg_item(mgr(), id), has_selection);
+            let _ = EnableWindow(get_dlg_item(mgr(), id), enabled);
         }
     }
+}
+
+fn can_append_separator(rules: &[core_ctx::CtxRule]) -> bool {
+    rules.len() < core_ctx::MAX_CTX_RULES && rules.last().is_some_and(|rule| !rule.separator)
 }
 
 fn selected_index() -> Option<usize> {
@@ -1328,7 +1608,7 @@ fn select_index(index: i32) {
         let _ = SendMessageW(
             list_hwnd(),
             windows::Win32::UI::WindowsAndMessaging::LB_SETCURSEL,
-            Some(WPARAM(index.max(0) as usize)),
+            Some(WPARAM(index as usize)),
             None,
         );
     }
@@ -1349,11 +1629,12 @@ fn set_valid(text: &str) {
 fn issue_text(issue: &core_ctx::CtxIssue) -> String {
     match issue.code {
         core_ctx::IssueCode::TitleRequired => crate::t_pub("ctx_issue_title"),
+        core_ctx::IssueCode::PatternInvalid => crate::t_pub("ctx_issue_pattern"),
         core_ctx::IssueCode::CommandRequired => crate::t_pub("ctx_issue_program"),
         core_ctx::IssueCode::TooMany => {
             crate::t_args("ctx_issue_limit", &[&core_ctx::MAX_CTX_RULES.to_string()])
         }
-        core_ctx::IssueCode::Parse => issue.message.clone(),
+        core_ctx::IssueCode::Parse => crate::t_args("ctx_parse_failed", &[&issue.message]),
     }
 }
 
@@ -1361,6 +1642,8 @@ fn issue_text(issue: &core_ctx::CtxIssue) -> String {
 fn draft_from_form() -> core_ctx::CtxRule {
     let window = mgr();
     let mut draft = crate::runtime::lock(&DRAFT).clone().unwrap_or_default();
+    draft.enabled = RULE_ENABLED.load(Ordering::SeqCst);
+    draft.working_dir = text_of(window, FIELD_WORK).trim().to_string();
     draft.title = text_of(window, ID_TITLE_E).trim().to_string();
     draft.command = text_of(window, ID_PROG_E).trim().to_string();
     draft.args = text_of(window, ID_ARGS_E).trim().to_string();
@@ -1381,12 +1664,33 @@ fn draft_from_form() -> core_ctx::CtxRule {
 fn load_form() {
     let window = mgr();
     let draft = crate::runtime::lock(&DRAFT).clone();
+    let editable = draft.as_ref().is_some_and(|rule| !rule.separator);
+    for id in FIELD_EDITS
+        .into_iter()
+        .chain([ID_SCOPE_C, ID_PROG_B, ID_ICON_B, ID_CONSOLE, ID_PREVIEW])
+    {
+        unsafe {
+            let _ = EnableWindow(get_dlg_item(window, id), editable);
+        }
+        if FIELD_EDITS.contains(&id) {
+            // EnableWindow repaints the EDIT, but its rounded border belongs
+            // to a different HWND. Repaint that well on state changes too.
+            crate::nativeform::invalidate_field_well(
+                get_dlg_item(window, ID_FORM),
+                get_dlg_item(window, id),
+            );
+        }
+    }
+    unsafe {
+        let _ = EnableWindow(get_dlg_item(window, ID_ENABLED), draft.is_some());
+    }
     let Some(rule) = draft else {
         set_text(ID_TITLE_E, "");
         set_text(ID_PROG_E, "");
         set_text(ID_ARGS_E, "");
         set_text(ID_ICON_E, "");
         set_text(ID_MATCH_E, "");
+        set_text(FIELD_WORK, "");
         crate::choice::select_index(
             get_dlg_item(window, ID_SCOPE_C),
             scope_row_index(core_ctx::SCOPE_FILE),
@@ -1396,6 +1700,16 @@ fn load_form() {
         refresh_form_buttons();
         return;
     };
+    RULE_ENABLED.store(rule.enabled, Ordering::SeqCst);
+    crate::accessibility::check(get_dlg_item(window, ID_ENABLED), rule.enabled);
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+            Some(get_dlg_item(window, ID_ENABLED)),
+            None,
+            true,
+        );
+    }
+    set_text(FIELD_WORK, &rule.working_dir);
     set_text(ID_TITLE_E, &rule.title);
     set_text(ID_PROG_E, &rule.command);
     set_text(ID_ARGS_E, &rule.args);
@@ -1406,7 +1720,15 @@ fn load_form() {
         scope_row_index(&rule.scope),
     );
     set_console(rule.hidden_console);
-    set_valid("");
+    let separator = rule.separator;
+    let (_, issues) = core_ctx::prepare_rules(vec![rule]);
+    set_valid(&issues.first().map(issue_text).unwrap_or_else(|| {
+        if separator {
+            crate::t_pub("ctx_form_sep_hint")
+        } else {
+            String::new()
+        }
+    }));
     refresh_form_buttons();
 }
 
@@ -1417,11 +1739,13 @@ fn refresh_form_buttons() {
     let draft = crate::runtime::lock(&DRAFT).clone();
     let dirty = match draft {
         None => false,
-        Some(rule) => draft_from_form() != rule,
+        Some(rule) => rule.id.is_empty() || draft_from_form() != rule,
     };
-    for id in [ID_SAVE, ID_DISCARD] {
+    let stale =
+        *crate::runtime::lock(&DISPLAYED) != *crate::runtime::lock(&crate::ctxexec::CTX_RULES);
+    for (id, enabled) in [(ID_SAVE, dirty), (ID_DISCARD, dirty || stale)] {
         unsafe {
-            let _ = EnableWindow(get_dlg_item(mgr(), id), dirty);
+            let _ = EnableWindow(get_dlg_item(mgr(), id), enabled);
         }
     }
 }
@@ -1438,44 +1762,89 @@ fn set_console(value: bool) {
 }
 
 /// Saves the form. New drafts get a generated id (prepare_rules assigns one).
-fn apply_form() {
+fn apply_form() -> bool {
+    if crate::runtime::lock(&DRAFT).is_none() {
+        return true;
+    }
     let draft = draft_from_form();
-    let mut rules = crate::runtime::lock(&DISPLAYED).clone();
-    let base = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
-    let index = crate::runtime::lock(&DRAFT)
-        .as_ref()
-        .and_then(|rule| rules.iter().position(|item| item.id == rule.id));
-    match index {
-        Some(position) => rules[position] = draft.clone(),
-        None => rules.push(draft.clone()),
+    let base = crate::runtime::lock(&DISPLAYED).clone();
+    let mut rules = base.clone();
+    let position = rules
+        .iter()
+        .position(|item| !draft.id.is_empty() && item.id == draft.id)
+        .unwrap_or(rules.len());
+    if position == rules.len() {
+        rules.push(draft);
+    } else {
+        rules[position] = draft;
     }
     let (prepared, issues) = core_ctx::prepare_rules(rules);
-    if let Some(issue) = issues.first() {
-        set_valid(&issue_text(issue));
-        return;
+    if let Some(issue) = issues
+        .iter()
+        .find(|issue| issue.index == position && issue.code != core_ctx::IssueCode::TooMany)
+    {
+        let message = issue_text(issue);
+        set_valid(&message);
+        crate::warn_dialog("", &message);
+        let field = match issue.code {
+            core_ctx::IssueCode::TitleRequired => ID_TITLE_E,
+            core_ctx::IssueCode::CommandRequired => ID_PROG_E,
+            _ => ID_MATCH_E,
+        };
+        unsafe {
+            let _ = SetFocus(Some(get_dlg_item(mgr(), field)));
+        }
+        return false;
     }
     if let Err(err) = crate::save_ctx_rules(&base, &prepared) {
         set_valid(&err);
-        return;
+        crate::warn_dialog("", &err);
+        return false;
     }
-    let saved = prepared
-        .iter()
-        .find(|rule| rule.title == draft.title)
-        .cloned()
-        .unwrap_or(draft);
-    let saved_id = saved.id.clone();
-    *crate::runtime::lock(&DRAFT) = Some(saved);
+    *crate::runtime::lock(&DRAFT) = Some(prepared[position].clone());
     refresh_list();
-    let position = crate::runtime::lock(&DISPLAYED)
-        .iter()
-        .position(|rule| rule.id == saved_id)
-        .unwrap_or(0);
     select_index(position as i32);
     load_form();
+    refresh_manager_status();
+    true
+}
+
+/// Explicit save/cancel semantics at every navigation boundary.
+fn leave_draft() -> bool {
+    let original = crate::runtime::lock(&DRAFT).clone();
+    let Some(original) = original else {
+        return true;
+    };
+    if !original.id.is_empty() && draft_from_form() == original {
+        return true;
+    }
+    let answer = unsafe {
+        MessageBoxW(
+            Some(mgr()),
+            PCWSTR(wide(&crate::t_pub("ctx_unsaved_prompt")).as_ptr()),
+            PCWSTR(wide(&crate::t_pub("ctx_manager_title")).as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::MB_YESNOCANCEL | MB_ICONQUESTION,
+        )
+    };
+    match answer {
+        IDYES => apply_form(),
+        windows::Win32::UI::WindowsAndMessaging::IDNO => {
+            load_form();
+            true
+        }
+        _ => false,
+    }
 }
 
 fn begin_new_rule() {
-    *crate::runtime::lock(&DRAFT) = Some(core_ctx::CtxRule::default());
+    if !leave_draft() || crate::runtime::lock(&DISPLAYED).len() >= core_ctx::MAX_CTX_RULES {
+        return;
+    }
+    select_index(-1);
+    *crate::runtime::lock(&DRAFT) = Some(core_ctx::CtxRule {
+        args: "\"%1\"".into(),
+        ..Default::default()
+    });
     load_form();
     // A blank draft looks identical to the empty selection state; the
     // example hint is what makes the click read as "started something".
@@ -1484,42 +1853,71 @@ fn begin_new_rule() {
 }
 
 fn begin_new_separator() {
-    let rule = core_ctx::CtxRule {
+    if !can_append_separator(&crate::runtime::lock(&DISPLAYED)) || !leave_draft() {
+        return;
+    }
+    // Saving a pending draft can change the list; recheck the append boundary.
+    let base = crate::runtime::lock(&DISPLAYED).clone();
+    if !can_append_separator(&base) {
+        return;
+    }
+    let mut rules = base.clone();
+    rules.push(core_ctx::CtxRule {
         separator: true,
         ..Default::default()
-    };
-    *crate::runtime::lock(&DRAFT) = Some(rule);
+    });
+    let (prepared, _) = core_ctx::prepare_rules(rules);
+    if let Err(err) = crate::save_ctx_rules(&base, &prepared) {
+        set_valid(&err);
+        crate::warn_dialog("", &err);
+        return;
+    }
+    let position = prepared.len() - 1;
+    *crate::runtime::lock(&DRAFT) = Some(prepared[position].clone());
+    refresh_list();
+    select_index(position as i32);
     load_form();
-    set_valid(&crate::t_pub("ctx_form_sep_hint"));
-    let _ = unsafe { SetFocus(Some(get_dlg_item(mgr(), ID_ADD))) };
+    refresh_manager_status();
+    let _ = unsafe { SetFocus(Some(list_hwnd())) };
 }
 
 /// Discard: reload the selected rule; a brand-new draft just cancels out.
 fn discard_form() {
-    let is_new = crate::runtime::lock(&DRAFT)
+    let selected_id = crate::runtime::lock(&DRAFT)
         .as_ref()
-        .is_some_and(|rule| rule.id.is_empty());
-    if is_new {
-        *crate::runtime::lock(&DRAFT) = None;
-    }
+        .map(|rule| rule.id.clone());
+    refresh_list();
+    let index = crate::runtime::lock(&DISPLAYED)
+        .iter()
+        .position(|rule| Some(&rule.id) == selected_id.as_ref());
+    *crate::runtime::lock(&DRAFT) =
+        index.and_then(|i| crate::runtime::lock(&DISPLAYED).get(i).cloned());
+    select_index(index.map_or(-1, |i| i as i32));
     load_form();
 }
 
 fn selection_changed() {
-    // Switching rows commits a valid draft (Open++-like flow); an invalid
-    // one is discarded — the validation line explains what was missing.
-    let draft = draft_from_form();
-    let dirty = crate::runtime::lock(&DRAFT).as_ref() != Some(&draft);
-    if dirty && !draft.title.is_empty() && !draft.command.is_empty() {
-        apply_form();
-    }
-    let Some(index) = selected_index() else {
-        *crate::runtime::lock(&DRAFT) = None;
-        load_form();
+    let target_id = selected_index().and_then(|index| {
+        crate::runtime::lock(&DISPLAYED)
+            .get(index)
+            .map(|rule| rule.id.clone())
+    });
+    if !leave_draft() {
+        let id = crate::runtime::lock(&DRAFT)
+            .as_ref()
+            .map(|rule| rule.id.clone());
+        let index = crate::runtime::lock(&DISPLAYED)
+            .iter()
+            .position(|rule| Some(&rule.id) == id.as_ref());
+        select_index(index.map_or(-1, |i| i as i32));
         return;
-    };
-    let rule = crate::runtime::lock(&DISPLAYED)[index].clone();
-    *crate::runtime::lock(&DRAFT) = Some(rule);
+    }
+    let index = crate::runtime::lock(&DISPLAYED)
+        .iter()
+        .position(|rule| Some(&rule.id) == target_id.as_ref());
+    *crate::runtime::lock(&DRAFT) =
+        index.and_then(|i| crate::runtime::lock(&DISPLAYED).get(i).cloned());
+    select_index(index.map_or(-1, |i| i as i32));
     load_form();
 }
 
@@ -1527,12 +1925,16 @@ fn delete_selected() {
     let Some(index) = selected_index() else {
         return;
     };
-    let base = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
+    let base = crate::runtime::lock(&DISPLAYED).clone();
     let mut rules = base.clone();
     if index >= rules.len() {
         return;
     }
-    let title = rules[index].title.clone();
+    let title = if rules[index].separator {
+        crate::t_pub("ctx_add_separator")
+    } else {
+        rules[index].title.clone()
+    };
     let message = crate::t_args("ctx_delete_confirm", &[&title]);
     let result = unsafe {
         MessageBoxW(
@@ -1548,6 +1950,7 @@ fn delete_selected() {
     rules.remove(index);
     if let Err(err) = crate::save_ctx_rules(&base, &rules) {
         set_valid(&err);
+        crate::warn_dialog("", &err);
         return;
     }
     *crate::runtime::lock(&DRAFT) = None;
@@ -1558,6 +1961,9 @@ fn delete_selected() {
 }
 
 fn move_selected(delta: i32) {
+    if !leave_draft() {
+        return;
+    }
     let Some(index) = selected_index() else {
         return;
     };
@@ -1566,7 +1972,7 @@ fn move_selected(delta: i32) {
     if target < 0 || target >= len {
         return;
     }
-    let base = crate::runtime::lock(&crate::ctxexec::CTX_RULES).clone();
+    let base = crate::runtime::lock(&DISPLAYED).clone();
     let mut rules = base.clone();
     if index >= rules.len() {
         return;
@@ -1574,8 +1980,10 @@ fn move_selected(delta: i32) {
     rules.swap(index, target as usize);
     if let Err(err) = crate::save_ctx_rules(&base, &rules) {
         set_valid(&err);
+        crate::warn_dialog("", &err);
         return;
     }
+    *crate::runtime::lock(&DRAFT) = None;
     refresh_list();
     select_index(target);
     selection_changed();
@@ -1589,16 +1997,21 @@ fn browse_for_file(edit_id: usize, filter_key: &str) {
         .chain([0, 0])
         .collect();
     let initial = text_of(mgr(), edit_id);
-    let mut file = [0u16; 1024];
-    let prefix_len = initial.encode_utf16().count().min(1000);
-    file[..prefix_len].copy_from_slice(&initial.encode_utf16().collect::<Vec<u16>>());
+    let mut file = [0u16; 32768];
+    let initial: Vec<u16> = initial.encode_utf16().take(file.len() - 1).collect();
+    file[..initial.len()].copy_from_slice(&initial);
+    let title = wide(&crate::t_pub(if edit_id == ID_ICON_E {
+        "ctx_browse_icon_title"
+    } else {
+        "ctx_browse_title"
+    }));
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: mgr(),
         lpstrFilter: PCWSTR(filter_wide.as_mut_ptr()),
         lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
         nMaxFile: file.len() as u32,
-        lpstrTitle: PCWSTR(wide(&crate::t_pub("ctx_browse_title")).as_ptr()),
+        lpstrTitle: PCWSTR(title.as_ptr()),
         Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
         ..Default::default()
     };
@@ -1607,5 +2020,122 @@ fn browse_for_file(edit_id: usize, filter_key: &str) {
         let len = file.iter().position(|ch| *ch == 0).unwrap_or(file.len());
         let path = String::from_utf16_lossy(&file[..len]);
         set_text(edit_id, &path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_dirty_state_navigation_and_text_are_lossless() {
+        const CHILD: &str = "IDLETRIGGER_CTX_FORM_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let _ui_test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ctx_ui::tests::manager_dirty_state_navigation_and_text_are_lossless",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("context manager test timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        *crate::runtime::lock(&crate::CONFIG) = Some(Default::default());
+        *crate::I18N.write().unwrap() = Some(idletrigger_core::i18n::I18n::load("en"));
+        crate::create_windows();
+        unsafe {
+            ensure_created();
+        }
+        render_list();
+        load_form();
+        begin_new_separator();
+        assert!(crate::runtime::lock(&DRAFT).is_none());
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_TITLE_E)).as_bool() });
+        *crate::runtime::lock(&DRAFT) = None;
+        let rule = core_ctx::CtxRule {
+            id: "a".into(),
+            title: "A".into(),
+            command: "tool.exe".into(),
+            ..Default::default()
+        };
+        *crate::runtime::lock(&DISPLAYED) = vec![rule.clone()];
+        *crate::runtime::lock(&crate::ctxexec::CTX_RULES) = vec![rule.clone()];
+        *crate::runtime::lock(&DRAFT) = Some(rule.clone());
+        render_list();
+        select_index(0);
+        load_form();
+        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_ADD_SEP)).as_bool() });
+        assert!(!can_append_separator(&[core_ctx::CtxRule {
+            separator: true,
+            ..Default::default()
+        }]));
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
+        crate::choice::select_index(get_dlg_item(mgr(), ID_SCOPE_C), 1);
+        unsafe {
+            SendMessageW(
+                mgr(),
+                WM_COMMAND,
+                Some(WPARAM(
+                    ID_SCOPE_C
+                        | ((windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE as usize) << 16),
+                )),
+                None,
+            );
+        }
+        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_SAVE)).as_bool() });
+        let long = "x".repeat(4096);
+        set_text(ID_ARGS_E, &long);
+        refresh_language();
+        assert_eq!(text_of(mgr(), ID_ARGS_E), long);
+        assert_eq!(draft_from_form().scope, core_ctx::SCOPE_DIR);
+        assert_eq!(*crate::runtime::lock(&DRAFT), Some(rule));
+        assert_eq!(default_button(mgr()), Some(get_dlg_item(mgr(), ID_SAVE)));
+        discard_form();
+        assert!(text_of(mgr(), ID_ARGS_E).is_empty());
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_UP)).as_bool() });
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DOWN)).as_bool() });
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
+        let baseline = crate::runtime::lock(&DRAFT).clone();
+        crate::runtime::lock(&crate::ctxexec::CTX_RULES)[0].title = "External edit".into();
+        refresh_config_state();
+        assert!(unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
+        assert_eq!(*crate::runtime::lock(&DRAFT), baseline);
+        assert_eq!(text_of(mgr(), ID_TITLE_E), "A");
+        set_text(ID_ARGS_E, "unsaved argument");
+        set_text(ID_STATUS, "stale status before returning from settings");
+        unsafe {
+            SendMessageW(
+                mgr(),
+                windows::Win32::UI::WindowsAndMessaging::WM_SHOWWINDOW,
+                Some(WPARAM(1)),
+                None,
+            );
+        }
+        assert_eq!(
+            text_of(mgr(), ID_STATUS),
+            crate::t_pub("ctx_manager_disabled")
+        );
+        assert_eq!(text_of(mgr(), ID_ARGS_E), "unsaved argument");
+        assert_eq!(*crate::runtime::lock(&DRAFT), baseline);
+        discard_form();
+        assert_eq!(text_of(mgr(), ID_TITLE_E), "External edit");
+        assert!(!unsafe { IsWindowEnabled(get_dlg_item(mgr(), ID_DISCARD)).as_bool() });
     }
 }

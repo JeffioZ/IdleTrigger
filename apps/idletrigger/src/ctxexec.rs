@@ -1,11 +1,10 @@
 //! Context-menu execution: the `ctx` CLI arm, clipboard writes, rule
-//! spawning, and the multi-select copy aggregation fed by the IPC fast path.
+//! spawning, and single-selection clipboard operations through IPC.
 //!
 //! Registry verbs launch `IdleTrigger.exe ctx ...`; with the tray running,
 //! the short-lived process forwards over the named pipe and the IPC server
-//! thread answers without a UI round trip. Copy requests are collected and
-//! flushed by a debounce timer on the hidden window (one clipboard write per
-//! multi-selection); rule requests spawn their target directly from the
+//! thread answers with the operation result without a UI round trip.
+//! Rule requests spawn their target directly from the
 //! server thread. Without a running instance everything executes locally.
 
 use idletrigger_core::ctx_menu as core_ctx;
@@ -24,13 +23,6 @@ use crate::wide;
 
 /// IPC message arm prefix, kept in sync with `ipc::dispatch`.
 const IPC_PREFIX: &str = "ctx:";
-
-/// Collect-and-flush debounce window: Explorer launches one process per
-/// selected item, all within a few hundred milliseconds.
-pub const FLUSH_DELAY_MS: u32 = 450;
-
-/// Pending copy requests from the still-spawning per-item processes.
-static COLLECTED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// The rule list published by every config commit (mirrors how automation
 /// rules are reloaded from the document inside the writer boundary).
@@ -86,25 +78,43 @@ fn path_of(value: &OsStr) -> String {
     os_to_string(value).unwrap_or_else(|| value.to_string_lossy().into_owned())
 }
 
-/// Writes UTF-16 text to the clipboard, retrying while another process
-/// holds it open. A process without any window can still own the clipboard.
+/// A real window owns the clipboard even in the short-lived CLI process.
 pub(crate) fn copy_to_clipboard(text: &str) -> bool {
-    for _ in 0..10 {
-        unsafe {
-            if OpenClipboard(None).is_err() {
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
+    unsafe {
+        let Ok(owner) = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::w!("STATIC"),
+            None,
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        ) else {
+            return false;
+        };
+        let mut written = false;
+        for _ in 0..10 {
+            if OpenClipboard(Some(owner)).is_err() {
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 continue;
             }
-            let written = (|| {
-                if EmptyClipboard().is_err() {
-                    return false;
-                }
+            written = (|| {
                 let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
                 let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) else {
                     return false;
                 };
                 let dst = GlobalLock(handle);
                 if dst.is_null() {
+                    let _ = GlobalFree(Some(handle));
                     return false;
                 }
                 std::ptr::copy_nonoverlapping(
@@ -113,20 +123,26 @@ pub(crate) fn copy_to_clipboard(text: &str) -> bool {
                     wide.len() * 2,
                 );
                 let _ = GlobalUnlock(handle);
-                SetClipboardData(
-                    windows::Win32::System::Ole::CF_UNICODETEXT.0 as u32,
-                    Some(windows::Win32::Foundation::HANDLE(handle.0)),
-                )
-                .is_ok()
+                let ok = EmptyClipboard().is_ok()
+                    && SetClipboardData(
+                        windows::Win32::System::Ole::CF_UNICODETEXT.0 as u32,
+                        Some(windows::Win32::Foundation::HANDLE(handle.0)),
+                    )
+                    .is_ok();
+                if !ok {
+                    let _ = GlobalFree(Some(handle));
+                }
+                ok
             })();
             let _ = CloseClipboard();
             if written {
-                return true;
+                break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        let _ = DestroyWindow(owner);
+        written
     }
-    false
 }
 
 /// One requested copy shape: the raw path formatted per the menu entry.
@@ -199,7 +215,7 @@ fn resolve_lnk(path: &str) -> Option<String> {
             // IPersistFile::Load is the shell's own .lnk reader.
             let file: windows::Win32::System::Com::IPersistFile = link.cast().ok()?;
             file.Load(&wide, STGM_READ).ok()?;
-            let mut buffer = [0u16; 1024];
+            let mut buffer = [0u16; 32768];
             let mut find = windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW::default();
             // SLGP_UNCPRIORITY keeps mapped-drive forms readable.
             link.GetPath(&mut buffer, &mut find, SLGP_UNCPRIORITY.0 as u32)
@@ -231,39 +247,69 @@ fn local_copy_settings() -> (String, String) {
     (config.ctx_copy_quote, config.ctx_copy_separator)
 }
 
-/// `IdleTrigger.exe ctx copy <full|name|dir> "<path>"` (registry verb) or
-/// `IdleTrigger.exe ctx rule <id> "<path>"`. Always silent, always exits.
+/// Registry entry point. Failure is visible and returns nonzero; an
+/// ambiguous IPC reply is never replayed locally.
 pub fn run_ctx(args: &[OsString]) -> i32 {
+    let language = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent().map(|dir| {
+                idletrigger_core::config::load(&dir.join("IdleTrigger.toml"))
+                    .config
+                    .language
+            })
+        })
+        .unwrap_or_else(|| "auto".into());
+    crate::apply_language(&language);
     let Some(kind) = args.first().and_then(|value| value.to_str()) else {
-        return 0;
+        return 1;
     };
     let Some(path_os) = args.get(2) else {
-        return 0;
+        return 1;
     };
     let param = args
         .get(1)
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_default();
     let path = path_of(path_os);
-    let forwarded = crate::ipc::send(&format!("{IPC_PREFIX}{kind}:{param}:{}", pct_encode(&path)));
-    if forwarded.is_some() {
-        // The running instance collected (copy) or spawned (rule) it.
-        return 0;
+    // New registry commands append a non-path character inside the quotes
+    // so a root such as C:\ does not consume the closing quote. Old verbs
+    // and direct CLI calls without the sentinel remain supported.
+    let path = path.strip_suffix('|').unwrap_or(&path).to_string();
+    let success =
+        match crate::ipc::send(&format!("{IPC_PREFIX}{kind}:{param}:{}", pct_encode(&path))) {
+            Some(reply) => reply == "ok ctx",
+            None => match kind {
+                "copy" if valid_copy_format(&param) => {
+                    let (quote, separator) = local_copy_settings();
+                    copy_to_clipboard(&core_ctx::format_paths(
+                        &[formatted(&param, &path)],
+                        &quote,
+                        &separator,
+                    ))
+                }
+                "rule" => local_rule(&param).is_some_and(|rule| spawn_rule(&rule, &path)),
+                _ => false,
+            },
+        };
+    if success {
+        0
+    } else {
+        crate::warn_dialog("", &crate::t_pub("ctx_action_failed"));
+        1
     }
-    match kind {
-        "copy" => {
-            let (quote, separator) = local_copy_settings();
-            let text = core_ctx::format_paths(&[formatted(&param, &path)], &quote, &separator);
-            copy_to_clipboard(&text);
-        }
-        "rule" => {
-            if let Some(rule) = local_rule(&param) {
-                spawn_rule(&rule, &path);
-            }
-        }
-        _ => {}
-    }
-    0
+}
+
+fn valid_copy_format(format: &str) -> bool {
+    matches!(
+        format,
+        core_ctx::COPY_FORMAT_FULL
+            | core_ctx::COPY_FORMAT_NAME
+            | core_ctx::COPY_FORMAT_DIR
+            | core_ctx::COPY_FORMAT_STEM
+            | core_ctx::COPY_FORMAT_EXT
+            | core_ctx::COPY_FORMAT_TARGET
+    )
 }
 
 fn local_rule(id: &str) -> Option<core_ctx::CtxRule> {
@@ -285,31 +331,21 @@ pub(crate) fn handle_ipc(request: &str) -> Option<String> {
     match rest.split_once(':') {
         Some(("copy", tail)) => {
             let (format, encoded) = tail.split_once(':')?;
-            if !matches!(
-                format,
-                core_ctx::COPY_FORMAT_FULL
-                    | core_ctx::COPY_FORMAT_NAME
-                    | core_ctx::COPY_FORMAT_DIR
-                    | core_ctx::COPY_FORMAT_STEM
-                    | core_ctx::COPY_FORMAT_EXT
-                    | core_ctx::COPY_FORMAT_TARGET
-            ) {
+            if !valid_copy_format(format) {
                 return Some("err: bad copy format".into());
             }
             let path = pct_decode(encoded);
-            crate::runtime::lock(&COLLECTED).push((format.to_string(), path));
-            // (Re)arm the debounce timer; the flush happens on the UI thread.
-            if !crate::hwnd(&crate::HIDDEN).is_invalid() {
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                        Some(crate::hwnd(&crate::HIDDEN)),
-                        crate::WM_CTX_COLLECT,
-                        windows::Win32::Foundation::WPARAM(0),
-                        windows::Win32::Foundation::LPARAM(0),
-                    );
+            let (quote, separator) =
+                crate::cfg_map(|c| (c.ctx_copy_quote.clone(), c.ctx_copy_separator.clone()));
+            let text = core_ctx::format_paths(&[formatted(format, &path)], &quote, &separator);
+            Some(
+                if copy_to_clipboard(&text) {
+                    "ok ctx"
+                } else {
+                    "err: clipboard unavailable"
                 }
-            }
-            Some("ok ctx".into())
+                .into(),
+            )
         }
         Some(("rule", tail)) => {
             let (id, encoded) = tail.split_once(':')?;
@@ -323,42 +359,10 @@ pub(crate) fn handle_ipc(request: &str) -> Option<String> {
                 Some("ok ctx".into())
             } else {
                 crate::log_line(&format!("ctx rule {id} not applied (missing or filtered)"));
-                Some("ok ctx".into())
+                Some("err: rule missing, filtered, or failed to launch".into())
             }
         }
         _ => Some("err: unknown ctx request".into()),
-    }
-}
-
-/// Debounce expiry: one clipboard write for the whole multi-selection. The
-/// largest group wins on the off chance two formats were requested in the
-/// same window (one click always means one format).
-pub(crate) fn flush_collected() {
-    let pending = std::mem::take(&mut *crate::runtime::lock(&COLLECTED));
-    if pending.is_empty() {
-        return;
-    }
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for (format, path) in pending {
-        if let Some(group) = groups.iter_mut().find(|(key, _)| key == &format) {
-            group.1.push(path);
-        } else {
-            groups.push((format, vec![path]));
-        }
-    }
-    let Some((format, paths)) = groups.into_iter().max_by_key(|(_, paths)| paths.len()) else {
-        return;
-    };
-    let (quote, separator) = crate::cfg_map(|config| {
-        (
-            config.ctx_copy_quote.clone(),
-            config.ctx_copy_separator.clone(),
-        )
-    });
-    let formatted: Vec<String> = paths.iter().map(|path| formatted(&format, path)).collect();
-    let text = core_ctx::format_paths(&formatted, &quote, &separator);
-    if !copy_to_clipboard(&text) {
-        crate::log_line("ctx copy: clipboard stayed busy");
     }
 }
 
@@ -366,20 +370,32 @@ pub(crate) fn flush_collected() {
 /// .bat/.cmd and document associations; `hidden_console` rides the show
 /// command (console hosts honor SW_HIDE).
 pub(crate) fn spawn_rule(rule: &core_ctx::CtxRule, path: &str) -> bool {
-    if !rule.enabled {
+    if !rule.enabled || rule.separator {
         return false;
     }
     let selection = PathBuf::from(path);
+    let allowed = match rule.scope.as_str() {
+        core_ctx::SCOPE_FILE => selection.is_file(),
+        core_ctx::SCOPE_DIR | core_ctx::SCOPE_BACKGROUND => selection.is_dir(),
+        _ => selection.exists(),
+    };
+    if !allowed {
+        return false;
+    }
     if !core_ctx::extension_matches(&rule.patterns, &selection) {
         crate::log_line(&format!("ctx rule {} skipped: pattern mismatch", rule.id));
         return false;
     }
     let args = core_ctx::substitute_args(&rule.args, path);
     let directory = if rule.working_dir.is_empty() {
-        selection
-            .parent()
-            .map(|parent| parent.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        if selection.is_dir() {
+            path.to_string()
+        } else {
+            selection
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
     } else {
         rule.working_dir.clone()
     };

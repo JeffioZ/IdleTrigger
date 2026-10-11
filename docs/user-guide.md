@@ -10,6 +10,24 @@ Enable Start with Windows in Settings if needed. If already enabled, startup rep
 
 可在设置中启用自启动。若已启用自启动，将 EXE 移至新目录并运行后会自动更新注册路径。`--minimized` 隐藏初始面板，`--delay=N` 最多延迟初始化 60 秒。
 
+## Explorer context menu / 资源管理器右键增强
+
+Enable **Settings → Context menu** and save to register the menus for the current Windows user. On Windows 11 they normally appear under **Show more options**. The optional classic-menu switch applies immediately after confirmation and restarts Explorer; save work in Explorer windows first. IdleTrigger does not claim a classic-menu override created by another tool. The `ctx_win11_classic` configuration value records the last UI action; editing that value alone does not change Windows.
+
+在**设置 → 右键增强**中启用并保存后，菜单注册到当前 Windows 用户。Windows 11 默认在**显示更多选项**中显示。经典菜单开关在确认后立即生效并重启 Explorer，请先处理好已打开的资源管理器窗口；IdleTrigger 不接管其他工具设置的经典菜单。配置中的 `ctx_win11_classic` 仅记录界面操作，手工修改该值不会改动系统。
+
+- **Copy path** supports one selected item: full path, shortcut target, parent folder, file name, name without extension, or extension. Shortcut target is shown only for `.lnk` files. It also works without the tray app running. Multi-selection is deliberately unavailable: separate static-verb processes cannot reliably identify one complete selection, and must not silently overwrite or combine different copy operations. The old join-separator preference remains in the configuration for compatibility.
+- **Custom rules** have a title, program, scope, extension filter, arguments, optional icon and working folder, and individual enabled state. New rules start with `"%1"` as the argument template; `%1`, `%L`, and `%V` substitute the selected path once. **Preview arguments** uses an example path and does not run the command. An empty working folder uses the selected folder, or a selected file's parent.
+- Filters accept simple extensions such as `*.txt;*.dll`, `.txt`, or `txt`; empty means all types. Compound patterns such as `*.tar.gz` and other wildcards are rejected. Scope and filtering apply in both flat and submenu modes. Rules can launch once per selected item; Explorer's Document selection model normally limits these verbs to 15 selected items.
+- Save and Cancel apply to the rule being edited. Switching, adding, or closing with a draft asks whether to save or discard it. If the configuration changes externally, saving refuses to overwrite it; Cancel reloads the latest rules. Same-title rules remain separate. Invalid entries are disabled and retained so other rules can still be edited. At most 32 rules are registered; oversized external documents remain intact and should be reduced in the manager.
+- Move Up/Down changes menu order. An enabled separator requires submenu mode; leading and trailing separators are omitted. The manager explains when the master switch is off or registration needs repair. Use **More settings → Repair** for the saved configuration. Turn the master switch off and save before removing or moving the EXE; if moved while enabled, run the new copy after exiting the old instance to repair paths.
+
+- **复制路径**支持单个所选项目的完整路径、快捷方式目标、所在文件夹、文件名、不含扩展名的名称或扩展名；目标路径仅对 `.lnk` 显示。托盘未运行时也可使用。当前明确不支持多选：多个静态菜单进程无法可靠识别一次完整选择，不能静默覆盖路径或混入另一次复制；旧拼接分隔符配置仅为兼容保留。
+- **自定义规则**可编辑标题、程序、作用范围、扩展名过滤、参数、图标、工作目录及单独启停。新规则默认参数为 `"%1"`；`%1`、`%L`、`%V` 只替换一次所选路径。**预览参数**使用示例路径，不执行命令。工作目录留空时，使用所选文件夹或所选文件的所在目录。
+- 过滤支持 `*.txt;*.dll`、`.txt`、`txt` 等简单扩展名，留空不限类型；不支持 `*.tar.gz` 等复合模式及其他通配符。平铺和子菜单模式均遵循范围及过滤条件。规则可对每个所选项目分别启动一次；Explorer 的 Document 模型通常将这类菜单限制在 15 个所选项目以内。
+- 保存和取消针对当前规则。切换、新建、关闭前有草稿时，会询问保存或放弃。检测到外部配置变化时拒绝覆盖，点击取消可加载最新规则；同名规则仍分别维护。损坏规则禁用并保留，不阻止编辑其他正常规则。最多注册 32 条；外部超额配置不截断，应在管理器中减少数量。
+- 上移、下移会改变菜单顺序。点击“分隔线”直接追加到列表末尾并保存；列表为空、末尾已有分隔线或达到数量上限时不可添加。有未保存草稿时会先询问如何处理。启用的分隔线会使子菜单模式生效，首尾分隔线不显示；末尾分隔线可在后方添加规则后用于分组，也可上移。管理器会说明总开关关闭、注册不完整等状态；**更多设置 → 修复**依据已保存配置执行。删除或移动 EXE 前应关闭总开关并保存；启用时移动了程序，则先退出旧实例，再运行新副本修复菜单路径。
+
 ## Power management / 电源管理
 
 - **Stay Awake** prevents automatic system sleep. Display-on is a separate option. Battery restrictions pause the effective state without changing your saved switch. An optional lock pause pauses it while the workstation is locked, resuming the previous state on unlock. An armed lock pause or battery policy is noted on the Stay Awake tooltip.

@@ -108,6 +108,15 @@ unsafe fn add_tool(panel: HWND, id: usize, text: &str) {
     }
 }
 
+/// Register actual child handles when another form is created.
+pub fn register_controls(window: HWND) {
+    for (id, source) in TOOLS {
+        unsafe {
+            add_tool(window, id, &source.render());
+        }
+    }
+}
+
 /// Re-themes the shared tooltip after a light/dark switch (Go ApplyTooltip).
 pub fn retheme() {
     unsafe {
@@ -193,7 +202,15 @@ fn status_theme_schedule() -> String {
 /// Every panel tool: control id plus its caption source. Action buttons
 /// describe what they do; only real toggles carry the enabled/disabled
 /// state line.
-const TOOLS: [(usize, TipSource); 28] = [
+const TOOLS: [(usize, TipSource); 30] = [
+    (
+        crate::ctx_ui::FIELD_WORK,
+        TipSource::Key("tip_ctx_working_dir"),
+    ),
+    (
+        crate::ctx_ui::ID_ADD_SEP,
+        TipSource::Key("tip_ctx_add_separator"),
+    ),
     (
         crate::ctx_ui::FIELD_ID_TITLE,
         TipSource::Key("tip_ctx_f_title"),
@@ -310,13 +327,12 @@ pub fn refresh_all(panel: HWND) {
                 Some(LPARAM(width)),
             );
         }
-        const TOOL_COUNT: usize = TOOLS.len();
-        static LAST: std::sync::Mutex<[Option<String>; TOOL_COUNT]> =
-            std::sync::Mutex::new([const { None }; TOOL_COUNT]);
+        static LAST: std::sync::Mutex<std::collections::BTreeMap<(isize, usize), String>> =
+            std::sync::Mutex::new(std::collections::BTreeMap::new());
         let mut last = crate::runtime::lock(&LAST);
         for (slot, (id, source)) in TOOLS.into_iter().enumerate() {
             let text = source.render();
-            if last[slot].as_deref() == Some(text.as_str()) {
+            if last.get(&(panel.0 as isize, slot)).map(String::as_str) == Some(text.as_str()) {
                 continue;
             }
             let target = get_panel_child(panel, id);
@@ -340,7 +356,7 @@ pub fn refresh_all(panel: HWND) {
                 Some(WPARAM(0)),
                 Some(LPARAM(&tool as *const _ as isize)),
             );
-            last[slot] = Some(text);
+            last.insert((panel.0 as isize, slot), text);
         }
     }
 }
@@ -353,6 +369,8 @@ pub(crate) fn focus_tip_active(control: HWND) -> bool {
 }
 
 static FOCUS_TIP: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+// Dismissal is posted and may run after the target HWND has been destroyed.
+static FOCUS_OWNER: AtomicIsize = AtomicIsize::new(0);
 /// While true (a switch toggle or its flight is painting), text refreshes
 /// pause so updating a visible tooltip cannot flicker it. Never TTM_POP
 /// from here: while ANY tool is track-active (a focus tip), popping it
@@ -377,7 +395,13 @@ pub fn set_focus_tip(control: HWND, active: bool) {
         if tip.is_invalid() {
             return;
         }
-        let panel = crate::hwnd(&crate::PANEL);
+        let mut panel = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+            control,
+            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+        );
+        if panel.is_invalid() && !active {
+            panel = HWND(FOCUS_OWNER.load(Ordering::SeqCst) as *mut _);
+        }
         if panel.is_invalid() {
             return;
         }
@@ -401,6 +425,7 @@ pub fn set_focus_tip(control: HWND, active: bool) {
             return; // the control has no registered tool
         }
         if active {
+            FOCUS_OWNER.store(panel.0 as isize, Ordering::SeqCst);
             FOCUS_TIP.store(control.0 as isize, Ordering::SeqCst);
             tool.uFlags |= TTF_TRACK | TTF_ABSOLUTE;
             let _ = SendMessageW(
@@ -438,6 +463,7 @@ pub fn set_focus_tip(control: HWND, active: bool) {
             );
             if focus_tip_active(control) {
                 FOCUS_TIP.store(0, Ordering::SeqCst);
+                FOCUS_OWNER.store(0, Ordering::SeqCst);
             }
             // The tool is no longer track-active, so a plain pop cannot
             // strand it. Some owner states (e.g. the panel hiding while the
@@ -577,10 +603,14 @@ fn state_power_tip(nosleep: bool) -> String {
         }
         if battery_allowed {
             full_body.push('\n');
-            full_body.push_str(&crate::t_args(
-                "tip_nosleep_battery_allowed",
-                &[&battery_threshold.to_string()],
-            ));
+            full_body.push_str(&if battery_threshold == 0 {
+                crate::t_pub("tip_nosleep_battery_no_minimum")
+            } else {
+                crate::t_args(
+                    "tip_nosleep_battery_allowed",
+                    &[&battery_threshold.to_string()],
+                )
+            });
         }
         (awake_status, full_body)
     } else {

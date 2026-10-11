@@ -118,8 +118,6 @@ const ID_CTX_FIX: i32 = 224;
 const ID_CTX_COPY_ENABLED: i32 = 225;
 const ID_CTX_QUOTE_LBL: i32 = 226;
 const ID_CTX_QUOTE: i32 = 227;
-const ID_CTX_SEP_LBL: i32 = 228;
-const ID_CTX_SEP: i32 = 229;
 const ID_CTX_RULES_HINT: i32 = 230;
 const ID_CTX_MANAGE: i32 = 231;
 const ID_CTX_WIN11: i32 = 233;
@@ -1070,7 +1068,7 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         // Windows 11 rollback is one switch row (not its own card); problem
         // notices (registry drift, third-party conflicts) appear on demand
         // as the card's last row — refresh_ctx_status resizes the card.
-        section_card(hwnd, CARD_BASE + 8, font, (CONTENT_X, 114, CARD_W, 276));
+        section_card(hwnd, CARD_BASE + 8, font, (CONTENT_X, 114, CARD_W, 208));
         label(
             hwnd,
             ID_CTX_TITLE,
@@ -1111,24 +1109,10 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         );
         label(
             hwnd,
-            ID_CTX_SEP_LBL,
-            &t_pub("ctx_sep_label"),
-            font,
-            (ROW_X, 242, 208, 22),
-            false,
-        );
-        combo(
-            hwnd,
-            ID_CTX_SEP,
-            (420, 236, 220, FIELD_H),
-            &[t_pub("ctx_sep_newline"), t_pub("ctx_sep_space")],
-        );
-        label(
-            hwnd,
             ID_CTX_RULES_HINT,
             &t_pub("ctx_rules_hint"),
             font,
-            (ROW_X, 282, 300, 22),
+            (ROW_X, 242, 300, 22),
             false,
         );
         // Buttons stop 12px inside the card's right edge (combo alignment);
@@ -1137,14 +1121,15 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
             hwnd,
             ID_CTX_MANAGE,
             &t_pub("ctx_manage_rules"),
-            (536, 278, 104, 28),
+            (536, 238, 104, 28),
         );
         checkbox(
             hwnd,
             ID_CTX_SUBMENU,
             &t_pub("ctx_submenu_label"),
-            (ROW_X, 312, ROW_W, CHECK_H),
+            (ROW_X, 280, ROW_W, CHECK_H),
         );
+        section_card(hwnd, CARD_BASE + 9, font, (CONTENT_X, 334, CARD_W, 56));
         checkbox(
             hwnd,
             ID_CTX_WIN11,
@@ -1898,12 +1883,11 @@ fn populate(hwnd: HWND) {
     // Context-menu page: staged switches mirror the live config; the status
     // and rollback lines always read the registry truth.
     {
-        let (ctx_menu, ctx_copy, quote, separator) = crate::cfg_map(|c| {
+        let (ctx_menu, ctx_copy, quote) = crate::cfg_map(|c| {
             (
                 c.ctx_menu_enabled,
                 c.ctx_copy_enabled,
                 c.ctx_copy_quote.clone(),
-                c.ctx_copy_separator.clone(),
             )
         });
         set_checked(hwnd, ID_CTX_ENABLED, ctx_menu);
@@ -1911,7 +1895,6 @@ fn populate(hwnd: HWND) {
         let submenu = crate::cfg_map(|c| c.ctx_rules_submenu);
         set_checked(hwnd, ID_CTX_SUBMENU, submenu);
         crate::choice::select_index(get(hwnd, ID_CTX_QUOTE), quote_index(&quote) as i32);
-        crate::choice::select_index(get(hwnd, ID_CTX_SEP), separator_index(&separator) as i32);
         refresh_ctx_status(hwnd);
     }
 
@@ -2005,22 +1988,22 @@ fn refresh_ctx_status(hwnd: HWND) {
     // outside any scope and the panel-creation fallback resizes the card
     // to a wrong physical height (the link then lands below the card).
     let _dpi = crate::dpi::Scope::window(hwnd);
-    let (copy, rules) = crate::ctxmenu::registration_status();
-    let (copy_wanted, any_rules) = crate::cfg_map(|c| {
-        (
-            c.ctx_copy_enabled,
-            crate::runtime::lock(&crate::ctxexec::CTX_RULES)
-                .iter()
-                .any(|rule| rule.enabled),
-        )
-    });
-    // Read the switch the user SEES (the staged checkbox), not the saved
-    // config: a saved-on/staged-off user must not be told to "fix" anything.
-    // The reverse direction (off but verbs linger) is deliberately ignored —
-    // stale entries are harmless and self-heal at the next sync.
-    let enabled = is_checked(hwnd, ID_CTX_ENABLED);
-    let registered = copy || rules > 0;
-    let drift = enabled && (copy_wanted || any_rules) && !registered;
+    // Repair applies the saved state. A staged switch is not registry drift.
+    let staged = is_checked(hwnd, ID_CTX_ENABLED);
+    let saved = crate::cfg_map(|c| c.ctx_menu_enabled);
+    let drift = staged == saved && !crate::ctxmenu::registration_healthy();
+    let forced = crate::runtime::lock(&crate::ctxexec::CTX_RULES)
+        .iter()
+        .any(|r| r.enabled && r.separator);
+    set_text(
+        hwnd,
+        ID_CTX_SUBMENU,
+        &t_pub(if forced {
+            "ctx_submenu_forced"
+        } else {
+            "ctx_submenu_label"
+        }),
+    );
     let conflict = conflict_text();
 
     // The rollback switch mirrors the registry, not a staged draft.
@@ -2118,12 +2101,15 @@ fn on_win11_classic_switch(hwnd: HWND) {
         return;
     }
     if let Err(err) = crate::ctxmenu::set_classic(enable) {
-        set_text(hwnd, ID_CTX_STATUS, &err);
+        crate::warn_dialog("", &crate::t_args("ctx_classic_failed", &[&err]));
         return;
     }
     if let Err(err) = crate::edit_config(|c| c.ctx_win11_classic = enable) {
         // The registry is authoritative; the flag only feeds self-heal.
         crate::log_line(&format!("ctx win11 flag save failed: {err}"));
+    }
+    if let Some(base) = crate::runtime::lock(&DRAFT_BASE).as_mut() {
+        base.ctx_win11_classic = crate::cfg_map(|c| c.ctx_win11_classic);
     }
     crate::ctxmenu::restart_explorer();
     rebuild_surface(hwnd);
@@ -2357,6 +2343,7 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_PAGE_TITLE_CTX,
             ID_PAGE_SUB_CTX,
             CARD_BASE + 8,
+            CARD_BASE + 9,
             ID_CTX_TITLE,
             ID_CTX_ENABLED,
             ID_CTX_STATUS,
@@ -2364,8 +2351,6 @@ fn page_ids(page: i32) -> &'static [i32] {
             ID_CTX_COPY_ENABLED,
             ID_CTX_QUOTE_LBL,
             ID_CTX_QUOTE,
-            ID_CTX_SEP_LBL,
-            ID_CTX_SEP,
             ID_CTX_RULES_HINT,
             ID_CTX_MANAGE,
             ID_CTX_SUBMENU,
@@ -2404,13 +2389,24 @@ fn apply_dependent_states(hwnd: HWND) {
         }
         // The rollback switch only exists on Windows 11 builds.
         if page == 5 {
-            show(ID_CTX_WIN11, crate::system::windows_build() >= 22000);
+            let classic_supported = crate::system::windows_build() >= 22000;
+            show(ID_CTX_WIN11, classic_supported);
+            show(CARD_BASE + 9, classic_supported);
         }
-        // Page 0 note: the battery threshold field has NO disabled state -
-        // it always reads as editable and simply only takes effect while
-        // the battery-allowance switch is on. Enable/disable transitions
-        // were a persistent repaint hazard (erase-less EnableWindow
-        // repaints plus enable-state well repaints) for no real benefit.
+        let battery_allowed = is_checked(hwnd, ID_BATTERY_ALLOWED);
+        for id in [ID_BATTERY_LBL, ID_BATTERY_THRESH] {
+            let control = get(hwnd, id);
+            if IsWindowEnabled(control).as_bool() != battery_allowed {
+                let _ = EnableWindow(control, battery_allowed);
+                // EnableWindow alone can repaint without erasing the old
+                // edit background. Refresh its interior and only its own
+                // card well, preserving neighboring controls' text.
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
+                if id == ID_BATTERY_THRESH {
+                    invalidate_well(hwnd, id);
+                }
+            }
+        }
         if page == 2 {
             // The pre-change restore needs a captured snapshot; the muted
             // caption under it explains when one appears.
@@ -2508,13 +2504,19 @@ struct Draft {
 
 fn collect_draft(hwnd: HWND) -> Draft {
     let battery_text = control_text(hwnd, ID_BATTERY_THRESH);
-    // Go: an empty threshold reads as 0 when the battery rule is off.
-    let battery_threshold =
-        if !is_checked(hwnd, ID_BATTERY_ALLOWED) && battery_text.trim().is_empty() {
-            Some(0)
-        } else {
-            battery_text.trim().parse().ok()
-        };
+    let mut battery_threshold = battery_text.trim().parse::<i32>().ok();
+    // A disabled field cannot be corrected. Preserve its saved value if
+    // the unfinished edit is invalid; keep valid edits for later use.
+    if !is_checked(hwnd, ID_BATTERY_ALLOWED)
+        && !battery_threshold.is_some_and(|value| (0..=100).contains(&value))
+    {
+        battery_threshold = Some(
+            crate::runtime::lock(&DRAFT_BASE)
+                .as_ref()
+                .map(|base| base.nosleep_battery_threshold)
+                .unwrap_or_else(|| crate::cfg_map(|c| c.nosleep_battery_threshold)),
+        );
+    }
     // The row value already is the scheme name ("" = no linkage); the
     // Install footer is an action, never a saved selection.
     let scheme_at = |id: i32| -> String {
@@ -2569,7 +2571,7 @@ fn collect_draft(hwnd: HWND) -> Draft {
         ctx_copy: is_checked(hwnd, ID_CTX_COPY_ENABLED),
         ctx_submenu: is_checked(hwnd, ID_CTX_SUBMENU),
         ctx_quote_idx: combo_sel(hwnd, ID_CTX_QUOTE).min(2),
-        ctx_sep_idx: combo_sel(hwnd, ID_CTX_SEP).min(1),
+        ctx_sep_idx: crate::cfg_map(|c| separator_index(&c.ctx_copy_separator)),
     }
 }
 
@@ -2833,6 +2835,9 @@ fn save() {
         crate::log_line("settings changed");
         // Context-menu verbs follow the saved switch/titles immediately.
         crate::ctxmenu::sync("settings");
+        if !crate::ctxmenu::registration_healthy() {
+            failures.push(t_pub("ctx_registry_failed"));
+        }
         refresh_ctx_status(hwnd);
         // Appearance settings take effect for the current side right away:
         // configuring them shows the result, no switch needed.
@@ -2971,7 +2976,6 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_CTX_COPY_ENABLED, "tip_ctx_copy"),
         (ID_CTX_SUBMENU, "tip_ctx_submenu"),
         (ID_CTX_QUOTE, "tip_ctx_quote"),
-        (ID_CTX_SEP, "tip_ctx_sep"),
         (ID_CTX_WIN11, "tip_ctx_win11"),
         (ID_CTX_MANAGE, "tip_ctx_manage"),
         (ID_CANCEL, "tip_settings_cancel"),
@@ -3525,10 +3529,19 @@ fn handle_click(hwnd: HWND, idc: i32) {
             ID_APP_UPDATE_CHECK => on_update_check_button(),
             ID_CTX_FIX => {
                 crate::ctxmenu::sync("repair");
+                if !crate::ctxmenu::registration_healthy() {
+                    crate::warn_dialog("", &t_pub("ctx_registry_failed"));
+                }
                 refresh_ctx_status(hwnd);
             }
             ID_CTX_WIN11 => on_win11_classic_switch(hwnd),
-            ID_CTX_MANAGE => crate::ctx_ui::show(),
+            ID_CTX_MANAGE => {
+                if MODAL_OWNER.load(Ordering::SeqCst) != 0 {
+                    close_request();
+                } else {
+                    crate::ctx_ui::show_modal_to(hwnd);
+                }
+            }
             ID_SAVE => save(),
             ID_CANCEL => close_request(),
             _ => {}
@@ -3672,7 +3685,6 @@ pub fn refresh_language() {
         (ID_CTX_ENABLED, "settings_ctx_enable"),
         (ID_CTX_COPY_ENABLED, "settings_ctx_copy"),
         (ID_CTX_QUOTE_LBL, "ctx_quote_label"),
-        (ID_CTX_SEP_LBL, "ctx_sep_label"),
         (ID_CTX_RULES_HINT, "ctx_rules_hint"),
         (ID_CTX_SUBMENU, "ctx_submenu_label"),
         (ID_CTX_WIN11, "ctx_win11_switch"),
@@ -3860,6 +3872,31 @@ mod locale_tests {
         assert_eq!(control_text(window, ID_PAGE_TITLE_POWER), "电源管理");
         assert_eq!(combo_sel(window, ID_LANGUAGE), 2);
         assert_eq!(*crate::runtime::lock(&DRAFT_BASE), baseline);
+        set_checked(window, ID_BATTERY_ALLOWED, true);
+        set_text(window, ID_BATTERY_THRESH, "101");
+        assert_eq!(
+            validate_draft(&collect_draft(window)).unwrap().1,
+            ID_BATTERY_THRESH
+        );
+        set_checked(window, ID_BATTERY_ALLOWED, false);
+        apply_dependent_states(window);
+        assert!(!unsafe { IsWindowEnabled(get(window, ID_BATTERY_THRESH)).as_bool() });
+        let disabled_draft = collect_draft(window);
+        assert_eq!(
+            disabled_draft.battery_threshold,
+            baseline.as_ref().map(|base| base.nosleep_battery_threshold)
+        );
+        assert!(validate_draft(&disabled_draft).is_none());
+        assert_eq!(control_text(window, ID_BATTERY_THRESH), "101");
+        set_checked(window, ID_BATTERY_ALLOWED, true);
+        apply_dependent_states(window);
+        assert_eq!(
+            validate_draft(&collect_draft(window)).unwrap().1,
+            ID_BATTERY_THRESH
+        );
+        set_text(window, ID_BATTERY_THRESH, "42");
+        set_checked(window, ID_BATTERY_ALLOWED, false);
+        assert_eq!(collect_draft(window).battery_threshold, Some(42));
         PAGE.store(1, Ordering::SeqCst);
         crate::choice::select_index(get(window, ID_THEME_MODE), 1);
         crate::choice::select_index(get(window, ID_LOCATION_SOURCE), 1);
@@ -3876,6 +3913,13 @@ mod locale_tests {
         assert!(!visible(ID_LOCATION_SOURCE));
         assert!(visible(ID_LIGHT_TIME));
         assert_eq!(control_text(window, ID_IDLE_TIMEOUT), "073");
+        PAGE.store(5, Ordering::SeqCst);
+        apply_dependent_states(window);
+        assert_eq!(visible(CARD_BASE + 9), visible(ID_CTX_WIN11));
+        assert_eq!(
+            visible(CARD_BASE + 9),
+            crate::system::windows_build() >= 22000
+        );
         unsafe {
             DestroyWindow(window).unwrap();
         }

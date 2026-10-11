@@ -1425,10 +1425,7 @@ pub fn finish_manual_switch() {
     let error = crate::runtime::lock(&MANUAL_ERROR).take();
     if let Some(error) = error {
         crate::log_line(&format!("manual theme switch failed: {error}"));
-        // The body is a raw registry error (open/verify path) surfaced as-is:
-        // translating every Win32 failure string is out of scope for a
-        // should-never-happen path; the log line above carries the detail.
-        crate::warn_dialog("", &error);
+        crate::warn_dialog("", &crate::t_args("theme_switch_failed", &[&error]));
     }
 }
 
@@ -1473,7 +1470,10 @@ pub fn repair() {
         })
     {
         REPAIR_RUNNING.store(false, Ordering::SeqCst);
-        crate::warn_dialog("", &error.to_string());
+        crate::warn_dialog(
+            "",
+            &crate::t_args("theme_repair_failed", &[&error.to_string()]),
+        );
     }
 }
 

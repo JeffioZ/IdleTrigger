@@ -113,6 +113,7 @@ pub fn refresh_text_scale() {
         crate::hwnd(&crate::WARNING),
         crate::hwnd(&crate::ACTION_WARN_HWND),
         crate::settings_ui::theme_hwnd(),
+        crate::ctx_ui::theme_hwnd(),
     ]
     .into_iter()
     .chain(crate::automation_ui::theme_hwnds())

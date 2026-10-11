@@ -998,7 +998,10 @@ fn refresh_list() {
                 .iter()
                 .find(|i| i.index == index || (!i.rule_id.is_empty() && i.rule_id == rule.id));
             let (state, summary) = match &issue {
-                Some(i) => (t_pub("automation_rule_invalid"), i.message.clone()),
+                Some(i) => (
+                    t_pub("automation_rule_invalid"),
+                    crate::t_args("automation_rule_issue", &[&i.message]),
+                ),
                 None => (
                     if rule.enabled {
                         t_pub("automation_rule_enabled")
@@ -2397,7 +2400,7 @@ fn populate_editor() {
         set_text(
             get_dlg_item(ed, ED_VALIDATION),
             &match &issue {
-                Some(i) => i.message.clone(),
+                Some(i) => crate::t_args("automation_rule_issue", &[&i.message]),
                 None => t_pub("automation_runtime_note"),
             },
         );
@@ -2481,6 +2484,9 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
 fn validate_draft(draft: &auto::Rule) -> Option<(usize, String)> {
     let t = |key: &str| t_pub(key);
     let trigger = draft.trigger.as_str();
+    if trigger == auto::TRIGGER_BATTERY_BELOW && !(1..=95).contains(&draft.battery_level) {
+        return Some((ED_BATTERY, t("automation_error_battery_level")));
+    }
     let needs_process = matches!(
         trigger,
         "process_running" | "process_started" | "process_exited"
@@ -2576,7 +2582,11 @@ fn save_rule(ed: HWND) {
 
     let (mut normalized, issues) = auto::prepare_rules(std::slice::from_ref(&draft));
     if let Some(issue) = issues.first() {
-        set_editor_error(ed, ED_SAVE, &issue.message);
+        set_editor_error(
+            ed,
+            ED_SAVE,
+            &crate::t_args("automation_rule_issue", &[&issue.message]),
+        );
         return;
     }
     let draft = normalized.remove(0);
@@ -5383,6 +5393,7 @@ fn refresh_tooltips() {
                 (ED_LOGIC, "tip_process_logic"),
                 (ED_WARNING, "tip_warning_seconds"),
                 (ED_IDLE_MIN, "tip_idle_minutes"),
+                (ED_BATTERY, "tip_automation_battery_level"),
                 (ED_MAX_WAIT, "tip_max_wait"),
                 (ED_KEEP_SCREEN, "tip_keep_screen"),
                 (ED_BLOCKED, "tip_blocked_policy"),

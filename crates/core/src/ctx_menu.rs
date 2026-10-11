@@ -105,6 +105,7 @@ pub struct CtxIssue {
 pub enum IssueCode {
     TitleRequired,
     CommandRequired,
+    PatternInvalid,
     TooMany,
     /// A malformed [[ctx_rules]] entry (the message carries the decode error).
     Parse,
@@ -154,7 +155,7 @@ fn extension_token(token: &str) -> Option<String> {
     if stripped.is_empty()
         || !stripped
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return None;
     }
@@ -162,8 +163,8 @@ fn extension_token(token: &str) -> Option<String> {
 }
 
 /// Translates pattern tokens into an `AppliesTo` AQS expression. `None`
-/// means "show the verb unfiltered" (empty list, a `*` token, or a token the
-/// filter syntax cannot express; invoke-time matching still applies).
+/// means "show the verb unfiltered" for an empty list or `*`. Unsupported
+/// tokens are rejected by validation and fail closed at invocation time.
 pub fn applies_to_aqs(patterns: &[String]) -> Option<String> {
     let mut extensions: Vec<String> = Vec::new();
     for token in patterns {
@@ -201,7 +202,7 @@ pub fn extension_matches(patterns: &[String], path: &std::path::Path) -> bool {
         .unwrap_or_default();
     patterns.iter().any(|token| match extension_token(token) {
         Some(ext) => ext.is_empty() || ext == actual,
-        None => true,
+        None => false,
     })
 }
 
@@ -238,9 +239,22 @@ pub fn format_paths(paths: &[String], quote: &str, separator: &str) -> String {
 /// Replaces `%1`/`%L`/`%V` in an argument template with the raw selected
 /// path; the template supplies its own quoting (`"%1"`).
 pub fn substitute_args(args: &str, path: &str) -> String {
-    args.replace("%L", path)
-        .replace("%V", path)
-        .replace("%1", path)
+    let mut output = String::new();
+    let mut chars = args.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' && matches!(chars.peek(), Some('1' | 'L' | 'V')) {
+            chars.next();
+            output.push_str(path);
+            // A quoted drive root must not escape its closing quote in
+            // CommandLineToArgvW / the Microsoft CRT argument parser.
+            if chars.peek() == Some(&'"') {
+                output.extend(path.chars().rev().take_while(|c| *c == '\\'));
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 /// Slugs a rule id into a registry-key-safe fragment.
@@ -287,7 +301,7 @@ pub fn prepare_rules(rules: Vec<CtxRule>) -> (Vec<CtxRule>, Vec<CtxIssue>) {
             base.clone()
         };
         let mut suffix = 2;
-        while used_ids.contains(&id) {
+        while used_ids.iter().any(|used| used.eq_ignore_ascii_case(&id)) {
             let seed = if base.is_empty() {
                 format!("rule{}", index + 1)
             } else {
@@ -299,6 +313,17 @@ pub fn prepare_rules(rules: Vec<CtxRule>) -> (Vec<CtxRule>, Vec<CtxIssue>) {
         rule.id = id.clone();
         used_ids.push(id);
         if !rule.separator {
+            if rule
+                .patterns
+                .iter()
+                .any(|pattern| extension_token(pattern).is_none())
+            {
+                issues.push(CtxIssue {
+                    index,
+                    code: IssueCode::PatternInvalid,
+                    message: format!("ctx_rules[{index}]: use simple extensions such as *.txt"),
+                });
+            }
             if rule.title.is_empty() {
                 issues.push(CtxIssue {
                     index,
@@ -318,11 +343,10 @@ pub fn prepare_rules(rules: Vec<CtxRule>) -> (Vec<CtxRule>, Vec<CtxIssue>) {
     }
     if prepared.len() > MAX_CTX_RULES {
         let overflow = prepared.len() - MAX_CTX_RULES;
-        prepared.truncate(MAX_CTX_RULES);
         issues.push(CtxIssue {
             index: MAX_CTX_RULES,
             code: IssueCode::TooMany,
-            message: format!("ctx_rules: at most {MAX_CTX_RULES} rules ({overflow} dropped)"),
+            message: format!("ctx_rules: at most {MAX_CTX_RULES} rules ({overflow} extra)"),
         });
     }
     (prepared, issues)
@@ -402,6 +426,13 @@ fn decode(tables: &[Entry]) -> (Vec<CtxRule>, Vec<CtxIssue>) {
             message: format!("ctx_rules[{index}]: {error}"),
         });
     }
+    for issue in &issues {
+        if issue.code != IssueCode::TooMany
+            && let Some(rule) = rules.get_mut(issue.index)
+        {
+            rule.enabled = false;
+        }
+    }
     issues.sort_by_key(|issue| issue.index);
     (rules, issues)
 }
@@ -443,6 +474,14 @@ pub fn update_rules(
     }
     let (_, issues) = prepare_rules(proposed.to_vec());
     for issue in issues {
+        if issue.code == IssueCode::TooMany {
+            // Existing oversized documents remain lossless and can be
+            // reduced or edited, but cannot grow further.
+            if proposed.len() > current.len() {
+                return Err(issue.message);
+            }
+            continue;
+        }
         if !current.iter().any(|old| old == &proposed[issue.index]) {
             return Err(issue.message);
         }
@@ -521,6 +560,79 @@ pub fn update_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inserted_paths_are_not_reparsed_and_quoted_roots_are_escaped() {
+        assert_eq!(
+            substitute_args("\"%L\"", r"C:\temp\%1.txt"),
+            "\"C:\\temp\\%1.txt\""
+        );
+        assert_eq!(substitute_args("\"%1\"", "C:\\"), "\"C:\\\\\"");
+        assert_eq!(substitute_args("%V", "C:\\"), "C:\\");
+    }
+
+    #[test]
+    fn invalid_patterns_fail_closed_and_ids_match_registry_case_rules() {
+        assert!(!extension_matches(
+            &["*.tar.gz".into()],
+            std::path::Path::new("x.exe")
+        ));
+        assert!(extension_matches(
+            &["*.my_ext".into()],
+            std::path::Path::new("x.my_ext")
+        ));
+        let rule = CtxRule {
+            id: "Tool".into(),
+            title: "Tool".into(),
+            command: "tool.exe".into(),
+            ..Default::default()
+        };
+        let second = CtxRule {
+            id: "tool".into(),
+            patterns: vec!["*.tar.gz".into()],
+            ..rule.clone()
+        };
+        let (rules, issues) = prepare_rules(vec![rule, second]);
+        assert!(!rules[0].id.eq_ignore_ascii_case(&rules[1].id));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == IssueCode::PatternInvalid)
+        );
+    }
+
+    #[test]
+    fn oversized_documents_are_not_truncated_by_unrelated_edits() {
+        let rules: Vec<_> = (0..MAX_CTX_RULES + 2)
+            .map(|i| CtxRule {
+                id: format!("r{i}"),
+                title: format!("Rule {i}"),
+                command: "tool.exe".into(),
+                ..Default::default()
+            })
+            .collect();
+        let mut doc = DocumentMut::new();
+        let mut tables = ArrayOfTables::new();
+        for rule in &rules {
+            tables.push(encoded(rule).unwrap());
+        }
+        doc["ctx_rules"] = Item::ArrayOfTables(tables);
+        let (base, issues) = read_rules(&doc).unwrap();
+        assert_eq!(base.len(), rules.len());
+        assert!(issues.iter().any(|issue| issue.code == IssueCode::TooMany));
+        let mut next = base.clone();
+        next[0].title = "Edited".into();
+        update_rules(&mut doc, &base, &next).unwrap();
+        assert_eq!(read_rules(&doc).unwrap().0.len(), rules.len());
+        let snapshot = doc.to_string();
+        next.push(CtxRule {
+            id: "extra".into(),
+            ..rules[0].clone()
+        });
+        let current = read_rules(&doc).unwrap().0;
+        assert!(update_rules(&mut doc, &current, &next).is_err());
+        assert_eq!(doc.to_string(), snapshot);
+    }
 
     #[test]
     fn aqs_translates_extension_lists() {

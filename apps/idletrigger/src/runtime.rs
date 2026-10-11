@@ -151,7 +151,7 @@ pub(crate) fn commit_config(
     }
     let path = lock(&CONFIG_PATH)
         .clone()
-        .ok_or("configuration path unavailable")?;
+        .ok_or_else(|| crate::t_pub("config_unavailable"))?;
     let source = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -160,10 +160,12 @@ pub(crate) fn commit_config(
     if source != *lock(&CONFIG_SOURCE) {
         return Err(crate::t_pub("settings_save_conflict"));
     }
-    let mut candidate = lock(&CONFIG).clone().ok_or("configuration unavailable")?;
+    let mut candidate = lock(&CONFIG)
+        .clone()
+        .ok_or_else(|| crate::t_pub("config_unavailable"))?;
     let mut doc = lock(&CONFIG_DOC)
         .clone()
-        .ok_or("configuration document unavailable")?;
+        .ok_or_else(|| crate::t_pub("config_unavailable"))?;
     let nosleep_was_on = candidate.nosleep_enabled;
     edit(&mut candidate, &mut doc)?;
     let stay_awake_turned_off = nosleep_was_on && !candidate.nosleep_enabled;
