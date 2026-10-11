@@ -12,6 +12,7 @@ IdleTrigger 使用 Rust 1.88+（见 workspace `rust-version`）、原生 Win32 �
 | `runtime.rs` | Runtime state: config document, serialized writes, log file / 运行态：配置文档、串行写入与日志 |
 | `automation.rs`, `idle_monitor.rs` | Rule evaluation and idle clock / 规则计算与空闲时钟 |
 | `automation_ui.rs`, `settings_ui.rs`, `popups.rs` | Forms and warnings / 表单与提醒 |
+| `ctx_ui.rs`, `ctxmenu.rs`, `ctxexec.rs`, `ctxselection.rs` | Context-menu manager, current-user registration, command expansion, and complete Shell selections / 右键管理窗口、当前用户注册、命令展开与完整 Shell 选择集 |
 | `paint.rs`, `nativeform.rs`, `choice.rs`, `list_style.rs`, `dpi.rs`, `viewport.rs`, `accessibility.rs`, `tooltips.rs` | Shared native controls and accessibility / 共享原生控件及辅助功能 |
 | `theme*.rs`, `iplocate.rs`, `gpu_activity.rs`, `display.rs` | Themes and platform detection / 主题及平台检测 |
 | `system.rs`, `single_instance.rs`, `ipc.rs`, `pipe.rs` | System actions, instance ownership, CLI/IPC / 系统操作、单实例及通信 |
@@ -23,6 +24,10 @@ IdleTrigger 使用 Rust 1.88+（见 workspace `rust-version`）、原生 Win32 �
 Config writes are serialized and published only after successful saving. Drafts retain an opening baseline for conflict detection. Workers post messages to the UI thread rather than directly changing controls. Runtime task state and occurrence bookkeeping are separate from user settings.
 
 配置写入串行执行，保存成功后发布；草稿保留打开时基线以检测冲突。后台线程通过消息通知 UI，不直接修改控件。任务运行态、触发记录和用户设置分别维护。
+
+Explorer copying uses an STA local COM server inside the same EXE (`IExecuteCommand` / `IObjectWithSelection`); it receives the full selection and writes the clipboard once. Six fixed current-user CLSIDs serve the copy formats, with a seventh for custom rules; registration and cleanup follow the menu configuration. Folder-background commands use the direct command entry. Copy helpers query the running tray's last valid settings through `ctx:copy-settings`; an IPC failure is not permission to fall back to potentially invalid disk settings. Custom rules share the selection handler for batch execution and validate scope, filters, and expanded command length before launch.
+
+资源管理器复制由同一 EXE 中的 STA 本地 COM 服务（`IExecuteCommand` / `IObjectWithSelection`）接收完整选择集，一次写入剪贴板。六个固定的当前用户 CLSID 对应复制格式，第七个用于自定义规则，随菜单配置注册与清理；文件夹空白处仍走直接命令入口。复制辅助进程通过 `ctx:copy-settings` 查询托盘最近的有效设置；IPC 失败不能回退读取可能无效的磁盘配置。自定义规则的批量执行复用选择处理器，启动前校验范围、过滤条件及展开后的命令行长度。
 
 ## Build / 构建
 
@@ -76,9 +81,9 @@ CI 另用声明的最低版本 Rust 1.88.0 检查双架构编译。Resolver 3 �
 cargo build --locked --release --features devtools --target x86_64-pc-windows-msvc
 ```
 
-Only devtools builds recognize these switches, all requiring `IDLETRIGGER_DEVTOOLS=1`. Use an isolated writable folder and separate configuration with automatic features disabled. Preview modes must not execute real system actions.
+Only devtools builds recognize these switches, all requiring `IDLETRIGGER_DEVTOOLS=1`. Run the diagnostic EXE directly from `target/x86_64-pc-windows-msvc/release/`, with a separate configuration beside it and automatic features disabled. Do not copy it into `dist/`. Preview modes must not execute real system actions.
 
-仅 devtools 构建识别以下开关，均要求 `IDLETRIGGER_DEVTOOLS=1`。使用独立可写目录及配置，关闭自动功能。预览不得执行真实系统操作。
+仅 devtools 构建识别以下开关，均要求 `IDLETRIGGER_DEVTOOLS=1`。直接运行 `target/x86_64-pc-windows-msvc/release/` 下的诊断 EXE，在旁边使用独立配置并关闭自动功能，不复制到 `dist/`。预览不得执行真实系统操作。
 
 | Variable | Purpose / 用途 |
 | --- | --- |
@@ -87,13 +92,19 @@ Only devtools builds recognize these switches, all requiring `IDLETRIGGER_DEVTOO
 | `IDLETRIGGER_DEVTOOLS_THEME=dark\|light` | App-only theme override / 仅覆盖应用主题 |
 | `IDLETRIGGER_DEVTOOLS_CAPTURE_PANEL=1` | Capture client areas and exit / 捕获客户区序列后退出 |
 | `IDLETRIGGER_DEVTOOLS_CAPTURE_STEP_MS=200..10000` | Capture interval / 捕获步进间隔 |
+| `IDLETRIGGER_DEVTOOLS_CAPTURE_STOP_AFTER=N` | Freeze after a capture step for manual interaction / 在指定步骤后停留，供手动交互 |
 | `IDLETRIGGER_DEVTOOLS_WARNING_PREVIEW=1` | Idle-warning preview / 空闲提醒预览 |
+| `IDLETRIGGER_DEVTOOLS_ACTION_WARNING=1` | Automation action countdown preview / 自动任务动作倒计时预览 |
 | `IDLETRIGGER_DEVTOOLS_IDLE_MONITOR_SECONDS=10..600` | Temporary test timeout / 临时测试时长 |
 | `IDLETRIGGER_DEVTOOLS_UPDATE_PREVIEW=1` | Self-update UI preview (9.9.9, no network) / 自更新界面预览（不联网） |
 
 Other switches are defined in `devtools.rs`. Window-DC/BitBlt captures do not prove physical mouse interaction or desktop compositing. Native-message tests cover control states; real input, high contrast, text scaling, mixed-DPI monitors, resume, and actual system actions require a suitable Windows test environment.
 
 其他开关见 `devtools.rs`。窗口 DC/BitBlt 捕获不能证明真实鼠标及桌面合成效果。原生消息测试覆盖控件状态；真实输入、高对比、文本缩放、混合 DPI、恢复及实际系统操作需在合适的 Windows 环境验证。
+
+The current capture sequence covers the panel, five settings pages, the task manager and editor, a choice popup, and the context-menu manager. Curated documentation PNGs live in `docs/images/` and are indexed in [Screenshots](screenshots.md); temporary BMPs remain beside the diagnostic EXE. Refresh documentation images when the visible UI changes, without treating a screenshot refresh as a full regression run.
+
+当前截图序列包含主面板、设置五页、任务管理器及编辑器、下拉弹层和右键增强管理器。用于文档的 PNG 保存在 `docs/images/`，入口见[界面截图](screenshots.md)；临时 BMP 保留在诊断 EXE 旁。界面变化后更新文档配图，截图更新本身不等于完整回归验证。
 
 Cover both languages/themes for UI changes; preserve drafts across DPI/theme changes and reuse shared controls. Config changes must update the model, example, tests, locales, and tooltips. Keep generated output, local config, logs, and diagnostic captures out of Git.
 

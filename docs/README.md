@@ -1,6 +1,7 @@
 # Documentation / 文档
 
 - [User guide / 使用指南](user-guide.md): features, configuration, and CLI.
+- [Screenshots / 界面截图](screenshots.md): current panel and context-menu manager in English/Chinese, light/dark.
 - [Configuration reference / 配置参考](../IdleTrigger.example.toml): annotated TOML fields.
 - [Development / 开发](development.md): architecture, builds, and diagnostics.
 - [Releases / 发布](releasing.md): verification and release checklist.

@@ -16,6 +16,10 @@
 
 Files: `IdleTrigger-x64.exe`, `IdleTrigger-x86.exe`, `SHA256SUMS.txt`. Describe user-visible changes and known limitations. Successful builds cannot replace unperformed hardware/UI checks.
 
+For context-menu changes, include actual Explorer checks in a disposable Windows environment: all six copy formats with Unicode/spaced paths and multiple selections, quoting/separators, single/per-item/batch rules, folder backgrounds, and registration cleanup or EXE relocation. Check the confirmed Windows 11 classic-menu restart and recovery separately. For task-template changes, verify that opening or cancelling a template does not save or execute it. Keep both READMEs, the user guide, and the [screenshots](screenshots.md) aligned with the released UI.
+
+右键功能变更需在独立 Windows 环境实际检查资源管理器：六种复制格式、含空格及 Unicode 路径、多选、引号及分隔方式、单选/逐项/整批规则、文件夹空白处、注册清理与 EXE 迁移。Windows 11 经典菜单确认后的重启及恢复另行验收。任务模板变更需验证打开或取消模板不会保存或执行。两份 README、使用指南及[截图](screenshots.md)应与发布界面一致。
+
 Release notes use `## 更新重点` / `## Highlights` headings, group longer lists under bold subheadings (for example 行为变更 / 修复 / 改进), and end with the standard downloads line plus a Full Changelog compare link to the previous released tag. A release with no earlier tag omits the compare link.
 
 发布文件如上。说明描述用户可见变化和已知限制，构建通过不能代替未执行的硬件或 UI 验证。

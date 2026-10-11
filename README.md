@@ -40,14 +40,16 @@ Native controls support keyboard navigation and preserve edits when display DPI 
 
 Left-click the tray icon for quick controls, then open **Settings** for all persistent preferences.
 
+See the [screenshot gallery](docs/screenshots.md) for the panel and context-menu manager in both languages and themes.
+
 ## ✨ At a Glance
 
 | | Capability | Built for |
 | --- | --- | --- |
 | ⚡ | **Stay Awake** | Downloads, renders, backups, and remote sessions that must keep running; timed presets expire automatically. |
 | ⏱️ | **Idle Actions** | Lock, sleep, hibernate, shut down, restart, or turn the display off after real keyboard and mouse inactivity. |
-| 🔁 | **Automatic Tasks** | Start from templates, then control power features or run built-in actions by schedule and process state. |
-| | **Explorer Context Menu** | Copy selected paths in six formats and manage custom rules with single-item, per-item, or batch execution. See the [user guide](docs/user-guide.md#explorer-context-menu--资源管理器右键增强) for details. |
+| 🔁 | **Automatic Tasks** | Create tasks directly from the panel: process-based wakefulness, work hours, nightly shutdown, low-battery hibernation, or delayed shutdown/sleep. Review and save each template before it takes effect. |
+| 📂 | **Explorer Context Menu** | Copy the complete selection in six formats; manage custom rules with single-item, per-item, or batch execution in one window. Copy tools and rules share an IdleTrigger submenu by default. See the [user guide](docs/user-guide.md#explorer-context-menu--资源管理器右键增强). |
 | 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, optionally link wallpaper and cursor schemes, snooze a pending switch, and adapt to battery and fullscreen. |
 | 🔄 | **Self-Update** | Optional check whenever the control panel is shown, plus on-demand checks from the tray menu and Settings that open the update prompt directly; one confirm downloads, SHA-256-verifies, installs, and restarts for you, with a link to the release notes. |
 

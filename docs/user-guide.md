@@ -26,6 +26,10 @@ Open **Context menu** from the panel. Its master switch applies immediately. **C
 
 从面板打开**右键增强**。顶部总开关立即生效；**自定义规则**展示已保存的列表，点击**新建规则**或双击列表项进入编辑，也可按 Enter / F2。保存后返回列表并保留选中项；取消会放弃本次编辑。Esc 从编辑区返回，有修改时会询问；Ctrl+S 保存。工作目录、图标和隐藏控制台位于**高级选项**。切换到**菜单选项**时会保留尚未保存的规则草稿。
 
+Each rule row summarizes its target and applicability. In the editor, expand **Advanced options** and use **Browse** beside the working folder to choose a directory with the native folder picker. The [screenshot gallery](screenshots.md) shows the panel and the separate context-menu window in both languages and themes.
+
+规则列表同时展示目标程序与适用条件摘要。编辑时展开**高级选项**，点击工作目录旁的**浏览**，可用系统文件夹选择器填写目录。[界面截图](screenshots.md)展示中英文、深浅色面板及独立的右键增强窗口。
+
 **菜单选项**自动保存，包含菜单合并、复制功能、路径引号及多选复制的分隔方式。经典菜单开关仅在 Windows 11 显示，确认后重启资源管理器。关闭时通过**显示更多选项**使用；开启后右键直接可见。关闭该选项会移除当前用户的经典菜单覆盖设置，包括其他工具创建的设置。若无法确认资源管理器恢复，会显示恢复方法；手动修改配置中的 `ctx_win11_classic` 不会切换系统菜单。
 
 - **Copy path** reads the complete selection and writes once: full paths, shortcut targets, parent folders, file names, stems, or extensions. Shortcut targets appear for `.lnk` files. Results follow Explorer's order, use one line per item by default, and apply the selected quoting policy to each path. Set `ctx_copy_separator = "space"` to use spaces. Unreadable paths abort the operation instead of silently omitting items. Folder-background copying uses the current folder.
@@ -41,6 +45,10 @@ Open **Context menu** from the panel. Its master switch applies immediately. **C
 - 过滤支持 `*.txt;*.dll`、`.txt`、`txt` 等简单扩展名，留空不限类型；不支持 `*.tar.gz` 等复合扩展名及其他通配符。执行前检查范围和类型，批量选择中存在不适用项时整批中止；展开后的命令行过长也会在启动前中止。
 - **保存规则**后返回列表并显示结果，继续修改时重新打开该规则；**取消**放弃本次编辑。返回或关闭窗口时，有未保存修改会询问处理方式。外部配置变化不会被静默覆盖，取消编辑后重新打开可加载最新版本。同名规则分别维护。列表底部的启用 / 停用立即作用于当前选中项。
 - 上移、下移改变顺序；添加分隔线会先处理未保存草稿，再立即保存。启用的分隔线要求子菜单，且只显示在规则之间。损坏规则禁用并保留；最多注册 32 条，外部超额配置不会截断。移动或删除 EXE 前应关闭功能；启用时移动了程序，则退出旧实例后运行新副本修复菜单路径。
+
+After upgrading from a version without complete-selection copying, exit the old tray instance and start the new EXE so the registered copy handlers and the running app use the same settings protocol. Copy quoting and separator preferences come from the running app's last valid configuration.
+
+从尚未支持完整多选复制的版本升级后，退出旧托盘实例再启动新版 EXE，使复制入口和运行中程序使用一致的设置协议。复制时的引号与分隔方式取自运行中程序最近的有效配置。
 
 ## Power management / 电源管理
 
@@ -58,9 +66,9 @@ Open **Context menu** from the panel. Its master switch applies immediately. **C
 
 ## Automatic tasks / 自动任务
 
-Use **Manage Tasks → New**, which opens a template menu: keep awake while a process runs, a nightly shutdown, stay awake during work hours, or a blank rule. Templates only prefill the editor — every field stays editable. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions (lock, sleep, hibernate, shutdown, restart, turn off display, log off) plus session, resume, and battery-threshold triggers, with a cancellable countdown of at least 10 seconds. A battery rule fires once when the percentage drops below its level and re-arms after recovery. Disabling or changing a rule cancels an outdated pending action.
+Use **New…** in the panel's Automatic Tasks header, or **Manage → New**. Both open the same template menu: keep awake while a process runs, nightly shutdown, work-hour wakefulness, low-battery hibernation, shutdown in 30 minutes or 1 hour, sleep in 30 minutes, or a blank task. Templates prefill an editable form and take effect only after saving. Delayed templates store a specific date and time, rounded up to the next minute; they are one-time tasks, not a delay that restarts each time the app opens. State tasks temporarily request Stay Awake or Idle Monitoring. Event tasks offer built-in Windows actions (lock, sleep, hibernate, shutdown, restart, turn off display, log off) plus session, resume, and battery-threshold triggers, with a cancellable countdown of at least 10 seconds. A battery rule fires once when the percentage drops below its level and re-arms after recovery. Disabling or changing a rule cancels an outdated pending action.
 
-在“管理任务 → 新建”中先从模板菜单选择：进程运行时保持唤醒、每天定时关机、工作时段保持唤醒，或空白规则。模板只负责预填编辑器——所有字段仍可修改。状态任务临时请求保持唤醒或空闲监测；事件任务提供内置 Windows 操作（锁定、睡眠、休眠、关机、重启、关闭显示器、注销）与锁定/解锁、从睡眠恢复、电量阈值触发器，包含至少 10 秒的可取消倒计时。电量规则在百分比低于阈值时触发一次，回充到阈值后重新武装。禁用或修改规则会取消已经失效的待执行动作。
+点击主面板自动任务标题旁的**新建…**，或进入**管理… → 新建**，均可打开模板菜单：进程保持唤醒、每晚定时关机、工作时段保持唤醒、低电量时休眠、30 分钟或 1 小时后关机、30 分钟后睡眠，以及空白任务。模板预填可编辑的表单，保存后才生效；延时模板换算为具体日期和时刻，向上取整到分钟，是一次性任务，不会每次启动程序都重新延时。状态任务临时请求保持唤醒或空闲监测；事件任务提供内置 Windows 操作（锁定、睡眠、休眠、关机、重启、关闭显示器、注销）与锁定/解锁、从睡眠恢复、电量阈值触发器，包含至少 10 秒的可取消倒计时。电量规则在百分比低于阈值时触发一次，回充到阈值后重新武装。禁用或修改规则会取消已经失效的待执行动作。
 
 Process-name targets match all instances of that name; Browse selects an exact EXE path. The picker reads names, counts, and file descriptions. It does not launch files, save PIDs, or inspect process memory. Search and sorting preserve checked targets, including those hidden by the filter.
 
