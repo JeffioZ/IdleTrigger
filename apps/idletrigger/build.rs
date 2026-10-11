@@ -8,6 +8,25 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {
         return;
     }
+    // Build number = git commit count: the SAME commit yields the same
+    // number locally and on CI (the local counter file could never continue
+    // into GitHub's history), every new commit increments it, and an env
+    // override stays available for manual control. Source tarballs without
+    // .git simply carry no suffix.
+    let build_num = match std::env::var("IDLETRIGGER_BUILD_NUMBER") {
+        Ok(provided) => Some(provided.trim().to_string()),
+        Err(_) => std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())),
+    };
+    if let Some(build_num) = build_num {
+        println!("cargo:rustc-env=IDLETRIGGER_BUILD={build_num}");
+    }
+    println!("cargo:rerun-if-env-changed=IDLETRIGGER_BUILD_NUMBER");
     // Release builds pass the tag-derived version; local builds fall back to
     // the crate version.
     let version = std::env::var("IDLETRIGGER_VERSION")
@@ -49,6 +68,9 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=IDLETRIGGER_VERSION");
     println!("cargo:rerun-if-changed=build.rs");
+    // The build counter must ride every real recompile, so the whole source
+    // tree counts as a build.rs input.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=build_version.rs");
     println!("cargo:rerun-if-changed=../../build/windows/manifest.xml");
     println!("cargo:rerun-if-changed=../../build/windows/icons/app.ico");

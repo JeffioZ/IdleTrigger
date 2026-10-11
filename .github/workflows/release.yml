@@ -70,6 +70,8 @@ jobs:
       - name: Build
         env:
           IDLETRIGGER_VERSION: ${{ env.RELEASE_VERSION }}
+          # Monotonic across releases; one value shared by both artifacts.
+          IDLETRIGGER_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           cargo build --locked --release --target x86_64-pc-windows-msvc
