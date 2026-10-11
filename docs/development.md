@@ -35,17 +35,28 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features --target x86_64-pc-windows-msvc
 cargo test --locked --workspace --all-features --target i686-pc-windows-msvc
-cargo build --locked --release --target x86_64-pc-windows-msvc
-cargo build --locked --release --target i686-pc-windows-msvc
+pwsh -NoProfile -File build/build.ps1 -Architecture all
 ```
 
-Outputs: `target/<target>/release/IdleTrigger.exe`. `.cargo/config.toml` enables static CRT linking. `IDLETRIGGER_VERSION` sets the displayed/resource version; local builds default to the package version. Commit dependency changes with `Cargo.lock`.
+Use `pwsh -NoProfile -File build/build.ps1` for x64, `-Architecture x86` for x86, or `-Architecture all` for both. Run and deliver only `dist/IdleTrigger-x64.exe` and `dist/IdleTrigger-x86.exe`. The script works from any working directory and preserves runtime configuration. Exit the executable in `dist` before replacing it.
 
-产物为上述路径，`.cargo/config.toml` 启用静态 CRT。`IDLETRIGGER_VERSION` 设置显示及资源版本，本地默认包版本。依赖变化需同步提交 `Cargo.lock`。
+日常执行 `pwsh -NoProfile -File build/build.ps1` 构建 x64；用 `-Architecture x86` 构建 x86，用 `-Architecture all` 构建双架构。统一运行和交付 `dist/IdleTrigger-x64.exe`、`dist/IdleTrigger-x86.exe`，不要从缓存目录运行。脚本可从任意工作目录调用，不覆盖运行配置；替换前退出 `dist` 中正在运行的程序。
+
+`.cargo/config.toml` pins the default target to x64, the Cargo cache to `target/`, and enables static CRT linking. Plain `cargo build --release` shares the explicit x64 build directory. Architecture, profile, `deps`, `build`, and `.fingerprint` subdirectories are Cargo-managed caches. Do not create tool-specific output directories or override `CARGO_TARGET_DIR` / `--target-dir`. Diagnostic builds stay in `target/`; the build script copies only normal Release executables into `dist/`.
+
+`.cargo/config.toml` 固定默认 x64、缓存根目录 `target/` 和静态 CRT；不带 `--target` 的构建也会进入同一个 x64 缓存目录。架构、debug/release、deps、build、.fingerprint 等目录由 Cargo 管理，不是不同 AI 工具另建的产物目录。不要按工具名新建目录，也不要覆盖 `CARGO_TARGET_DIR` / `--target-dir`。诊断版保留在 `target/`；统一脚本只向 `dist/` 输出正常 Release。
+
+`IDLETRIGGER_VERSION` sets the displayed/resource version; local builds default to the package version. Commit dependency changes with `Cargo.lock`.
+
+`IDLETRIGGER_VERSION` 设置显示及资源版本，本地默认包版本。依赖变化需同步提交 `Cargo.lock`。
 
 CI follows stable Rust and uses `--locked` to prevent implicit dependency changes. It runs tests on both architectures with all features, checks normal release artifacts with `.github/scripts/verify-windows-artifact.ps1`, then builds the diagnostic variant. The artifact check covers PE architecture, GUI subsystem, version fields, manifest markers, imported DLLs, and exclusion of diagnostic switches. It does not replace testing on the oldest supported Windows version.
 
 CI 使用 stable Rust，通过 `--locked` 阻止隐式依赖变更；双架构启用全部功能运行测试，用 `.github/scripts/verify-windows-artifact.ps1` 检查正式产物，再构建诊断版。产物检查覆盖 PE 架构、GUI 子系统、版本字段、manifest 标记、DLL 导入及诊断开关排除，不能替代最低支持 Windows 版本上的运行验证。
+
+CI also checks both architectures with Rust 1.88.0, the declared minimum version. Resolver 3 prefers compatible dependencies during updates; `Cargo.lock` still pins actual versions. Stable CI and releases share dependency caches, written only by the master branch. CI disables incremental compilation to avoid caching disposable incremental state. Releases use the stable compiler available at build time, so byte-identical output across compiler updates is not guaranteed.
+
+CI 另用声明的最低版本 Rust 1.88.0 检查双架构编译。Resolver 3 在更新依赖时优先选择兼容最低 Rust 版本的依赖，实际版本仍由 `Cargo.lock` 锁定。stable CI 和发布共用依赖缓存，仅 master 分支写入；CI 关闭增量编译以减少无效缓存。发布使用构建当时的 stable 编译器，跨编译器版本不保证产物字节完全一致。
 
 ## Diagnostics / 诊断
 

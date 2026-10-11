@@ -6,3 +6,8 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # UI tests drive deep synchronous repaints (RDW_UPDATENOW over full forms);
 # the default 2 MiB test-thread stack overflows on i686.
 RUST_MIN_STACK = "8388608"
+
+[build]
+# Plain and explicit x64 builds share the same Cargo cache.
+target = "x86_64-pc-windows-msvc"
+target-dir = "target"

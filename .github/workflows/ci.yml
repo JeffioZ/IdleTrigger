@@ -9,6 +9,7 @@ defaults:
 
 env:
   RUSTUP_TOOLCHAIN: stable
+  CARGO_INCREMENTAL: '0'
 
 on:
   workflow_dispatch:
@@ -38,6 +39,14 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: windows-msvc
+          add-job-id-key: false
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
@@ -51,18 +60,36 @@ jobs:
       - name: Build supported Windows architectures
         env:
           IDLETRIGGER_VERSION: ci
+          IDLETRIGGER_BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          cargo build --locked --release --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --release --target i686-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./build/build.ps1 -Architecture all
 
       - name: Verify release artifacts
         run: |
-          ./.github/scripts/verify-windows-artifact.ps1 -Path target/x86_64-pc-windows-msvc/release/IdleTrigger.exe -Architecture x64 -Version ci
-          ./.github/scripts/verify-windows-artifact.ps1 -Path target/i686-pc-windows-msvc/release/IdleTrigger.exe -Architecture x86 -Version ci
+          ./.github/scripts/verify-windows-artifact.ps1 -Path dist/IdleTrigger-x64.exe -Architecture x64 -Version ci
+          ./.github/scripts/verify-windows-artifact.ps1 -Path dist/IdleTrigger-x86.exe -Architecture x86 -Version ci
 
       - name: Build devtools variant
         env:
           IDLETRIGGER_VERSION: ci
+          IDLETRIGGER_BUILD_NUMBER: ${{ github.run_number }}
         run: cargo build --locked --release --features devtools --target x86_64-pc-windows-msvc
+
+  msrv:
+    name: Rust 1.88 compatibility
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: '1.88.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install minimum supported Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --target x86_64-pc-windows-msvc,i686-pc-windows-msvc
+      - name: Check both architectures on minimum Rust
+        run: |
+          cargo check --locked --workspace --all-targets --all-features --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo check --locked --workspace --all-targets --all-features --target i686-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -14,6 +14,7 @@ defaults:
 
 env:
   RUSTUP_TOOLCHAIN: stable
+  CARGO_INCREMENTAL: '0'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -56,6 +57,14 @@ jobs:
           Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
           Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value "RELEASE_PRERELEASE=$($parsed.Groups['prerelease'].Success.ToString().ToLowerInvariant())"
 
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: windows-msvc
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+
       - name: Verify
         run: |
           cargo fmt --all -- --check
@@ -73,13 +82,7 @@ jobs:
           # Monotonic across releases; one value shared by both artifacts.
           IDLETRIGGER_BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          cargo build --locked --release --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item target/x86_64-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x64.exe -Force
-          cargo build --locked --release --target i686-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item target/i686-pc-windows-msvc/release/IdleTrigger.exe dist/IdleTrigger-x86.exe -Force
+          ./build/build.ps1 -Architecture all
 
       - name: Verify release artifacts
         run: |
@@ -95,7 +98,7 @@ jobs:
           }
           $content = ($lines -join "`n") + "`n"
           [System.IO.File]::WriteAllText(
-            (Join-Path $PWD "SHA256SUMS.txt"),
+            (Join-Path $PWD "dist/SHA256SUMS.txt"),
             $content,
             [System.Text.Encoding]::ASCII
           )
@@ -110,7 +113,7 @@ jobs:
           files: |
             dist/IdleTrigger-x86.exe
             dist/IdleTrigger-x64.exe
-            SHA256SUMS.txt
+            dist/SHA256SUMS.txt
           # Release notes are hand-written bilingual; disable auto-generation
           # so the draft never mixes in English-only notes that must be
           # cleared before filling the template.
@@ -128,7 +131,9 @@ jobs:
           # CI-side mistake cannot publish an updater that would refuse or
           # mis-verify its own replacements. Draft releases are invisible to
           # releases/tags/<tag>, so look the release up by tag first.
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases" --jq ('.[] | select(.tag_name == "' + $env:RELEASE_TAG + '")') | ConvertFrom-Json
+          $releaseJson = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases" --jq ('.[] | select(.tag_name == "' + $env:RELEASE_TAG + '")')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $release = ($releaseJson -join "`n") | ConvertFrom-Json
           if (-not $release) {
             Write-Error "No release found for tag $env:RELEASE_TAG"
             exit 1
@@ -139,7 +144,7 @@ jobs:
               Write-Error "$name is missing a valid SHA-256 digest"
               exit 1
             }
-            $line = Get-Content SHA256SUMS.txt | Where-Object { $_ -match ('\s\*?' + [regex]::Escape($name) + '$') } | Select-Object -First 1
+            $line = Get-Content dist/SHA256SUMS.txt | Where-Object { $_ -match ('\s\*?' + [regex]::Escape($name) + '$') } | Select-Object -First 1
             if (-not $line) {
               Write-Error "SHA256SUMS.txt has no line for $name"
               exit 1

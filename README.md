@@ -47,6 +47,7 @@ Left-click the tray icon for quick controls, then open **Settings** for all pers
 | ⚡ | **Stay Awake** | Downloads, renders, backups, and remote sessions that must keep running; timed presets expire automatically. |
 | ⏱️ | **Idle Actions** | Lock, sleep, hibernate, shut down, restart, or turn the display off after real keyboard and mouse inactivity. |
 | 🔁 | **Automatic Tasks** | Start from templates, then control power features or run built-in actions by schedule and process state. |
+| | **Explorer Context Menu** | Copy one item's path in six formats and manage custom open-with rules, scopes, filters, and ordering. See the [user guide](docs/user-guide.md#explorer-context-menu--资源管理器右键增强) for selection limits. |
 | 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, optionally link wallpaper and cursor schemes, snooze a pending switch, and adapt to battery and fullscreen. |
 | 🔄 | **Self-Update** | Optional check whenever the control panel is shown, plus on-demand checks from the tray menu and Settings that open the update prompt directly; one confirm downloads, SHA-256-verifies, installs, and restarts for you, with a link to the release notes. |
 
@@ -71,6 +72,7 @@ Left-click the tray icon for quick controls, then open **Settings** for all pers
 
 See the [user guide](docs/user-guide.md) for features and command-line usage,
 or the [development guide](docs/development.md) to build and verify the app.
+Use `pwsh -NoProfile -File build/build.ps1` for local builds and run `dist/IdleTrigger-x64.exe`; add `-Architecture all` for both architectures. `target/` is the Cargo cache, not the normal run directory.
 
 ## 🤝 Credits
 

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["apps/idletrigger", "crates/core"]
 
 [workspace.package]
@@ -11,11 +11,11 @@ repository = "https://github.com/JeffioZ/idletrigger"
 
 [workspace.dependencies]
 idletrigger-core = { path = "crates/core" }
-winresource = "0.1"
-toml_edit = { version = "0.25", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-windows = { version = "0.62", features = [
+winresource = "0.1.31"
+toml_edit = { version = "0.25.17", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+windows = { version = "0.62.2", features = [
     "UI_ViewManagement",
     "Win32_System_WinRT",
     "Win32_Foundation",

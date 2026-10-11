@@ -27,6 +27,37 @@ fn main() {
         println!("cargo:rustc-env=IDLETRIGGER_BUILD={build_num}");
     }
     println!("cargo:rerun-if-env-changed=IDLETRIGGER_BUILD_NUMBER");
+    // Resolve Git paths through git so linked worktrees and packed refs work.
+    for input in ["HEAD", "packed-refs"] {
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", input])
+            .output()
+            && out.status.success()
+        {
+            let path = String::from_utf8_lossy(&out.stdout);
+            if std::path::Path::new(path.trim()).exists() {
+                println!("cargo:rerun-if-changed={}", path.trim());
+            }
+        }
+    }
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        && out.status.success()
+    {
+        let reference = String::from_utf8_lossy(&out.stdout);
+        if let Ok(path) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", reference.trim()])
+            .output()
+            && path.status.success()
+        {
+            println!(
+                "cargo:rerun-if-changed={}",
+                String::from_utf8_lossy(&path.stdout).trim()
+            );
+        }
+    }
+
     // Release builds pass the tag-derived version; local builds fall back to
     // the crate version.
     let version = std::env::var("IDLETRIGGER_VERSION")
@@ -68,9 +99,8 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=IDLETRIGGER_VERSION");
     println!("cargo:rerun-if-changed=build.rs");
-    // The build counter must ride every real recompile, so the whole source
-    // tree counts as a build.rs input.
-    println!("cargo:rerun-if-changed=src");
+    // Git inputs above track the counter. Ordinary source edits do not
+    // change resources and must not rerun the resource compiler.
     println!("cargo:rerun-if-changed=build_version.rs");
     println!("cargo:rerun-if-changed=../../build/windows/manifest.xml");
     println!("cargo:rerun-if-changed=../../build/windows/icons/app.ico");
