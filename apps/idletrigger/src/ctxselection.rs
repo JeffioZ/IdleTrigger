@@ -268,7 +268,19 @@ mod tests {
                 CoTaskMemFree(Some(pidl.cast()));
             }
             let selection = selection.unwrap();
-            assert_eq!(selection_paths(&selection).unwrap(), expected);
+            // CI may expose TEMP through an 8.3 alias (RUNNER~1), while
+            // Shell returns long paths. Compare canonical paths without
+            // weakening item count, ordering or Unicode file identity.
+            let canonical = |paths: &[String]| {
+                paths
+                    .iter()
+                    .map(|path| std::fs::canonicalize(path).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                canonical(&selection_paths(&selection).unwrap()),
+                canonical(&expected)
+            );
         }
     }
 }
