@@ -22,6 +22,8 @@
 
 </div>
 
+> **Version requirement:** Explorer context-menu enhancements, including multi-selection path copying and custom rules, require **v2.6.0 or later**.
+
 ## 🪟 Native Control Panel
 
 <p align="center"><sub>Adapts to Windows light/dark mode and display DPI.<br>
