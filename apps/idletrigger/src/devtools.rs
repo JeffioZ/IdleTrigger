@@ -263,7 +263,8 @@ pub fn handle_capture_timer() -> bool {
         2 | 4 | 6 | 8 | 10 => {
             let page = step / 2 - 1;
             shoot(
-                crate::settings_ui::devtools_capture_hwnd(),
+                crate::kit::registry::hwnd_of(crate::kit::registry::Kind::Settings)
+                    .unwrap_or_default(),
                 out_dir.join(format!("IdleTrigger-settings-page{page}-capture.bmp")),
                 &format!("settings page {page}"),
             );
@@ -275,7 +276,8 @@ pub fn handle_capture_timer() -> bool {
             crate::automation_ui::show();
         }
         12 => {
-            let mgr = crate::automation_ui::theme_hwnds()[0];
+            let mgr = crate::kit::registry::hwnd_of(crate::kit::registry::Kind::Automation)
+                .unwrap_or_default();
             if std::env::var("IDLETRIGGER_DEVTOOLS_CLICK_LIST").as_deref() == Ok("1") {
                 // Simulate a user click on the first rule row, then let the
                 // next tick capture the post-click state.
@@ -291,7 +293,8 @@ pub fn handle_capture_timer() -> bool {
         14 => {
             // The editor pane covers the manager's client area: capture the
             // whole window to see the open form.
-            let mgr = crate::automation_ui::theme_hwnds()[0];
+            let mgr = crate::kit::registry::hwnd_of(crate::kit::registry::Kind::Automation)
+                .unwrap_or_default();
             shoot(
                 mgr,
                 out_dir.join("IdleTrigger-manager-editor-capture.bmp"),
@@ -313,7 +316,8 @@ pub fn handle_capture_timer() -> bool {
         18 => crate::ctx_ui::show(),
         19 => {
             shoot(
-                crate::ctx_ui::devtools_hwnd(),
+                crate::kit::registry::hwnd_of(crate::kit::registry::Kind::ContextRules)
+                    .unwrap_or_default(),
                 out_dir.join("IdleTrigger-ctx-manager-capture.bmp"),
                 "context-menu rule manager",
             );

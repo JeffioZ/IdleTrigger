@@ -194,11 +194,6 @@ fn mgr() -> HWND {
 }
 
 /// Devtools capture support: the manager's top-level window.
-#[cfg(any(feature = "devtools", test))]
-pub fn devtools_hwnd() -> HWND {
-    mgr()
-}
-
 fn list_hwnd() -> HWND {
     HWND(LIST_HWND.load(Ordering::SeqCst) as *mut core::ffi::c_void)
 }

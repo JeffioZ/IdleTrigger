@@ -193,7 +193,7 @@ const WM_IPC_REQUEST: u32 = 0x8008;
 const WM_REFRESH_THEME: u32 = 0x8009;
 /// Queued focus-tip dismissal (see tooltips::dismiss_focus_tip).
 const WM_FOCUSTIP_DISMISS: u32 = 0x800A;
-static THEME_REFRESH: theme_refresh::Requests = theme_refresh::Requests::new();
+static THEME_REFRESH: theme::Requests = theme::Requests::new();
 
 pub(crate) fn request_theme_repair_refresh() {
     enqueue_theme_refresh(true);
@@ -237,7 +237,6 @@ mod choice;
 mod ctx_ui;
 mod ctxexec;
 mod ctxmenu;
-mod ctxselection;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod display;
@@ -250,7 +249,6 @@ mod kit;
 mod list_style;
 mod nativeform;
 mod paint;
-mod pipe;
 mod popups;
 #[cfg(test)]
 mod render_tests;
@@ -264,7 +262,6 @@ mod theme_com;
 mod theme_contrast;
 mod theme_engine;
 mod theme_recovery;
-mod theme_refresh;
 mod theme_repair;
 mod tooltips;
 mod tray;
@@ -561,7 +558,7 @@ fn main() {
         .nth(1)
         .is_some_and(|arg| arg == "ctx-selection")
     {
-        std::process::exit(ctxselection::run());
+        std::process::exit(ctxmenu::run());
     }
     let mut startup_delay = 0u64;
     let mut cli_args: Vec<String> = Vec::new();

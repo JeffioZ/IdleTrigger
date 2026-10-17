@@ -3522,7 +3522,7 @@ pub(crate) fn mgr_hwnd() -> HWND {
 
 /// Automation's window family for devtools capture and regression tests:
 /// manager root, editor pane, process picker, indexed in that order.
-#[cfg(any(feature = "devtools", test))]
+#[cfg(test)]
 pub fn theme_hwnds() -> [HWND; 3] {
     [
         HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),

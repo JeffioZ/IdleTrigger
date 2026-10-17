@@ -387,7 +387,7 @@ pub fn show() {
 }
 
 /// Devtools capture and regression-test support: the settings window.
-#[cfg(any(feature = "devtools", test))]
+#[cfg(test)]
 pub fn devtools_capture_hwnd() -> HWND {
     current()
 }
