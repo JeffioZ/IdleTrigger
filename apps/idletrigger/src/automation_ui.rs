@@ -354,7 +354,7 @@ const LBN_SELCHANGE: u16 = 1;
 const LBN_DBLCLK: u16 = 2;
 const BN_CLICKED: u16 = 0;
 const WM_APP_PICKER_DESC: u32 = 0x8000 + 1;
-const EM_SETMARGINS_RAW: u32 = 0x00D3;
+
 const EM_SETSEL_RAW: u32 = 0x00B1;
 const EM_GETSEL_RAW: u32 = 0x00B0;
 
@@ -404,18 +404,6 @@ fn center_on_parent(owner: HWND, w: i32, h: i32) -> (i32, i32) {
         }
         (s(200), s(200))
     }
-}
-
-pub fn section_font_cached() -> windows::Win32::Graphics::Gdi::HFONT {
-    font_cache(600)
-}
-
-pub fn form_font_body() -> windows::Win32::Graphics::Gdi::HFONT {
-    font_cache(400)
-}
-
-fn font_cache(weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
-    crate::make_font_pub(14, weight)
 }
 
 fn secondary_style() -> WINDOW_STYLE {
@@ -630,44 +618,25 @@ pub fn ensure_created() {
             return;
         }
         let instance = GetModuleHandleW(None).expect("module handle");
-        let font = form_font_body();
-        let section_font = section_font_cached();
+        let font = crate::kit::fonts::body();
+        let section_font = crate::kit::fonts::section();
 
-        register_mgr_class(instance);
-
-        let style = secondary_style();
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(MGR_W),
-            bottom: s(MGR_H),
-        };
-        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let (x, y) = center_on_parent(
-            crate::hwnd(&crate::PANEL),
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-        );
-
-        let mgr = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("IdleTriggerAutoMgr"),
-            PCWSTR(wide(&t_pub("automation_title")).as_ptr()),
-            style,
-            x,
-            y,
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-            Some(crate::hwnd(&crate::PANEL)),
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .expect("manager window");
+        let form = crate::kit::form::FormWindow::create(crate::kit::form::FormSpec {
+            class: windows::core::w!("IdleTriggerAutoMgr"),
+            kind: crate::kit::registry::Kind::Automation,
+            title: t_pub("automation_title"),
+            proc: Some(mgr_proc),
+            client_w: MGR_W,
+            client_h: MGR_H,
+            style: crate::kit::form::secondary_style(),
+            anchor: crate::hwnd(&crate::PANEL),
+            bg_brush: windows::Win32::Graphics::Gdi::GetSysColorBrush(
+                windows::Win32::Graphics::Gdi::COLOR_WINDOW,
+            ),
+        });
+        let mgr = form.hwnd;
         MGR_HWND.store(mgr.0 as isize, Ordering::SeqCst);
-        crate::dpi::install(mgr);
-        theme::apply_to_window(mgr);
-        crate::set_window_icons_pub(mgr);
+        form.finish();
 
         // The list view spans the window; MGR_COL_W only sizes the editor
         // grid (the pane's column layout).
@@ -679,29 +648,7 @@ pub fn ensure_created() {
                          y: i32,
                          w: i32,
                          h: i32| {
-            let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
-            let hwnd_ = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("STATIC"),
-                PCWSTR(wide_text.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
-                s(x),
-                s(y),
-                s(w),
-                s(h),
-                Some(mgr),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("mgr static");
-            let _ = SendMessageW(
-                hwnd_,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-            hwnd_
+            crate::kit::controls::static_text(mgr, id, text, font, (x, y, w, h))
         };
 
         // Page-title parity with the settings header: 17/600 on a 24px row.
@@ -714,57 +661,20 @@ pub fn ensure_created() {
             content_w - 250,
             MGR_TITLE_H,
         );
-        let master = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("BUTTON"),
-            PCWSTR(wide(&t_pub("automation_master")).as_ptr()),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            s(MGR_W - MGR_PAD - 240),
-            s(MGR_TITLE_Y - 2),
-            s(240),
-            s(28),
-            Some(mgr),
-            Some(HMENU(MGR_MASTER as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("automation master");
-        let _ = SendMessageW(
-            master,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
+        crate::kit::controls::checkbox(
+            mgr,
+            MGR_MASTER as i32,
+            &t_pub("automation_master"),
+            (MGR_W - MGR_PAD - 240, MGR_TITLE_Y - 2, 240, 28),
         );
-        crate::nativeform::track(master);
-        crate::nativeform::set_hover_column(master, s(crate::layout::SWITCH_HIT_W));
 
         // Rounded surface behind the listbox (Go idListSurface), then the
         // list inset 2px inside it.
-        let surface = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("STATIC"),
-            windows::core::w!(""),
-            // Go formSurfaceStyle: WS_CLIPSIBLINGS keeps sibling repaint
-            // order sane (the list paints over the card, never under it).
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            s(MGR_PAD),
-            s(MGR_LIST_Y),
-            s(content_w),
-            s(MGR_LIST_H),
-            Some(mgr),
-            Some(HMENU(MGR_LIST_SURFACE as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("mgr list surface");
-        let _ = SetWindowPos(
-            surface,
-            Some(windows::Win32::Foundation::HWND(1 as *mut _)), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        crate::kit::controls::section_card(
+            mgr,
+            MGR_LIST_SURFACE as i32,
+            font,
+            (MGR_PAD, MGR_LIST_Y, content_w, MGR_LIST_H),
         );
 
         let list = CreateWindowExW(
@@ -852,28 +762,12 @@ pub fn ensure_created() {
             } else {
                 (MGR_PAD + index as i32 * (130 + 8), 130)
             };
-            let btn = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("BUTTON"),
-                PCWSTR(wide(&t_pub(label_key)).as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-                s(x),
-                s(MGR_BUTTONS_Y),
-                s(w),
-                s(BUTTON_H),
-                Some(mgr),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("mgr button");
-            let _ = SendMessageW(
-                btn,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
+            crate::kit::controls::push_button(
+                mgr,
+                id as i32,
+                &t_pub(label_key),
+                (x, MGR_BUTTONS_Y, w, BUTTON_H),
             );
-            crate::nativeform::track(btn);
         }
     }
 }
@@ -1476,24 +1370,6 @@ unsafe extern "system" fn mgr_proc(
     )
 }
 
-unsafe fn register_mgr_class(instance: windows::Win32::Foundation::HMODULE) {
-    unsafe {
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(mgr_proc),
-            hInstance: instance.into(),
-            lpszClassName: windows::core::w!("IdleTriggerAutoMgr"),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hIcon: LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))
-                .unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::GetSysColorBrush(
-                windows::Win32::Graphics::Gdi::COLOR_WINDOW,
-            ),
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-    }
-}
-
 /// WM_DRAWITEM dispatcher for the manager (Go owner-draw parity).
 fn draw_manager_item(item: &crate::nativeform::DrawItem) {
     unsafe {
@@ -1587,9 +1463,9 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             dc,
             &row,
             if selected {
-                section_font_cached()
+                crate::kit::fonts::section()
             } else {
-                form_font_body()
+                crate::kit::fonts::body()
             },
             text.as_str(),
             if selected { p.text } else { p.text2 },
@@ -1606,7 +1482,7 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
         crate::paint::draw_compact_switch_row(
             dc,
             bounds,
-            form_font_body(),
+            crate::kit::fonts::body(),
             &t_pub("automation_master"),
             p,
             p.window_bg,
@@ -1628,7 +1504,7 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             crate::paint::draw_button_danger(
                 dc,
                 bounds,
-                form_font_body(),
+                crate::kit::fonts::body(),
                 &label,
                 p,
                 p.window_bg,
@@ -1639,7 +1515,7 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
             crate::paint::draw_button(
                 dc,
                 bounds,
-                form_font_body(),
+                crate::kit::fonts::body(),
                 &label,
                 p,
                 p.window_bg,
@@ -2087,8 +1963,8 @@ fn hide_editor() {
 fn create_editor() {
     unsafe {
         let instance = GetModuleHandleW(None).expect("module handle");
-        let font = form_font_body();
-        let section_font = section_font_cached();
+        let font = crate::kit::fonts::body();
+        let section_font = crate::kit::fonts::section();
 
         register_editor_class(instance);
 
@@ -2145,95 +2021,14 @@ fn create_editor() {
         }
 
         let mk_label = |id: usize, text: &str, font: windows::Win32::Graphics::Gdi::HFONT| {
-            let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
-            let hwnd_ = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("STATIC"),
-                PCWSTR(wide_text.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0),
-                0,
-                0,
-                1,
-                1,
-                Some(ed),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("ed label");
-            let _ = SendMessageW(
-                hwnd_,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
+            crate::kit::controls::hidden_label(ed, id, text, font)
         };
 
-        let mk_edit = |id: usize, numeric: bool| {
-            // Settings field-well architecture: a bare inset EDIT; the
-            // ring/margin is painted by the hosting section card (see the
-            // editor card arm), so nothing stacks against the card.
-            let extra = if numeric { ES_NUMBER as u32 } else { 0 };
-            let hwnd_ = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("EDIT"),
-                windows::core::w!(""),
-                WINDOW_STYLE(
-                    WS_CHILD.0 | WS_TABSTOP.0 | WS_CLIPSIBLINGS.0 | ES_AUTOHSCROLL as u32 | extra,
-                ),
-                0,
-                0,
-                1,
-                1,
-                Some(ed),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("ed edit");
-            let _ = SendMessageW(
-                hwnd_,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-            // Go editWithStyle: 6px inner margins (EM_SETMargins).
-            let margin = s(6) as usize;
-            let _ = SendMessageW(
-                hwnd_,
-                EM_SETMARGINS_RAW,
-                Some(WPARAM(3)),
-                Some(LPARAM((margin | (margin << 16)) as isize)),
-            );
-            hwnd_
-        };
+        let mk_edit = |id: usize, numeric: bool| crate::kit::controls::hidden_edit(ed, id, numeric);
 
         // Choice buttons: owner-drawn BUTTONs with custom popups (Go combo()).
         let mk_button = |id: usize, text: &str, height: i32| {
-            let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
-            let hwnd_ = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("BUTTON"),
-                PCWSTR(wide_text.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-                0,
-                0,
-                1,
-                s(height),
-                Some(ed),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("ed button");
-            let _ = SendMessageW(
-                hwnd_,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-            crate::nativeform::track(hwnd_);
-            hwnd_
+            crate::kit::controls::hidden_button(ed, id, text, height)
         };
 
         // Section titles + labels (Go editor.go build order).
@@ -2805,45 +2600,22 @@ pub fn layout_editor() {
         if ed.is_invalid() {
             return;
         }
-        let _dpi = crate::dpi::Scope::window(ed);
-        crate::viewport::begin_layout(ed);
+        let mut flow = crate::kit::flow::Flow::begin(ed);
         lower_surfaces(ed);
         let content_w = ED_W - 2 * ED_PAD;
         let column_w = (content_w - ED_GAP) / 2;
         let trigger = choice_value(ed, ED_TRIGGER);
         let action = choice_value(ed, ED_ACTION);
 
-        let mut visible = Vec::new();
-
+        // Field edits route through place_field (card-well inset); the
+        // dispatch stays here because which ids are fields is editor
+        // knowledge.
         let mut place = |id: usize, x: i32, y: i32, w: i32, h: i32| {
-            let control = get_dlg_item(ed, id);
-            if control.is_invalid() {
-                return;
-            }
-            // Field edits sit inset inside their card-painted well
-            // (settings parity: x+3, y+7, w-6, h-14).
             if is_field_edit(id) {
-                let _ = SetWindowPos(
-                    control,
-                    None,
-                    s(x + 3),
-                    s(y + 7),
-                    s(w - 6),
-                    s(h - 14).max(20),
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-                );
+                flow.place_field(id, x, y, w, h);
             } else {
-                let _ = SetWindowPos(
-                    control,
-                    None,
-                    s(x),
-                    s(y),
-                    s(w),
-                    s(h),
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-                );
+                flow.place(id, x, y, w, h);
             }
-            visible.push(control);
         };
 
         let label_row2 = |place: &mut dyn FnMut(usize, i32, i32, i32, i32),
@@ -3104,10 +2876,7 @@ pub fn layout_editor() {
         let content_bottom = y + BUTTON_H + ED_EDGE;
 
         // Apply only final visibility; existing fields never hide and reappear.
-        for id in ED_LAYOUT_IDS {
-            let control = get_dlg_item(ed, id);
-            crate::nativeform::set_visible_deferred(control, visible.contains(&control));
-        }
+        flow.finish(&ED_LAYOUT_IDS);
         // Grow the window first, then record the content extent against the
         // final client size: recording against the old (short) pane would
         // arm scrollbars for a size that no longer exists. The width keeps a
@@ -3553,7 +3322,7 @@ fn draw_form_item(item: &crate::nativeform::DrawItem) {
 fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &RECT) {
     let p = theme::palette();
     let scale = crate::scale_pub(96);
-    let font = form_font_body();
+    let font = crate::kit::fonts::body();
     unsafe {
         // Editor section cards: the settings card face (surface + family
         // hairline) plus the settings field wells - every visible EDIT
@@ -3801,9 +3570,9 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                     dc,
                     &cell,
                     if primary && selected {
-                        section_font_cached()
+                        crate::kit::fonts::section()
                     } else {
-                        form_font_body()
+                        crate::kit::fonts::body()
                     },
                     text,
                     if primary { p.text } else { p.muted },
@@ -3917,9 +3686,9 @@ fn draw_form_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &REC
                 dc,
                 &text_bounds,
                 if active {
-                    section_font_cached()
+                    crate::kit::fonts::section()
                 } else {
-                    form_font_body()
+                    crate::kit::fonts::body()
                 },
                 &label,
                 ink,
@@ -4095,70 +3864,41 @@ fn hide_picker() {
 fn create_picker(owner: HWND) {
     unsafe {
         let instance = GetModuleHandleW(None).expect("module handle");
-        let font = form_font_body();
+        let font = crate::kit::fonts::body();
 
-        register_picker_class(instance);
-
-        let style = secondary_style();
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(PK_W),
-            bottom: s(PK_H),
-        };
-        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        // Center on the manager root: the picker's modal target is the
-        // embedded editor pane, but a popup parented to a child window has
-        // unreliable activation, so the OS-level parent is the root window.
-        let root = GetAncestor(owner, GA_ROOT);
-        let host = if root.is_invalid() { owner } else { root };
-        let (x, y) = center_on_parent(host, frame.right - frame.left, frame.bottom - frame.top);
-
-        let pk = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("IdleTriggerProcPicker"),
-            PCWSTR(wide(&t_pub("process_picker_title")).as_ptr()),
-            style,
-            x,
-            y,
-            frame.right - frame.left,
-            frame.bottom - frame.top,
-            Some(host),
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .expect("picker window");
+        let form = crate::kit::form::FormWindow::create(crate::kit::form::FormSpec {
+            class: windows::core::w!("IdleTriggerProcPicker"),
+            kind: crate::kit::registry::Kind::ProcessPicker,
+            title: t_pub("process_picker_title"),
+            proc: Some(picker_proc),
+            client_w: PK_W,
+            client_h: PK_H,
+            style: crate::kit::form::secondary_style(),
+            // Center on the manager root: the picker's modal target is the
+            // embedded editor pane, but a popup parented to a child window has
+            // unreliable activation, so the OS-level parent is the root window.
+            anchor: {
+                let root = GetAncestor(owner, GA_ROOT);
+                if root.is_invalid() { owner } else { root }
+            },
+            bg_brush: windows::Win32::Graphics::Gdi::GetSysColorBrush(
+                windows::Win32::Graphics::Gdi::COLOR_WINDOW,
+            ),
+        });
+        let pk = form.hwnd;
         PICKER_HWND.store(pk.0 as isize, Ordering::SeqCst);
-        crate::dpi::install(pk);
-        theme::apply_to_window(pk);
-        crate::set_window_icons_pub(pk);
+        form.finish();
 
         let content_w = PK_W - 2 * PK_PAD;
 
         let mk_static =
             |id: usize, text: &str, font: windows::Win32::Graphics::Gdi::HFONT, y: i32| {
-                let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
-                let hwnd_ = CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
-                    windows::core::w!("STATIC"),
-                    PCWSTR(wide_text.as_ptr()),
-                    WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
-                    s(PK_PAD),
-                    s(y),
-                    s(content_w),
-                    s(PK_TEXT_H),
-                    Some(pk),
-                    Some(HMENU(id as *mut _)),
-                    Some(instance.into()),
-                    None,
-                )
-                .expect("picker static");
-                let _ = SendMessageW(
-                    hwnd_,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
+                crate::kit::controls::static_text(
+                    pk,
+                    id,
+                    text,
+                    font,
+                    (PK_PAD, y, content_w, PK_TEXT_H),
                 );
             };
 
@@ -4177,35 +3917,11 @@ fn create_picker(owner: HWND) {
         );
 
         // Search field surface + edit (Go searchSurface 370 wide).
-        let surface = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("STATIC"),
-            windows::core::w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            s(PK_PAD),
-            s(PK_SEARCH_Y),
-            s(370),
-            s(PK_FIELD_H),
-            Some(pk),
-            Some(HMENU(PK_SEARCH_SURFACE as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("picker search surface");
-        let _ = SetWindowPos(
-            surface,
-            Some(windows::Win32::Foundation::HWND(1 as *mut _)), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = SendMessageW(
-            surface,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
+        crate::kit::controls::section_card(
+            pk,
+            PK_SEARCH_SURFACE as i32,
+            font,
+            (PK_PAD, PK_SEARCH_Y, 370, PK_FIELD_H),
         );
 
         let search = CreateWindowExW(
@@ -4244,7 +3960,7 @@ fn create_picker(owner: HWND) {
         let margin = s(6) as usize;
         let _ = SendMessageW(
             search,
-            EM_SETMARGINS_RAW,
+            crate::kit::controls::EM_SETMARGINS_RAW,
             Some(WPARAM(3)),
             Some(LPARAM((margin | (margin << 16)) as isize)),
         );
@@ -4266,61 +3982,20 @@ fn create_picker(owner: HWND) {
                 146,
             ),
         ] {
-            let wide_text: Vec<u16> = t_pub(key).encode_utf16().chain([0]).collect();
-            let btn = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("BUTTON"),
-                PCWSTR(wide_text.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-                s(x),
-                s(PK_SEARCH_Y),
-                s(w),
-                s(PK_FIELD_H),
-                Some(pk),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("picker button");
-            let _ = SendMessageW(
-                btn,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
+            crate::kit::controls::push_button(
+                pk,
+                id as i32,
+                &t_pub(key),
+                (x, PK_SEARCH_Y, w, PK_FIELD_H),
             );
-            crate::nativeform::track(btn);
         }
 
         // List surface card + ListView (Go SysListView32 report + checkboxes).
-        let list_surface = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("STATIC"),
-            windows::core::w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            s(PK_PAD),
-            s(PK_LIST_Y),
-            s(content_w),
-            s(PK_LIST_H),
-            Some(pk),
-            Some(HMENU(PK_LIST_SURFACE as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("picker list surface");
-        let _ = SetWindowPos(
-            list_surface,
-            Some(windows::Win32::Foundation::HWND(1 as *mut _)), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = SendMessageW(
-            list_surface,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
+        crate::kit::controls::section_card(
+            pk,
+            PK_LIST_SURFACE as i32,
+            font,
+            (PK_PAD, PK_LIST_Y, content_w, PK_LIST_H),
         );
 
         // Column sort strip (the old listview header's job), quiet text
@@ -4328,28 +4003,14 @@ fn create_picker(owner: HWND) {
         let col_widths = [250, 310, 82];
         let mut col_x = PK_PAD + 2;
         for (index, width) in col_widths.iter().enumerate() {
-            let btn = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("BUTTON"),
-                windows::core::w!(""),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0B), // BS_OWNERDRAW
-                s(col_x),
-                s(PK_LIST_Y + 2),
-                s(*width),
-                s(24),
-                Some(pk),
-                Some(HMENU((PK_COL_BASE + index) as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("picker column button");
-            let _ = SendMessageW(
-                btn,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
+            // Empty captions: the owner-draw arm paints the localized
+            // column titles itself.
+            crate::kit::controls::push_button(
+                pk,
+                (PK_COL_BASE + index) as i32,
+                "",
+                (col_x, PK_LIST_Y + 2, *width, 24),
             );
-            crate::nativeform::track(btn);
             col_x += width + 8;
         }
 
@@ -4428,35 +4089,11 @@ fn create_picker(owner: HWND) {
         );
 
         // Preview card surface + no-selection listbox (Go idPreviewSurface).
-        let preview_surface = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("STATIC"),
-            windows::core::w!(""),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            s(PK_PAD),
-            s(PK_PREVIEW_Y),
-            s(content_w),
-            s(PK_PREVIEW_H),
-            Some(pk),
-            Some(HMENU(PK_PREVIEW_SURFACE as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("picker preview surface");
-        let _ = SetWindowPos(
-            preview_surface,
-            Some(windows::Win32::Foundation::HWND(1 as *mut _)), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        let _ = SendMessageW(
-            preview_surface,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
+        crate::kit::controls::section_card(
+            pk,
+            PK_PREVIEW_SURFACE as i32,
+            font,
+            (PK_PAD, PK_PREVIEW_Y, content_w, PK_PREVIEW_H),
         );
         let preview = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -4504,48 +4141,13 @@ fn create_picker(owner: HWND) {
             (PK_CANCEL, caption_key(PICKER_TEXTS, PK_CANCEL), cancel_x),
             (PK_CONFIRM, caption_key(PICKER_TEXTS, PK_CONFIRM), confirm_x),
         ] {
-            let wide_text: Vec<u16> = t_pub(key).encode_utf16().chain([0]).collect();
-            let btn = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                windows::core::w!("BUTTON"),
-                PCWSTR(wide_text.as_ptr()),
-                WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-                s(x),
-                s(PK_BUTTONS_Y),
-                s(PK_BUTTON_W),
-                s(BUTTON_H),
-                Some(pk),
-                Some(HMENU(id as *mut _)),
-                Some(instance.into()),
-                None,
-            )
-            .expect("picker button");
-            let _ = SendMessageW(
-                btn,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
+            crate::kit::controls::push_button(
+                pk,
+                id as i32,
+                &t_pub(key),
+                (x, PK_BUTTONS_Y, PK_BUTTON_W, BUTTON_H),
             );
-            crate::nativeform::track(btn);
         }
-    }
-}
-
-unsafe fn register_picker_class(instance: windows::Win32::Foundation::HMODULE) {
-    unsafe {
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(picker_proc),
-            hInstance: instance.into(),
-            lpszClassName: windows::core::w!("IdleTriggerProcPicker"),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hIcon: LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))
-                .unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::GetSysColorBrush(
-                windows::Win32::Graphics::Gdi::COLOR_WINDOW,
-            ),
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
     }
 }
 

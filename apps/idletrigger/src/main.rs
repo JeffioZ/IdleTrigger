@@ -45,10 +45,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_BROADCAST, IDC_ARROW,
-    IDC_HAND, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HWND_BROADCAST, IDC_ARROW, IDC_HAND,
+    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     SendMessageTimeoutW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW,
     ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
     WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -244,6 +244,7 @@ mod gpu_activity;
 mod idle_monitor;
 mod ipc;
 mod iplocate;
+mod kit;
 mod layout;
 mod list_style;
 mod nativeform;
@@ -2015,7 +2016,6 @@ fn create_windows() {
                     y: scale(top),
                     width: scale(card_w),
                     id,
-                    instance,
                     font,
                 },
                 scale(height),
@@ -2028,7 +2028,6 @@ fn create_windows() {
             &t("menu_power_management"),
             y,
             STATIC_SECTION_BASE,
-            instance,
             subtitle_font,
         );
         HEADER_LINK_ROWS[0].store(y as isize, Ordering::SeqCst);
@@ -2044,7 +2043,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_NOSLEEP_TIMED_CANCEL,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2083,7 +2081,6 @@ fn create_windows() {
                     y: scale(row),
                     width: scale(label_w),
                     id: label_id,
-                    instance,
                     font,
                 },
                 scale(BUTTON_H),
@@ -2097,7 +2094,6 @@ fn create_windows() {
                     y: scale(row),
                     width: scale(SWITCH_HIT_W),
                     id: switch_id,
-                    instance,
                     font,
                 },
                 scale(BUTTON_H),
@@ -2129,7 +2125,6 @@ fn create_windows() {
                     y: scale(row),
                     width: scale(slot_w),
                     id,
-                    instance,
                     font,
                 },
                 scale(CHIP_H),
@@ -2144,7 +2139,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(row_width),
                 id: IDC_POWER_SUMMARY,
-                instance,
                 font: panel_font_status(),
             },
             scale(SUBTITLE_H),
@@ -2158,7 +2152,6 @@ fn create_windows() {
             &t("menu_automation_section"),
             y,
             STATIC_SECTION_BASE + 1,
-            instance,
             subtitle_font,
         );
         HEADER_LINK_ROWS[1].store(y as isize, Ordering::SeqCst);
@@ -2170,7 +2163,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_AUTOMATION_NEW,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2183,7 +2175,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_MANAGE_BUTTON,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2204,7 +2195,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(row_width - SWITCH_HIT_W - GAP),
                 id: IDC_ROW_LABEL_BASE,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2219,7 +2209,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(SWITCH_HIT_W),
                 id: IDC_AUTOMATION,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2234,7 +2223,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(row_width),
                 id: IDC_AUTOMATION_SUMMARY,
-                instance,
                 font: panel_font_status(),
             },
             scale(SUBTITLE_H),
@@ -2248,7 +2236,6 @@ fn create_windows() {
             &t("menu_theme_switch"),
             y,
             STATIC_SECTION_BASE + 2,
-            instance,
             subtitle_font,
         );
         HEADER_LINK_ROWS[2].store(y as isize, Ordering::SeqCst);
@@ -2260,7 +2247,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_APPEARANCE,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2273,7 +2259,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_THEME_SNOOZE_CANCEL,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2290,7 +2275,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_THEME_REPAIR,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2311,7 +2295,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(row_width - SWITCH_HIT_W - GAP),
                 id: IDC_ROW_LABEL_BASE + 1,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2324,7 +2307,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(SWITCH_HIT_W),
                 id: IDC_THEME_ENABLE,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2351,7 +2333,6 @@ fn create_windows() {
                     y: scale(row),
                     width: scale(slot_w),
                     id,
-                    instance,
                     font,
                 },
                 scale(CHIP_H),
@@ -2366,7 +2347,6 @@ fn create_windows() {
                 y: scale(row),
                 width: scale(row_width),
                 id: IDC_THEME_SCHEDULE,
-                instance,
                 font: panel_font_status(),
             },
             scale(SUBTITLE_H),
@@ -2384,7 +2364,6 @@ fn create_windows() {
             &t("panel_other_section"),
             y,
             STATIC_SECTION_BASE + 3,
-            instance,
             subtitle_font,
         );
         y += SECTION_H + TITLE_GAP;
@@ -2400,7 +2379,6 @@ fn create_windows() {
                 y: scale(screen_y),
                 width: scale(row_width - SWITCH_HIT_W - GAP),
                 id: IDC_ROW_LABEL_BASE + 4,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2413,7 +2391,6 @@ fn create_windows() {
                 y: scale(screen_y),
                 width: scale(SWITCH_HIT_W),
                 id: IDC_SCREEN_ENABLE,
-                instance,
                 font,
             },
             scale(BUTTON_H),
@@ -2431,7 +2408,6 @@ fn create_windows() {
                     y: 0,
                     width: scale(4),
                     id,
-                    instance,
                     font,
                 },
                 scale(CHIP_H),
@@ -2451,7 +2427,6 @@ fn create_windows() {
             mk_footer_version(
                 panel,
                 &version_label,
-                instance,
                 panel_font_meta(),
                 y + (footer_card_h - SUBTITLE_H) / 2,
             );
@@ -2471,7 +2446,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_UPDATE_BUTTON,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2485,7 +2459,6 @@ fn create_windows() {
                 y: 0,
                 width: scale(4),
                 id: IDC_UPDATE_NOTES_LINK,
-                instance,
                 font: subtitle_font,
             },
             scale(LINK_BOX_H),
@@ -2544,7 +2517,6 @@ fn create_windows() {
             y: scale(18),
             width: scale(380),
             id: IDC_WARN_TEXT,
-            instance,
             font,
         });
         WARN_TEXT.store(warn_text.0 as isize, Ordering::SeqCst);
@@ -2558,28 +2530,15 @@ fn create_windows() {
             SWP_NOMOVE | SWP_NOZORDER,
         );
 
-        let warn_cancel = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+        let warn_cancel = crate::kit::controls::raw_physical(
+            warning,
             w!("BUTTON"),
-            PCWSTR(
-                t("common_cancel")
-                    .encode_utf16()
-                    .chain([0])
-                    .collect::<Vec<_>>()
-                    .as_ptr(),
-            ),
+            &t("common_cancel"),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            scale(160),
-            scale(116),
-            scale(120),
-            scale(36),
-            Some(warning),
-            Some(HMENU(IDC_WARN_CANCEL as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .expect("warning cancel button");
-        let _ = set_control_font(warn_cancel, font);
+            IDC_WARN_CANCEL,
+            font,
+            (scale(160), scale(116), scale(120), scale(36)),
+        );
         nativeform::track(warn_cancel);
 
         popups::create();
@@ -2919,13 +2878,7 @@ fn layout_footer_links(panel: HWND) {
 
 /// Right-aligned muted version text on the More card. Owner-draw like every
 /// panel static, so the themed muted ink rides the normal draw dispatch.
-unsafe fn mk_footer_version(
-    panel: HWND,
-    text: &str,
-    instance: windows::Win32::Foundation::HMODULE,
-    font: HFONT,
-    y: i32,
-) -> HWND {
+unsafe fn mk_footer_version(panel: HWND, text: &str, font: HFONT, y: i32) -> HWND {
     {
         let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
         let row_right = PAD + CARD_PAD_X + (card_w - 2 * CARD_PAD_X);
@@ -2941,7 +2894,6 @@ unsafe fn mk_footer_version(
                 y: scale(y),
                 width,
                 id: IDC_FOOTER_VERSION,
-                instance,
                 font,
             },
             scale(SUBTITLE_H),
@@ -2949,14 +2901,7 @@ unsafe fn mk_footer_version(
     }
 }
 
-fn section_header(
-    parent: HWND,
-    label: &str,
-    y: i32,
-    section_id: usize,
-    instance: windows::Win32::Foundation::HMODULE,
-    font: HFONT,
-) -> HWND {
+fn section_header(parent: HWND, label: &str, y: i32, section_id: usize, font: HFONT) -> HWND {
     owner_static(
         &ControlSpec {
             parent,
@@ -2965,7 +2910,6 @@ fn section_header(
             y: scale(y),
             width: scale(PANEL_CLIENT_WIDTH - 2 * PAD),
             id: section_id,
-            instance,
             font,
         },
         scale(SECTION_H),
@@ -2987,30 +2931,22 @@ struct ControlSpec {
     y: i32,
     width: i32,
     id: usize,
-    instance: windows::Win32::Foundation::HMODULE,
     font: HFONT,
 }
 
 unsafe fn create_control(spec: &ControlSpec, class: PCWSTR, extra_style: u32, height: i32) -> HWND {
-    let text: Vec<u16> = spec.label.encode_utf16().chain([0]).collect();
+    // The panel positions children in physical pixels at runtime, so the
+    // kit's physical-rect creator serves it directly.
     unsafe {
-        let hwnd_ = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+        crate::kit::controls::raw_physical(
+            spec.parent,
             class,
-            PCWSTR(text.as_ptr()),
+            &spec.label,
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | extra_style),
-            spec.x,
-            spec.y,
-            spec.width,
-            height,
-            Some(spec.parent),
-            Some(HMENU(spec.id as *mut _)),
-            Some(spec.instance.into()),
-            None,
+            spec.id,
+            spec.font,
+            (spec.x, spec.y, spec.width, height),
         )
-        .expect("child control");
-        let _ = set_control_font(hwnd_, spec.font);
-        hwnd_
     }
 }
 

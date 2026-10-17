@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 // Edit interior brushes (surface / disabled surface), live for the process.
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HDC, HFONT};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::EM_SETLIMITTEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
+use crate::kit::controls::{label, logical_text_width, push_button, tab_button};
 use crate::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, GAP, LABEL_GAP, TITLE_GAP, row_slot};
 use crate::{t_pub, theme};
 
@@ -163,6 +162,46 @@ const PROJECT_URL: &str = "https://github.com/JeffioZ/IdleTrigger";
 static CHECKS: std::sync::Mutex<Option<std::collections::HashMap<i32, bool>>> =
     std::sync::Mutex::new(None);
 
+// Labels grayed through the palette tier instead of EnableWindow: a
+// disabled STATIC renders with the system's disabled-static styling, which
+// ignores our WM_CTLCOLORSTATIC text color and paints a bright GrayText in
+// dark mode - reading as a washed layer over the card. An enabled static's
+// colors are fully ours, so graying is a color-tier concern here.
+static GRAYED_LABELS: std::sync::Mutex<Option<Vec<i32>>> = std::sync::Mutex::new(None);
+
+fn grayed_labels() -> std::sync::MutexGuard<'static, Option<Vec<i32>>> {
+    crate::runtime::lock(&GRAYED_LABELS)
+}
+
+fn is_grayed_label(id: i32) -> bool {
+    grayed_labels()
+        .as_ref()
+        .is_some_and(|ids| ids.contains(&id))
+}
+
+/// Moves a label in or out of the palette-grayed set, repainting it when
+/// membership changes.
+fn set_label_grayed(hwnd: HWND, id: i32, grayed: bool) {
+    let mut store = grayed_labels();
+    let current = store.get_or_insert_with(Vec::new);
+    let was = current.contains(&id);
+    if was == grayed {
+        return;
+    }
+    if grayed {
+        current.push(id);
+    } else {
+        current.retain(|other| *other != id);
+    }
+    drop(store);
+    unsafe {
+        let control = get(hwnd, id);
+        // Erase on repaint: without it the old text color can survive the
+        // first invalidation at rounded corners.
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
+    }
+}
+
 fn checks() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i32, bool>>> {
     crate::runtime::lock(&CHECKS)
 }
@@ -206,10 +245,6 @@ static VALIDATION_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 fn set_validation(hwnd: HWND, text: &str, error: bool) {
     VALIDATION_ERROR.store(error, Ordering::SeqCst);
     set_text(hwnd, ID_VALIDATION, text);
-}
-
-fn s(v: i32) -> i32 {
-    crate::scale_pub(v)
 }
 
 use crate::wide;
@@ -384,49 +419,25 @@ pub fn devtools_select_page(page: i32) {
 
 fn create() {
     unsafe {
-        let instance = GetModuleHandleW(None).expect("module handle");
-        let body = crate::make_font_pub(14, 400);
-        let section = crate::make_font_pub(14, 600);
-        let title_font = crate::make_font_pub(17, 600);
+        let body = crate::kit::fonts::body();
+        let title_font = crate::kit::fonts::page_title();
 
-        register_class(instance);
-
-        let style = WINDOW_STYLE(
-            (WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0)
-                | WS_CLIPCHILDREN.0,
-        );
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(CLIENT_W),
-            bottom: s(CLIENT_H),
-        };
-        let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
-        let win_w = frame.right - frame.left;
-        let win_h = frame.bottom - frame.top;
-        let (x, y) = center_on_parent(win_w, win_h);
-
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("IdleTriggerSettings"),
-            PCWSTR(wide(&t_pub("settings_title")).as_ptr()),
-            style,
-            x,
-            y,
-            win_w,
-            win_h,
-            Some(crate::hwnd(&crate::PANEL)),
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .expect("settings window");
+        let form = crate::kit::form::FormWindow::create(crate::kit::form::FormSpec {
+            class: windows::core::w!("IdleTriggerSettings"),
+            kind: crate::kit::registry::Kind::Settings,
+            title: t_pub("settings_title"),
+            proc: Some(proc),
+            client_w: CLIENT_W,
+            client_h: CLIENT_H,
+            style: crate::kit::form::secondary_style(),
+            anchor: crate::hwnd(&crate::PANEL),
+            bg_brush: theme::bg_brush(),
+        });
+        let hwnd = form.hwnd;
         SETTINGS_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-        crate::dpi::install(hwnd);
-        theme::apply_to_window(hwnd);
-        crate::set_window_icons_pub(hwnd);
+        form.finish();
 
-        build_controls(hwnd, body, section, title_font);
+        build_controls(hwnd, body, title_font);
         populate(hwnd);
         PAGE.store(INITIAL_PAGE.swap(0, Ordering::SeqCst), Ordering::SeqCst);
         apply_dependent_states(hwnd);
@@ -481,7 +492,7 @@ fn refresh_theme() {
     crate::request_theme_refresh();
 }
 
-unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_font: HFONT) {
+unsafe fn build_controls(hwnd: HWND, font: HFONT, title_font: HFONT) {
     unsafe {
         // Header: the active page's nav label plus a one-line intro take the
         // old generic window-title/description spot; the visible pair swaps
@@ -584,492 +595,25 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, section_font: HFONT, title_fon
         // cards separate by CARD_GAP instead of bare whitespace.
 
         // Power and idle page.
-        section_card(hwnd, CARD_BASE, font, (CONTENT_X, 114, CARD_W, 152));
-        label(
-            hwnd,
-            ID_POWER_TITLE,
-            &t_pub("settings_power_title"),
-            section_font,
-            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        checkbox(
-            hwnd,
-            ID_KEEP_SCREEN,
-            &t_pub("settings_keep_screen"),
-            (ROW_X, 122, ROW_W, CHECK_H),
-        );
-        // Row order: screen-lock pause rides directly under Keep awake;
-        // the battery pair keeps its label+field closest together.
-        checkbox(
-            hwnd,
-            ID_PAUSE_ON_LOCK,
-            &t_pub("settings_pause_on_lock"),
-            (ROW_X, 156, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_BATTERY_ALLOWED,
-            &t_pub("settings_battery_allowed"),
-            (ROW_X, 190, ROW_W, CHECK_H),
-        );
-        label(
-            hwnd,
-            ID_BATTERY_LBL,
-            &t_pub("settings_battery_threshold"),
-            font,
-            (ROW_X, 230, 640 - 64 - 8 - ROW_X, 22),
-            false,
-        );
-        edit(
-            hwnd,
-            ID_BATTERY_THRESH,
-            (640 - 64, 224, FIELD_W, FIELD_H),
-            true,
-        );
-        section_card(hwnd, CARD_BASE + 1, font, (CONTENT_X, 300, CARD_W, 124));
-        label(
-            hwnd,
-            ID_IDLE_TITLE,
-            &t_pub("settings_idle_title"),
-            section_font,
-            (CONTENT_X, 276, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        checkbox(
-            hwnd,
-            ID_IDLE_ENHANCED,
-            &t_pub("menu_idle_enhanced"),
-            (ROW_X, 308, ROW_W, CHECK_H),
-        );
-        // The two timing numbers share a row (half-width label+field
-        // pairs, the same split the power card's switches use); the action
-        // dropdown keeps its own row.
-        for (index, (label_id, edit_id, key)) in [
-            (
-                ID_IDLE_TIMEOUT_LBL,
-                ID_IDLE_TIMEOUT,
-                "settings_idle_timeout_minutes",
-            ),
-            (
-                ID_WARNING_LBL,
-                ID_WARNING_SECONDS,
-                "settings_idle_warning_seconds",
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let (slot_x, slot_w) = row_slot(ROW_W, 2, index as i32);
-            let x = ROW_X + slot_x;
-            label(
-                hwnd,
-                label_id,
-                &t_pub(key),
-                font,
-                (x, 348, slot_w - FIELD_W - 8, 22),
-                false,
-            );
-            // SS_NOTIFY makes the static hit-testable so its hover tooltip
-            // can fire (plain statics are mouse-transparent).
-            let pair_label = get(hwnd, label_id);
-            let _ = SetWindowLongPtrW(
-                pair_label,
-                GWL_STYLE,
-                (GetWindowLongPtrW(pair_label, GWL_STYLE) | 0x00000100) as _, // SS_NOTIFY
-            );
-            edit(
-                hwnd,
-                edit_id,
-                (x + slot_w - FIELD_W, 342, FIELD_W, FIELD_H),
-                true,
-            );
-        }
-        label(
-            hwnd,
-            ID_IDLE_ACTION_LBL,
-            &t_pub("settings_idle_action"),
-            font,
-            (ROW_X, 388, 308, 22),
-            false,
-        );
-        combo(
-            hwnd,
-            ID_IDLE_ACTION,
-            (512, 382, 128, FIELD_H),
-            &idle_action_labels(),
-        );
+        crate::kit::spec::apply(hwnd, &power_page_spec());
 
-        // Day/night page. The hint wraps to two lines in English, shifting
-        // the behavior section; the flow below is shared with the language
-        // refresh so the two sites cannot drift apart.
-        let flow = theme_flow();
-        section_card(
-            hwnd,
-            CARD_BASE + 2,
-            font,
-            (CONTENT_X, 114, CARD_W, flow.schedule_card_h),
-        );
-        label(
-            hwnd,
-            ID_THEME_SCHEDULE_TITLE,
-            &t_pub("settings_theme_schedule_group"),
-            section_font,
-            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        label(
-            hwnd,
-            ID_THEME_MODE_LBL,
-            &t_pub("settings_theme_mode"),
-            font,
-            (ROW_X, 128, 208, 22),
-            false,
-        );
-        combo(
-            hwnd,
-            ID_THEME_MODE,
-            (420, 122, 220, FIELD_H),
-            &[
-                t_pub("settings_theme_fixed"),
-                t_pub("settings_theme_sunrise"),
-            ],
-        );
-        label(
-            hwnd,
-            ID_LIGHT_TIME_LBL,
-            &t_pub("settings_light_time"),
-            font,
-            (ROW_X, 168, 104, 22),
-            false,
-        );
-        edit(hwnd, ID_LIGHT_TIME, (308, 162, 104, FIELD_H), false);
-        label(
-            hwnd,
-            ID_DARK_TIME_LBL,
-            &t_pub("settings_dark_time"),
-            font,
-            (428, 168, 104, 22),
-            false,
-        );
-        edit(hwnd, ID_DARK_TIME, (536, 162, 104, FIELD_H), false);
-        label(
-            hwnd,
-            ID_LOCATION_LBL,
-            &t_pub("settings_location_source"),
-            font,
-            (ROW_X, 168, 208, 22),
-            false,
-        );
-        combo(
-            hwnd,
-            ID_LOCATION_SOURCE,
-            (420, 162, 220, FIELD_H),
-            &[
-                t_pub("settings_location_auto"),
-                t_pub("settings_location_ip"),
-            ],
-        );
-        label(
-            hwnd,
-            ID_THEME_LOCATION_STATUS,
-            "",
-            font,
-            (ROW_X, 202, ROW_W, 22),
-            false,
-        );
-        label(
-            hwnd,
-            ID_THEME_HINT,
-            &t_pub("settings_theme_hint"),
-            font,
-            (ROW_X, 230, ROW_W, flow.hint_h),
-            false,
-        );
-        section_card(
-            hwnd,
-            CARD_BASE + 3,
-            font,
-            (
-                CONTENT_X,
-                flow.behavior_card_y,
-                CARD_W,
-                2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP,
-            ),
-        );
-        label(
-            hwnd,
-            ID_THEME_BEHAVIOR_TITLE,
-            &t_pub("settings_theme_behavior_group"),
-            section_font,
-            (CONTENT_X, flow.behavior_title_y, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        checkbox(
-            hwnd,
-            ID_THEME_BATTERY,
-            &t_pub("menu_theme_battery_dark"),
-            (ROW_X, flow.battery_y, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_THEME_FULLSCREEN,
-            &t_pub("menu_theme_skip_fullscreen"),
-            (ROW_X, flow.fullscreen_y, ROW_W, CHECK_H),
-        );
+        // Day/night page (language-dependent geometry rides the relayout
+        // spec flavor).
+        crate::kit::spec::apply_relayout(hwnd, &theme_page_spec());
 
-        // Appearance page (its own tab): paired light/dark columns for
-        // wallpaper and cursor schemes inside one card, over a shared
-        // wallpaper library. Layout grid inside the card: row labels at
-        // ROW_X, light and dark columns ride row_slot halves. The header
-        // pair above carries the intro, so the card starts at SECTION_TOP.
-        section_card(
-            hwnd,
-            CARD_BASE + 4,
-            font,
-            (CONTENT_X, SECTION_TOP, CARD_W, 184),
-        );
-        label(
-            hwnd,
-            ID_COL_LIGHT,
-            &t_pub("settings_light_side"),
-            section_font,
-            (264, 98, 182, 22),
-            false,
-        );
-        label(
-            hwnd,
-            ID_COL_DARK,
-            &t_pub("settings_dark_side"),
-            section_font,
-            (458, 98, 182, 22),
-            false,
-        );
-        // Wallpaper row: pick from the library per side.
-        label(
-            hwnd,
-            ID_ROW_WALL_LBL,
-            &t_pub("settings_row_wallpaper"),
-            font,
-            (ROW_X, 132, 56, 22),
-            false,
-        );
-        for (id, x) in [(ID_LIGHT_WALL, 264), (ID_DARK_WALL, 458)] {
-            combo_items(hwnd, id, (x, 126, 182, FIELD_H), &wallpaper_pick_items(""));
-        }
-        // Cursor row: installed schemes per side, with the .inf installer
-        // as a footer action in each dropdown (wallpaper Browse parity).
-        label(
-            hwnd,
-            ID_ROW_CURSOR_LBL,
-            &t_pub("settings_row_cursor"),
-            font,
-            (ROW_X, 172, 56, 22),
-            false,
-        );
-        for (id, x) in [(ID_LIGHT_CURSOR, 264), (ID_DARK_CURSOR, 458)] {
-            combo_items(hwnd, id, (x, 166, 182, FIELD_H), &cursor_choice_rows());
-        }
-        // Restore pair: back to the state captured before the first
-        // day/night application, or to system factory defaults.
-        let (mut slot_x, mut slot_w) = row_slot(ROW_W, 2, 0);
-        push_button(
-            hwnd,
-            ID_RESTORE_PREV,
-            &t_pub("settings_restore_prev"),
-            (ROW_X + slot_x, 206, slot_w, FIELD_H),
-        );
-        (slot_x, slot_w) = row_slot(ROW_W, 2, 1);
-        push_button(
-            hwnd,
-            ID_RESTORE_DEFAULT,
-            &t_pub("settings_restore_default"),
-            (ROW_X + slot_x, 206, slot_w, FIELD_H),
-        );
-        // Muted caption under the disabled restore button: explains when a
-        // pre-change snapshot appears (tooltips cannot fire on disabled
-        // controls, so the reason must stay visible).
-        label(
-            hwnd,
-            ID_RESTORE_HINT,
-            &t_pub("settings_restore_hint"),
-            font,
-            (ROW_X, 244, ROW_W, 22),
-            false,
-        );
+        // Appearance page: the wallpaper library dropdowns refresh by
+        // value in their own path; the spec owns creation and captions.
+        crate::kit::spec::apply(hwnd, &appearance_page_spec());
 
-        // Application page. The auto-check switch and the manual check
-        // button ride the general card (same one-click flow as the panel
-        // link); the about block closes the page.
-        section_card(hwnd, CARD_BASE + 7, font, (CONTENT_X, 114, CARD_W, 228));
-        label(
-            hwnd,
-            ID_APP_GENERAL_TITLE,
-            &t_pub("settings_app_general_group"),
-            section_font,
-            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        label(
-            hwnd,
-            ID_LANGUAGE_LBL,
-            &t_pub("settings_language"),
-            font,
-            (ROW_X, 128, 208, 22),
-            false,
-        );
-        combo(
-            hwnd,
-            ID_LANGUAGE,
-            (420, 122, 220, FIELD_H),
-            &[
-                t_pub("menu_lang_auto"),
-                t_pub("menu_lang_en"),
-                t_pub("menu_lang_zh"),
-            ],
-        );
-        checkbox(
-            hwnd,
-            ID_HOTKEYS,
-            &t_pub("menu_hotkeys"),
-            (ROW_X, 162, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_AUTOSTART,
-            &t_pub("menu_autostart"),
-            (ROW_X, 196, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_LOGGING,
-            &t_pub("menu_logging"),
-            (ROW_X, 230, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_APP_UPDATE_AUTO,
-            &t_pub("settings_update_auto"),
-            (ROW_X, 264, ROW_W, CHECK_H),
-        );
-        // Manual check button: caption follows the updater phase (检查更新 →
-        // 检查中… → 更新到 vX → 下载更新 N%), drawn on the card surface.
-        // Wider than the footer buttons: the phase captions ("Check for
-        // updates", "Downloading 100%") must not wrap inside
-        // draw_button_label's word-break on wide-Latin system fonts.
-        push_button(
-            hwnd,
-            ID_APP_UPDATE_CHECK,
-            &t_pub("menu_check_updates"),
-            (ROW_RIGHT - 164, 298, 164, BTN_H),
-        );
-        // The about block is one quiet row, not a card: a 40px face around
-        // a single link read as filler chrome.
-        label(
-            hwnd,
-            ID_APP_ABOUT_TITLE,
-            &t_pub("settings_app_about_group"),
-            section_font,
-            (CONTENT_X, 352, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        let project_label = t_pub("settings_project_home_label");
-        let label_w = logical_text_width(hwnd, font, &project_label, 96) + 2;
-        let url_w = logical_text_width(hwnd, font, PROJECT_URL, 376) + 2;
-        let mut link_x = CONTENT_X + label_w + GAP;
-        if is_chinese() {
-            // CJK advance boxes carry extra trailing space (Go optical fix).
-            link_x -= 10;
-        }
-        label(
-            hwnd,
-            ID_PROJECT_HOME_LBL,
-            &project_label,
-            font,
-            (CONTENT_X, 384, label_w, 22),
-            false,
-        );
-        // Go renders the URL as an underlined accent-colored text link with
-        // a hand cursor (DrawTextLink), not a button.
-        link(
-            hwnd,
-            ID_PROJECT_HOME,
-            PROJECT_URL,
-            (link_x, 384, url_w.min(CONTENT_RIGHT - link_x), 22),
-        );
+        // Application page: the project-home row is measured text, so the
+        // page rides the relayout flavor; the update-check button's phase
+        // caption is create-only.
+        crate::kit::spec::apply_relayout(hwnd, &app_page_spec(hwnd));
 
-        // Screen notifications page.
-        section_card(hwnd, CARD_BASE + 5, font, (CONTENT_X, 114, CARD_W, 146));
-        label(
-            hwnd,
-            ID_NOTIFICATIONS_TITLE,
-            &t_pub("settings_lock_keys"),
-            section_font,
-            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        checkbox(
-            hwnd,
-            ID_LOCK_KEYS,
-            &t_pub("settings_lock_keys_enable"),
-            (ROW_X, 122, ROW_W, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_LOCK_CAPS,
-            "Caps Lock",
-            (ROW_X + 24, 156, ROW_W - 24, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_LOCK_NUM,
-            "Num Lock",
-            (ROW_X + 24, 190, ROW_W - 24, CHECK_H),
-        );
-        checkbox(
-            hwnd,
-            ID_LOCK_SCROLL,
-            "Scroll Lock",
-            (ROW_X + 24, 224, ROW_W - 24, CHECK_H),
-        );
-        let notif_hint_h = if is_chinese() { 22 } else { 42 };
-        section_card(
-            hwnd,
-            CARD_BASE + 6,
-            font,
-            (CONTENT_X, 294, CARD_W, 92 + notif_hint_h),
-        );
-        label(
-            hwnd,
-            ID_NOTIFICATIONS_BEHAVIOR,
-            &t_pub("settings_notification_behavior"),
-            section_font,
-            (CONTENT_X, 270, CARD_W, SECTION_TITLE_H),
-            false,
-        );
-        checkbox(
-            hwnd,
-            ID_LOCK_FULLSCREEN,
-            &t_pub("settings_notification_fullscreen"),
-            (ROW_X, 302, ROW_W, CHECK_H),
-        );
-        label(
-            hwnd,
-            ID_NOTIFICATIONS_HINT,
-            &t_pub("settings_notification_hint"),
-            font,
-            (ROW_X, 336, ROW_W, notif_hint_h),
-            false,
-        );
-        // The preview button follows the hint: the one-line Chinese hint
-        // sits higher than the two-line English one.
-        push_button(
-            hwnd,
-            ID_LOCK_PREVIEW,
-            &t_pub("settings_notification_preview"),
-            (ROW_X, 336 + notif_hint_h + 6, 160, BTN_H),
-        );
-
+        // Screen notifications page: the hint is one line in Chinese and
+        // two in English, which grows the behavior card and moves the
+        // preview button (relayout flavor).
+        crate::kit::spec::apply_relayout(hwnd, &notifications_page_spec());
         // Footer: single-line validation above the buttons; long bilingual
         // messages ellipsize rather than claiming a second line.
         label(
@@ -1117,79 +661,412 @@ fn idle_action_labels() -> Vec<String> {
         .collect()
 }
 
-unsafe fn child(
-    parent: HWND,
-    class: windows::core::PCWSTR,
-    text: &str,
-    style: WINDOW_STYLE,
-    id: i32,
-    font: HFONT,
-    b: (i32, i32, i32, i32),
-) -> HWND {
-    unsafe {
-        let (x, y, w, h) = b;
-        let instance = GetModuleHandleW(None).unwrap_or_default();
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            class,
-            PCWSTR(wide(text).as_ptr()),
-            style,
-            s(x),
-            s(y),
-            s(w),
-            s(h),
-            Some(parent),
-            Some(HMENU(id as isize as *mut _)),
-            Some(instance.into()),
-            None,
-        )
-        .unwrap_or_default();
-        if !hwnd.is_invalid() {
-            let _ = SendMessageW(
-                hwnd,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-        }
-        hwnd
+/// Power/idle page as a declarative spec: creation and the language
+/// refresh both run through it, so captions and combo items can never
+/// drift between the two sites.
+fn power_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
+    use crate::kit::spec::{ControlSpec, FontRole, Text};
+    let mut specs = vec![
+        ControlSpec::card(CARD_BASE, (CONTENT_X, 114, CARD_W, 152)),
+        ControlSpec::label(
+            ID_POWER_TITLE,
+            Text::Key("settings_power_title"),
+            FontRole::Section,
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::checkbox(
+            ID_KEEP_SCREEN,
+            "settings_keep_screen",
+            (ROW_X, 122, ROW_W, CHECK_H),
+        ),
+        // Row order: screen-lock pause rides directly under Keep awake;
+        // the battery pair keeps its label+field closest together.
+        ControlSpec::checkbox(
+            ID_PAUSE_ON_LOCK,
+            "settings_pause_on_lock",
+            (ROW_X, 156, ROW_W, CHECK_H),
+        ),
+        ControlSpec::checkbox(
+            ID_BATTERY_ALLOWED,
+            "settings_battery_allowed",
+            (ROW_X, 190, ROW_W, CHECK_H),
+        ),
+        ControlSpec::label(
+            ID_BATTERY_LBL,
+            Text::Key("settings_battery_threshold"),
+            FontRole::Body,
+            (ROW_X, 230, 640 - 64 - 8 - ROW_X, 22),
+        ),
+        ControlSpec::edit(ID_BATTERY_THRESH, (640 - 64, 224, FIELD_W, FIELD_H), true),
+        ControlSpec::card(CARD_BASE + 1, (CONTENT_X, 300, CARD_W, 124)),
+        ControlSpec::label(
+            ID_IDLE_TITLE,
+            Text::Key("settings_idle_title"),
+            FontRole::Section,
+            (CONTENT_X, 276, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::checkbox(
+            ID_IDLE_ENHANCED,
+            "menu_idle_enhanced",
+            (ROW_X, 308, ROW_W, CHECK_H),
+        ),
+    ];
+    // The two timing numbers share a row (half-width label+field pairs,
+    // the same split the power card's switches use); the action dropdown
+    // keeps its own row.
+    for (index, (label_id, edit_id, key)) in [
+        (
+            ID_IDLE_TIMEOUT_LBL,
+            ID_IDLE_TIMEOUT,
+            "settings_idle_timeout_minutes",
+        ),
+        (
+            ID_WARNING_LBL,
+            ID_WARNING_SECONDS,
+            "settings_idle_warning_seconds",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (slot_x, slot_w) = row_slot(ROW_W, 2, index as i32);
+        let x = ROW_X + slot_x;
+        specs.push(ControlSpec::notify_label(
+            label_id,
+            key,
+            (x, 348, slot_w - FIELD_W - 8, 22),
+        ));
+        specs.push(ControlSpec::edit(
+            edit_id,
+            (x + slot_w - FIELD_W, 342, FIELD_W, FIELD_H),
+            true,
+        ));
     }
+    specs.push(ControlSpec::label(
+        ID_IDLE_ACTION_LBL,
+        Text::Key("settings_idle_action"),
+        FontRole::Body,
+        (ROW_X, 388, 308, 22),
+    ));
+    specs.push(ControlSpec::combo(
+        ID_IDLE_ACTION,
+        (512, 382, 128, FIELD_H),
+        idle_action_labels,
+    ));
+    specs
 }
 
-/// Owner-drawn section card surface behind a section's rows (panel card
-/// grammar): rounded face with the family hairline, painted by the parent's
-/// WM_DRAWITEM dispatch. Created before the section's controls so it stays
-/// beneath them in z-order; never interactive, so it gets no hover track.
-unsafe fn section_card(parent: HWND, id: i32, font: HFONT, b: (i32, i32, i32, i32)) {
-    unsafe {
-        let card = child(
-            parent,
-            windows::core::w!("STATIC"),
-            "",
-            // WS_CLIPSIBLINGS: the card repaints the field wells it hosts;
-            // without it the card's DC does not exclude the edit sitting
-            // above, and a well repaint paints OVER the edit's pixels -
-            // toggling an unrelated switch made the field read as cleared.
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            id,
-            font,
-            b,
-        );
-        // Pin beneath everything (manager list-surface parity): resize
-        // passes reorder siblings, and a card floating above its rows
-        // clips their owner-draw DCs to nothing - fields vanished this way.
-        let _ = SetWindowPos(
-            card,
-            Some(windows::Win32::Foundation::HWND(
-                std::ptr::NonNull::dangling().as_ptr(),
-            )), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+fn theme_mode_labels() -> Vec<String> {
+    vec![
+        t_pub("settings_theme_fixed"),
+        t_pub("settings_theme_sunrise"),
+    ]
+}
+
+fn location_labels() -> Vec<String> {
+    vec![
+        t_pub("settings_location_auto"),
+        t_pub("settings_location_ip"),
+    ]
+}
+
+fn language_labels() -> Vec<String> {
+    vec![
+        t_pub("menu_lang_auto"),
+        t_pub("menu_lang_en"),
+        t_pub("menu_lang_zh"),
+    ]
+}
+
+/// Wallpaper rows for one side at creation; the library dropdowns refresh
+/// by value in their own path (file names are not translations).
+fn wall_pick_rows() -> Vec<crate::choice::ChoiceItem> {
+    wallpaper_pick_items("")
+}
+
+/// Day/night page: the hint wraps to two lines in English, shifting the
+/// behavior section — rects recompute from theme_flow on every call, so
+/// creation and the language refresh share one geometry source.
+fn theme_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
+    use crate::kit::spec::{ControlSpec, FontRole, Text};
+    let flow = theme_flow();
+    vec![
+        ControlSpec::card(
+            CARD_BASE + 2,
+            (CONTENT_X, 114, CARD_W, flow.schedule_card_h),
+        ),
+        ControlSpec::label(
+            ID_THEME_SCHEDULE_TITLE,
+            Text::Key("settings_theme_schedule_group"),
+            FontRole::Section,
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::label(
+            ID_THEME_MODE_LBL,
+            Text::Key("settings_theme_mode"),
+            FontRole::Body,
+            (ROW_X, 128, 208, 22),
+        ),
+        ControlSpec::combo(ID_THEME_MODE, (420, 122, 220, FIELD_H), theme_mode_labels),
+        ControlSpec::label(
+            ID_LIGHT_TIME_LBL,
+            Text::Key("settings_light_time"),
+            FontRole::Body,
+            (ROW_X, 168, 104, 22),
+        ),
+        ControlSpec::edit(ID_LIGHT_TIME, (308, 162, 104, FIELD_H), false),
+        ControlSpec::label(
+            ID_DARK_TIME_LBL,
+            Text::Key("settings_dark_time"),
+            FontRole::Body,
+            (428, 168, 104, 22),
+        ),
+        ControlSpec::edit(ID_DARK_TIME, (536, 162, 104, FIELD_H), false),
+        ControlSpec::label(
+            ID_LOCATION_LBL,
+            Text::Key("settings_location_source"),
+            FontRole::Body,
+            (ROW_X, 168, 208, 22),
+        ),
+        ControlSpec::combo(
+            ID_LOCATION_SOURCE,
+            (420, 162, 220, FIELD_H),
+            location_labels,
+        ),
+        // The status line's text is dynamic (location state); the spec
+        // owns its geometry only.
+        ControlSpec::label(
+            ID_THEME_LOCATION_STATUS,
+            Text::None,
+            FontRole::Body,
+            (ROW_X, 202, ROW_W, 22),
+        ),
+        ControlSpec::label(
+            ID_THEME_HINT,
+            Text::Key("settings_theme_hint"),
+            FontRole::Body,
+            (ROW_X, 230, ROW_W, flow.hint_h),
+        ),
+        ControlSpec::card(
+            CARD_BASE + 3,
+            (
+                CONTENT_X,
+                flow.behavior_card_y,
+                CARD_W,
+                2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP,
+            ),
+        ),
+        ControlSpec::label(
+            ID_THEME_BEHAVIOR_TITLE,
+            Text::Key("settings_theme_behavior_group"),
+            FontRole::Section,
+            (CONTENT_X, flow.behavior_title_y, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::checkbox(
+            ID_THEME_BATTERY,
+            "menu_theme_battery_dark",
+            (ROW_X, flow.battery_y, ROW_W, CHECK_H),
+        ),
+        ControlSpec::checkbox(
+            ID_THEME_FULLSCREEN,
+            "menu_theme_skip_fullscreen",
+            (ROW_X, flow.fullscreen_y, ROW_W, CHECK_H),
+        ),
+    ]
+}
+
+/// Appearance page: paired light/dark columns for wallpaper and cursor
+/// schemes inside one card, over a shared wallpaper library.
+fn appearance_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
+    use crate::kit::spec::{ControlSpec, FontRole, Text};
+    let (slot0, w0) = row_slot(ROW_W, 2, 0);
+    let (slot1, w1) = row_slot(ROW_W, 2, 1);
+    vec![
+        ControlSpec::card(CARD_BASE + 4, (CONTENT_X, SECTION_TOP, CARD_W, 184)),
+        ControlSpec::label(
+            ID_COL_LIGHT,
+            Text::Key("settings_light_side"),
+            FontRole::Section,
+            (264, 98, 182, 22),
+        ),
+        ControlSpec::label(
+            ID_COL_DARK,
+            Text::Key("settings_dark_side"),
+            FontRole::Section,
+            (458, 98, 182, 22),
+        ),
+        ControlSpec::label(
+            ID_ROW_WALL_LBL,
+            Text::Key("settings_row_wallpaper"),
+            FontRole::Body,
+            (ROW_X, 132, 56, 22),
+        ),
+        ControlSpec::combo_rows(ID_LIGHT_WALL, (264, 126, 182, FIELD_H), wall_pick_rows),
+        ControlSpec::combo_rows(ID_DARK_WALL, (458, 126, 182, FIELD_H), wall_pick_rows),
+        ControlSpec::label(
+            ID_ROW_CURSOR_LBL,
+            Text::Key("settings_row_cursor"),
+            FontRole::Body,
+            (ROW_X, 172, 56, 22),
+        ),
+        ControlSpec::combo_rows(
+            ID_LIGHT_CURSOR,
+            (264, 166, 182, FIELD_H),
+            cursor_choice_rows,
+        ),
+        ControlSpec::combo_rows(ID_DARK_CURSOR, (458, 166, 182, FIELD_H), cursor_choice_rows),
+        // Restore pair: back to the state captured before the first
+        // day/night application, or to system factory defaults.
+        ControlSpec::button(
+            ID_RESTORE_PREV,
+            "settings_restore_prev",
+            (ROW_X + slot0, 206, w0, FIELD_H),
+        ),
+        ControlSpec::button(
+            ID_RESTORE_DEFAULT,
+            "settings_restore_default",
+            (ROW_X + slot1, 206, w1, FIELD_H),
+        ),
+        // Muted caption under the disabled restore button: explains when a
+        // pre-change snapshot appears (tooltips cannot fire on disabled
+        // controls, so the reason must stay visible).
+        ControlSpec::label(
+            ID_RESTORE_HINT,
+            Text::Key("settings_restore_hint"),
+            FontRole::Body,
+            (ROW_X, 244, ROW_W, 22),
+        ),
+    ]
+}
+
+/// App page: the update-check button's caption follows the updater phase,
+/// so it is create-only; the project-home row is measured from the label.
+fn app_page_spec(hwnd: HWND) -> Vec<crate::kit::spec::ControlSpec> {
+    use crate::kit::spec::{ControlSpec, FontRole, Text};
+    let project_label = t_pub("settings_project_home_label");
+    let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
+    let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
+    let mut link_x = CONTENT_X + label_w + GAP;
+    if is_chinese() {
+        // CJK advance boxes carry extra trailing space (Go optical fix).
+        link_x -= 10;
     }
+    vec![
+        ControlSpec::card(CARD_BASE + 7, (CONTENT_X, 114, CARD_W, 228)),
+        ControlSpec::label(
+            ID_APP_GENERAL_TITLE,
+            Text::Key("settings_app_general_group"),
+            FontRole::Section,
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::label(
+            ID_LANGUAGE_LBL,
+            Text::Key("settings_language"),
+            FontRole::Body,
+            (ROW_X, 128, 208, 22),
+        ),
+        ControlSpec::combo(ID_LANGUAGE, (420, 122, 220, FIELD_H), language_labels),
+        ControlSpec::checkbox(ID_HOTKEYS, "menu_hotkeys", (ROW_X, 162, ROW_W, CHECK_H)),
+        ControlSpec::checkbox(ID_AUTOSTART, "menu_autostart", (ROW_X, 196, ROW_W, CHECK_H)),
+        ControlSpec::checkbox(ID_LOGGING, "menu_logging", (ROW_X, 230, ROW_W, CHECK_H)),
+        ControlSpec::checkbox(
+            ID_APP_UPDATE_AUTO,
+            "settings_update_auto",
+            (ROW_X, 264, ROW_W, CHECK_H),
+        ),
+        // Manual check button: caption follows the updater phase (检查更新 →
+        // 检查中… → 更新到 vX → 下载更新 N%), drawn on the card surface.
+        // Wider than the footer buttons: the phase captions ("Check for
+        // updates", "Downloading 100%") must not wrap inside
+        // draw_button_label's word-break on wide-Latin system fonts.
+        ControlSpec::button_init(
+            ID_APP_UPDATE_CHECK,
+            "menu_check_updates",
+            (ROW_RIGHT - 164, 298, 164, BTN_H),
+        ),
+        // The about block is one quiet row, not a card: a 40px face around
+        // a single link read as filler chrome.
+        ControlSpec::label(
+            ID_APP_ABOUT_TITLE,
+            Text::Key("settings_app_about_group"),
+            FontRole::Section,
+            (CONTENT_X, 352, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::label(
+            ID_PROJECT_HOME_LBL,
+            Text::Key("settings_project_home_label"),
+            FontRole::Body,
+            (CONTENT_X, 384, label_w, 22),
+        ),
+        // Go renders the URL as an underlined accent-colored text link with
+        // a hand cursor (DrawTextLink), not a button.
+        ControlSpec::link(
+            ID_PROJECT_HOME,
+            PROJECT_URL,
+            (link_x, 384, url_w.min(CONTENT_RIGHT - link_x), 22),
+        ),
+    ]
+}
+
+/// Screen notifications page: the hint is one line in Chinese and two in
+/// English, which grows the behavior card and moves the preview button.
+fn notifications_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
+    use crate::kit::spec::{ControlSpec, FontRole, Text};
+    let notif_hint_h = if is_chinese() { 22 } else { 42 };
+    vec![
+        ControlSpec::card(CARD_BASE + 5, (CONTENT_X, 114, CARD_W, 146)),
+        ControlSpec::label(
+            ID_NOTIFICATIONS_TITLE,
+            Text::Key("settings_lock_keys"),
+            FontRole::Section,
+            (CONTENT_X, SECTION_TOP, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::checkbox(
+            ID_LOCK_KEYS,
+            "settings_lock_keys_enable",
+            (ROW_X, 122, ROW_W, CHECK_H),
+        ),
+        ControlSpec::checkbox_text(
+            ID_LOCK_CAPS,
+            Text::Literal("Caps Lock"),
+            (ROW_X + 24, 156, ROW_W - 24, CHECK_H),
+        ),
+        ControlSpec::checkbox_text(
+            ID_LOCK_NUM,
+            Text::Literal("Num Lock"),
+            (ROW_X + 24, 190, ROW_W - 24, CHECK_H),
+        ),
+        ControlSpec::checkbox_text(
+            ID_LOCK_SCROLL,
+            Text::Literal("Scroll Lock"),
+            (ROW_X + 24, 224, ROW_W - 24, CHECK_H),
+        ),
+        ControlSpec::card(CARD_BASE + 6, (CONTENT_X, 294, CARD_W, 92 + notif_hint_h)),
+        ControlSpec::label(
+            ID_NOTIFICATIONS_BEHAVIOR,
+            Text::Key("settings_notification_behavior"),
+            FontRole::Section,
+            (CONTENT_X, 270, CARD_W, SECTION_TITLE_H),
+        ),
+        ControlSpec::checkbox(
+            ID_LOCK_FULLSCREEN,
+            "settings_notification_fullscreen",
+            (ROW_X, 302, ROW_W, CHECK_H),
+        ),
+        ControlSpec::label(
+            ID_NOTIFICATIONS_HINT,
+            Text::Key("settings_notification_hint"),
+            FontRole::Body,
+            (ROW_X, 336, ROW_W, notif_hint_h),
+        ),
+        // The preview button follows the hint: the one-line Chinese hint
+        // sits higher than the two-line English one.
+        ControlSpec::button(
+            ID_LOCK_PREVIEW,
+            "settings_notification_preview",
+            (ROW_X, 336 + notif_hint_h + 6, 160, BTN_H),
+        ),
+    ]
 }
 
 /// The theme page's language-dependent vertical flow: the schedule hint is
@@ -1295,133 +1172,6 @@ fn card_field_ids(card_id: i32) -> &'static [i32] {
         2 => &[ID_LIGHT_TIME, ID_DARK_TIME],
         _ => &[],
     }
-}
-
-unsafe fn label(
-    parent: HWND,
-    id: i32,
-    text: &str,
-    font: HFONT,
-    b: (i32, i32, i32, i32),
-    right: bool,
-) -> HWND {
-    // SS_RIGHT = 2 (Go labelRight uses the raw style value).
-    let extra = 0x0080 | if right { 0x4002 } else { 0 }; // SS_NOPREFIX, SS_RIGHT | SS_ENDELLIPSIS
-    unsafe {
-        child(
-            parent,
-            windows::core::w!("STATIC"),
-            text,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | extra),
-            id,
-            font,
-            b,
-        )
-    }
-}
-
-/// Owner-drawn push button (Go bsOwnerDraw BUTTON + DrawButton).
-unsafe fn push_button(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
-    unsafe {
-        let hwnd = child(
-            parent,
-            windows::core::w!("BUTTON"),
-            text,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            id,
-            body_font(),
-            b,
-        );
-        crate::nativeform::track(hwnd);
-    }
-}
-
-/// Navigation tab: an owner-drawn button latched active to the selected
-/// page (Go tab buttons draw with the Active accent fill).
-unsafe fn tab_button(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
-    unsafe { push_button(parent, id, text, b) };
-}
-
-/// Owner-drawn switch row: on/off state lives in CHECKS (BM_SETCHECK has no
-/// effect on owner-draw buttons), painted via paint::draw_switch_row.
-unsafe fn checkbox(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
-    unsafe {
-        let hwnd = child(
-            parent,
-            windows::core::w!("BUTTON"),
-            text,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            id,
-            body_font(),
-            b,
-        );
-        crate::nativeform::track(hwnd);
-        // Toggle rows hover on the pill column alone (panel parity).
-        crate::nativeform::set_hover_column(hwnd, s(crate::layout::SWITCH_HIT_W));
-    }
-}
-
-/// Text hyperlink rendered as an owner-drawn button (Go DrawTextLink keeps
-/// native keyboard focus and pressed feedback).
-unsafe fn link(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
-    unsafe {
-        let hwnd = child(
-            parent,
-            windows::core::w!("BUTTON"),
-            text,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            id,
-            body_font(),
-            b,
-        );
-        crate::nativeform::track(hwnd);
-    }
-}
-
-/// Edit field: a borderless EDIT inset in the card face, with the
-/// surrounding well and hairline painted by the hosting card (see the
-/// CARD arm of the draw dispatch), so nothing stacks against the card
-/// (Go editWithStyle + ControlSurface parity).
-unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool) -> HWND {
-    unsafe {
-        let (x, y, w, _) = b;
-        // The edit is the inner area; the surrounding well/ring paints on
-        // the hosting card's face (see the CARD arm in the draw dispatch),
-        // so the field is card pixels + one inset child - no stacking, no
-        // non-client tricks.
-        let extra = if numeric { ES_NUMBER as u32 } else { 0 };
-        let edit = child(
-            parent,
-            windows::core::w!("EDIT"),
-            "",
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | extra),
-            id,
-            body_font(),
-            (x + 3, y + 7, w - 6, FIELD_H - 14),
-        );
-        // Cap input length: 5 digits for numbers, 5 chars for HH:MM.
-        let _ = SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(5)), Some(LPARAM(0)));
-        edit
-    }
-}
-
-/// Go choice control: an owner-drawn button with a custom drop-down popup
-/// (nativeform choicepopup parity).
-fn combo(parent: HWND, id: i32, b: (i32, i32, i32, i32), items: &[String]) {
-    {
-        let (x, y, w, _) = b;
-        let pairs: Vec<(String, String)> = items
-            .iter()
-            .map(|label| (label.clone(), label.clone()))
-            .collect();
-        crate::choice::create(parent, id, (x, y, w, FIELD_H), &pairs, body_font());
-    }
-}
-
-/// Choice creation from full row items (headers allowed).
-fn combo_items(parent: HWND, id: i32, b: (i32, i32, i32, i32), rows: &[crate::choice::ChoiceItem]) {
-    let (x, y, w, _) = b;
-    crate::choice::create_rows(parent, id, (x, y, w, FIELD_H), rows, body_font());
 }
 
 /// Cursor dropdown rows: a leading "no linkage" entry, the installed
@@ -1686,54 +1436,11 @@ fn browse_wallpaper_file(owner: HWND) -> Option<String> {
 }
 
 fn body_font() -> HFONT {
-    crate::make_font_pub(14, 400)
+    crate::kit::fonts::body()
 }
 
 fn is_chinese() -> bool {
     crate::i18n_is_chinese()
-}
-
-/// Physical text width converted back to logical pixels (Go logicalTextWidth).
-fn logical_text_width(parent: HWND, font: HFONT, text: &str, fallback: i32) -> i32 {
-    use windows::Win32::Graphics::Gdi::{GetTextExtentPoint32W, ReleaseDC, SelectObject};
-    unsafe {
-        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(parent));
-        if hdc.is_invalid() {
-            return fallback;
-        }
-        let old = SelectObject(hdc, windows::Win32::Graphics::Gdi::HGDIOBJ(font.0));
-        let chars: Vec<u16> = text.encode_utf16().collect();
-        let mut size = windows::Win32::Foundation::SIZE::default();
-        let measured = GetTextExtentPoint32W(hdc, &chars, &mut size).as_bool();
-        SelectObject(hdc, old);
-        let _ = ReleaseDC(Some(parent), hdc);
-        if !measured || size.cx <= 0 {
-            return fallback;
-        }
-        let dpi = s(96);
-        if dpi <= 0 {
-            return fallback;
-        }
-        (size.cx as i64 * 96 + (dpi / 2) as i64) as i32 / dpi
-    }
-}
-
-unsafe fn register_class(instance: windows::Win32::Foundation::HMODULE) {
-    unsafe {
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(proc),
-            hInstance: instance.into(),
-            lpszClassName: windows::core::w!("IdleTriggerSettings"),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            // MAKEINTRESOURCE(1) = winresource's "1 ICON" entry.
-            #[allow(clippy::manual_dangling_ptr)]
-            hIcon: LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))
-                .unwrap_or_default(),
-            hbrBackground: theme::bg_brush(),
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-    }
 }
 
 fn populate(hwnd: HWND) {
@@ -2175,18 +1882,17 @@ fn apply_dependent_states(hwnd: HWND) {
             }
         }
         let battery_allowed = is_checked(hwnd, ID_BATTERY_ALLOWED);
-        for id in [ID_BATTERY_LBL, ID_BATTERY_THRESH] {
-            let control = get(hwnd, id);
-            if IsWindowEnabled(control).as_bool() != battery_allowed {
-                let _ = EnableWindow(control, battery_allowed);
-                // EnableWindow alone can repaint without erasing the old
-                // edit background. Refresh its interior and only its own
-                // card well, preserving neighboring controls' text.
-                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(control), None, true);
-                if id == ID_BATTERY_THRESH {
-                    invalidate_well(hwnd, id);
-                }
-            }
+        // The label grays through the palette tier (see GRAYED_LABELS);
+        // only the edit goes through EnableWindow.
+        set_label_grayed(hwnd, ID_BATTERY_LBL, !battery_allowed);
+        let edit = get(hwnd, ID_BATTERY_THRESH);
+        if IsWindowEnabled(edit).as_bool() != battery_allowed {
+            let _ = EnableWindow(edit, battery_allowed);
+            // EnableWindow alone can repaint without erasing the old edit
+            // background. Refresh its interior and only its own card well,
+            // preserving neighboring controls' text.
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(edit), None, true);
+            invalidate_well(hwnd, ID_BATTERY_THRESH);
         }
         if page == 2 {
             // The pre-change restore needs a captured snapshot; the muted
@@ -2885,7 +2591,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             | ID_NOTIFICATIONS_HINT
                             | ID_RESTORE_HINT
                     );
-                    let disabled = !IsWindowEnabled(child_hwnd).as_bool();
+                    let disabled = !IsWindowEnabled(child_hwnd).as_bool() || is_grayed_label(id);
                     let text = if id == ID_VALIDATION
                         && GetWindowTextLengthW(child_hwnd) > 0
                         && VALIDATION_ERROR.load(Ordering::SeqCst)
@@ -3110,7 +2816,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_nav_item(
             dc,
             bounds,
-            crate::automation_ui::section_font_cached(),
+            crate::kit::fonts::section(),
             body_font(),
             &label,
             p,
@@ -3287,38 +2993,6 @@ fn report_restore_result(hwnd: HWND, sides: crate::theme_engine::RestoreSides) {
 
 /// Center on the owner, then clamp into its monitor work area (Go
 /// PlaceWindow: CenteredRect + ConstrainRect).
-fn center_on_parent(win_w: i32, win_h: i32) -> (i32, i32) {
-    unsafe {
-        let parent = crate::hwnd(&crate::PANEL);
-        let mut center = RECT {
-            left: 0,
-            top: 0,
-            right: GetSystemMetrics(SM_CXSCREEN),
-            bottom: GetSystemMetrics(SM_CYSCREEN),
-        };
-        let mut wr = RECT::default();
-        if GetWindowRect(parent, &mut wr).is_ok() && wr.right > wr.left && wr.bottom > wr.top {
-            center = wr;
-        }
-        let mut x = center.left + (center.right - center.left - win_w) / 2;
-        let mut y = center.top + (center.bottom - center.top - win_h) / 2;
-        let work = crate::display::work_area_for(parent);
-        let work_w = work.right - work.left;
-        let work_h = work.bottom - work.top;
-        if win_w >= work_w {
-            x = work.left;
-        } else {
-            x = x.clamp(work.left, work.right - win_w);
-        }
-        if win_h >= work_h {
-            y = work.top;
-        } else {
-            y = y.clamp(work.top, work.bottom - win_h);
-        }
-        (x, y)
-    }
-}
-
 /// Refresh captions and choice labels while retaining every draft value.
 pub fn refresh_language() {
     let hwnd = current();
@@ -3330,6 +3004,8 @@ pub fn refresh_language() {
         let _ = SetWindowTextW(hwnd, PCWSTR(wide(&t_pub("settings_title")).as_ptr()));
     }
     for (id, key) in [
+        // Chrome only: page headers, nav tabs, footer buttons. Page
+        // content rides the declarative specs below.
         (ID_PAGE_TITLE_POWER, "settings_tab_power"),
         (ID_PAGE_SUB_POWER, "settings_power_page_hint"),
         (ID_PAGE_TITLE_THEME, "settings_tab_theme"),
@@ -3348,48 +3024,8 @@ pub fn refresh_language() {
         (ID_TAB_NOTIFICATIONS, "settings_tab_notifications"),
         (ID_TAB_APP, "settings_tab_app"),
         (ID_TAB_APPEARANCE, "settings_tab_appearance"),
-        (ID_POWER_TITLE, "settings_power_title"),
-        (ID_KEEP_SCREEN, "settings_keep_screen"),
-        (ID_BATTERY_ALLOWED, "settings_battery_allowed"),
-        (ID_PAUSE_ON_LOCK, "settings_pause_on_lock"),
-        (ID_BATTERY_LBL, "settings_battery_threshold"),
-        (ID_IDLE_TITLE, "settings_idle_title"),
-        (ID_IDLE_ENHANCED, "menu_idle_enhanced"),
-        (ID_IDLE_TIMEOUT_LBL, "settings_idle_timeout_minutes"),
-        (ID_WARNING_LBL, "settings_idle_warning_seconds"),
-        (ID_IDLE_ACTION_LBL, "settings_idle_action"),
-        (ID_THEME_SCHEDULE_TITLE, "settings_theme_schedule_group"),
-        (ID_THEME_MODE_LBL, "settings_theme_mode"),
-        (ID_LIGHT_TIME_LBL, "settings_light_time"),
-        (ID_DARK_TIME_LBL, "settings_dark_time"),
-        (ID_LOCATION_LBL, "settings_location_source"),
-        (ID_THEME_HINT, "settings_theme_hint"),
-        (ID_THEME_BEHAVIOR_TITLE, "settings_theme_behavior_group"),
-        (ID_THEME_BATTERY, "menu_theme_battery_dark"),
-        (ID_THEME_FULLSCREEN, "menu_theme_skip_fullscreen"),
-        (ID_COL_LIGHT, "settings_light_side"),
-        (ID_COL_DARK, "settings_dark_side"),
-        (ID_ROW_WALL_LBL, "settings_row_wallpaper"),
-        (ID_ROW_CURSOR_LBL, "settings_row_cursor"),
-        (ID_RESTORE_PREV, "settings_restore_prev"),
-        (ID_RESTORE_DEFAULT, "settings_restore_default"),
-        (ID_RESTORE_HINT, "settings_restore_hint"),
-        (ID_APP_GENERAL_TITLE, "settings_app_general_group"),
-        (ID_LANGUAGE_LBL, "settings_language"),
-        (ID_HOTKEYS, "menu_hotkeys"),
-        (ID_AUTOSTART, "menu_autostart"),
-        (ID_LOGGING, "menu_logging"),
-        (ID_APP_ABOUT_TITLE, "settings_app_about_group"),
-        (ID_APP_UPDATE_AUTO, "settings_update_auto"),
-        (ID_NOTIFICATIONS_TITLE, "settings_lock_keys"),
-        (ID_LOCK_KEYS, "settings_lock_keys_enable"),
-        (ID_NOTIFICATIONS_BEHAVIOR, "settings_notification_behavior"),
-        (ID_LOCK_FULLSCREEN, "settings_notification_fullscreen"),
-        (ID_NOTIFICATIONS_HINT, "settings_notification_hint"),
-        (ID_LOCK_PREVIEW, "settings_notification_preview"),
         (ID_SAVE, "common_save"),
         (ID_CANCEL, "common_cancel"),
-        (ID_PROJECT_HOME_LBL, "settings_project_home_label"),
     ] {
         set_text(hwnd, id, &t_pub(key));
     }
@@ -3398,43 +3034,19 @@ pub fn refresh_language() {
         ID_VERSION,
         &crate::t_args("settings_version", &[&crate::version_with_arch()]),
     );
+    // The five pages ride the declarative specs: relabel, combo item
+    // rebuild (index-preserving), and - for the language-geometry pages -
+    // the reposition, all from the same specs creation uses.
+    unsafe { crate::kit::spec::apply(hwnd, &power_page_spec()) };
+    unsafe { crate::kit::spec::apply(hwnd, &appearance_page_spec()) };
+    unsafe { crate::kit::spec::apply_relayout(hwnd, &theme_page_spec()) };
+    unsafe { crate::kit::spec::apply_relayout(hwnd, &app_page_spec(hwnd)) };
+    unsafe {
+        crate::kit::spec::apply_relayout(hwnd, &notifications_page_spec());
+    }
     // The check button's caption is phase-formatted; re-derive it in the
     // new language.
     refresh_update_status();
-    for (id, labels) in [
-        (ID_IDLE_ACTION, idle_action_labels()),
-        (
-            ID_THEME_MODE,
-            vec![
-                t_pub("settings_theme_fixed"),
-                t_pub("settings_theme_sunrise"),
-            ],
-        ),
-        (
-            ID_LOCATION_SOURCE,
-            vec![
-                t_pub("settings_location_auto"),
-                t_pub("settings_location_ip"),
-            ],
-        ),
-        (
-            ID_LANGUAGE,
-            vec![
-                t_pub("menu_lang_auto"),
-                t_pub("menu_lang_en"),
-                t_pub("menu_lang_zh"),
-            ],
-        ),
-    ] {
-        let control = get(hwnd, id);
-        let selected = crate::choice::selection(control);
-        let items = labels
-            .into_iter()
-            .map(|label| (label.clone(), label))
-            .collect::<Vec<_>>();
-        crate::choice::set_items(control, &items);
-        crate::choice::select_index(control, selected);
-    }
     // The wallpaper and cursor rows carry localized action entries ("No
     // change", "Browse…", "Install…"), so they need the same language
     // rebuild; the file-name and scheme-name entries keep their labels via
@@ -3446,102 +3058,6 @@ pub fn refresh_language() {
         ID_THEME_LOCATION_STATUS,
         &location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1),
     );
-    // Language-dependent geometry must follow the new text: the theme hint
-    // is two lines in English but one in Chinese, which shifts the behavior
-    // section (and its card), and the project-home row is measured from the
-    // label. Like the panel's own refresh_language, this only moves
-    // windows — drafts live in control state, not geometry. Positions come
-    // from the same theme_flow used at creation, so the sites cannot drift.
-    let flow = theme_flow();
-    for (id, x, y, w, h) in [
-        (ID_THEME_HINT, ROW_X, 230, ROW_W, flow.hint_h),
-        (CARD_BASE + 2, CONTENT_X, 114, CARD_W, flow.schedule_card_h),
-        (
-            ID_THEME_BEHAVIOR_TITLE,
-            CONTENT_X,
-            flow.behavior_title_y,
-            CARD_W,
-            SECTION_TITLE_H,
-        ),
-        (
-            CARD_BASE + 3,
-            CONTENT_X,
-            flow.behavior_card_y,
-            CARD_W,
-            2 * CARD_PAD_Y + 2 * CHECK_H + LABEL_GAP,
-        ),
-        (ID_THEME_BATTERY, ROW_X, flow.battery_y, ROW_W, CHECK_H),
-        (
-            ID_THEME_FULLSCREEN,
-            ROW_X,
-            flow.fullscreen_y,
-            ROW_W,
-            CHECK_H,
-        ),
-    ] {
-        unsafe {
-            let _ = SetWindowPos(
-                get(hwnd, id),
-                None,
-                s(x),
-                s(y),
-                s(w),
-                s(h),
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-    }
-    // The notifications hint is one line in Chinese and two in English, which
-    // grows the behavior card and moves the preview button (same flow as the
-    // creation site, so the two cannot drift apart).
-    let notif_hint_h = if is_chinese() { 22 } else { 42 };
-    for (id, x, y, w, h) in [
-        (CARD_BASE + 6, CONTENT_X, 294, CARD_W, 92 + notif_hint_h),
-        (ID_NOTIFICATIONS_HINT, ROW_X, 336, ROW_W, notif_hint_h),
-        (ID_LOCK_PREVIEW, ROW_X, 336 + notif_hint_h + 6, 160, BTN_H),
-    ] {
-        unsafe {
-            let _ = SetWindowPos(
-                get(hwnd, id),
-                None,
-                s(x),
-                s(y),
-                s(w),
-                s(h),
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-    }
-    let project_label = t_pub("settings_project_home_label");
-    let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
-    let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
-    let mut link_x = CONTENT_X + label_w + GAP;
-    if is_chinese() {
-        // CJK advance boxes carry extra trailing space (Go optical fix).
-        link_x -= 10;
-    }
-    for (control, x, y, w, h) in [
-        (get(hwnd, ID_PROJECT_HOME_LBL), CONTENT_X, 384, label_w, 22),
-        (
-            get(hwnd, ID_PROJECT_HOME),
-            link_x,
-            384,
-            url_w.min(CONTENT_RIGHT - link_x),
-            22,
-        ),
-    ] {
-        unsafe {
-            let _ = SetWindowPos(
-                control,
-                None,
-                s(x),
-                s(y),
-                s(w),
-                s(h),
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-    }
     unsafe {
         create_tooltip(hwnd);
     }

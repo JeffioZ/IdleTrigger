@@ -786,7 +786,7 @@ unsafe fn paint_popup(hdc: windows::Win32::Graphics::Gdi::HDC, client: &RECT) {
             pressed: index == pressed && index == hover,
             ..Default::default()
         };
-        let selected_font = crate::automation_ui::section_font_cached();
+        let selected_font = crate::kit::fonts::section();
         paint::draw_menu_option(
             hdc,
             &bounds,

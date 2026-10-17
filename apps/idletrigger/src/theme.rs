@@ -117,7 +117,7 @@ const DARK_PALETTE: Palette = Palette {
     text2: 0x00DCD4CC,            // RGB(204,212,220)
     muted: 0x00B7AA9F,            // RGB(159,170,183)
     disabled_text: 0x008D8277,    // RGB(119,130,141)
-    disabled_surface: 0x00312C28, // RGB(40,44,49)
+    disabled_surface: 0x0028231F, // RGB(31,35,40) - inset ~12 steps under the card surface; at ~3 steps (40,44,49) the disabled well vanished into the dark card
     accent: 0x00B4780A,           // RGB(10,120,180)
     accent_hover: 0x00CB8B0C,     // RGB(12,139,203)
     accent_pressed: 0x009D6806,   // RGB(6,104,157)
@@ -346,6 +346,42 @@ pub fn apply_to_all_after_repair() {
     apply_to_all_with_force(true);
 }
 
+/// (palette pointer, dark flag) fingerprint pair used as window props to
+/// remember which palette a window already carries.
+fn theme_fingerprint() -> (
+    windows::Win32::Foundation::HANDLE,
+    windows::Win32::Foundation::HANDLE,
+) {
+    (
+        windows::Win32::Foundation::HANDLE(palette() as *const Palette as *mut _),
+        windows::Win32::Foundation::HANDLE((1 + usize::from(is_dark())) as *mut _),
+    )
+}
+
+/// Stamps the current palette fingerprint on a freshly created window.
+/// Without it, a broadcast-driven refresh landing right after the window
+/// opens (the WM_SETTINGCHANGE round-trip after a manual theme switch) sees
+/// "no fingerprint" and runs the cloak/retheme cycle on a just-revealed
+/// window — DWM can leak one stale frame through that cycle, which reads
+/// as a flash. Creation already applies the current theme, so the stamp is
+/// accurate and the follow-up refresh correctly skips the window.
+pub fn stamp_current_palette(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+    let (palette_key, dark_key) = theme_fingerprint();
+    unsafe {
+        let _ = SetPropW(
+            hwnd,
+            windows::core::w!("IdleTrigger.ThemePalette"),
+            Some(palette_key),
+        );
+        let _ = SetPropW(
+            hwnd,
+            windows::core::w!("IdleTrigger.ThemeDark"),
+            Some(dark_key),
+        );
+    }
+}
+
 fn apply_to_all_with_force(force: bool) {
     // DWM/SetWindowTheme can synchronously deliver another theme message.
     // Do not enter the refresh again while native controls are being updated.
@@ -360,12 +396,10 @@ fn apply_to_all_with_force(force: bool) {
         }
     }
     let _reset = Reset;
-    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::UI::WindowsAndMessaging::{GetPropW, IsWindow, SetPropW};
     // Palettes have process lifetime (including high-contrast palettes).
     // Window properties are discarded by USER32 when an HWND is destroyed.
-    let palette_key = HANDLE(palette() as *const Palette as *mut _);
-    let dark_key = HANDLE((1 + usize::from(is_dark())) as *mut _);
+    let (palette_key, dark_key) = theme_fingerprint();
     let palette_prop = windows::core::w!("IdleTrigger.ThemePalette");
     let dark_prop = windows::core::w!("IdleTrigger.ThemeDark");
     let mut windows = vec![

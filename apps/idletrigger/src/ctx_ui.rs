@@ -15,12 +15,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, CreateWindowExW, DefWindowProcW, GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetDlgItem,
-    GetWindow, GetWindowRect, GetWindowTextW, IDC_ARROW, IsWindowVisible, LBN_DBLCLK,
-    LBN_SELCHANGE, LoadCursorW, MB_ICONQUESTION, MB_YESNO, MessageBoxW, RegisterClassW, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST, WM_SETFONT, WNDCLASSW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE,
+    GetWindow, GetWindowRect, GetWindowTextW, IsWindowVisible, LBN_DBLCLK, LBN_SELCHANGE,
+    MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_NCHITTEST, WM_SETFONT, WS_CHILD, WS_CLIPSIBLINGS, WS_TABSTOP,
+    WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{HMENU, IDYES, SendMessageW, SetWindowTextW};
 use windows::core::PCWSTR;
@@ -28,7 +28,6 @@ use windows::core::PCWSTR;
 use crate::theme;
 use crate::wide;
 
-const EM_SETMARGINS_RAW: u32 = 0x00D3;
 const EN_SETFOCUS: usize = 0x0100;
 const EN_KILLFOCUS: usize = 0x0200;
 const EN_CHANGE: usize = 0x0300;
@@ -179,15 +178,15 @@ fn s(v: i32) -> i32 {
 }
 
 fn body_font() -> HFONT {
-    crate::make_font_pub(14, 400)
+    crate::kit::fonts::body()
 }
 
 fn label_font() -> HFONT {
-    crate::make_font_pub(13, 400)
+    crate::kit::fonts::label()
 }
 
 fn section_font() -> HFONT {
-    crate::make_font_pub(14, 600)
+    crate::kit::fonts::section()
 }
 
 fn mgr() -> HWND {
@@ -241,63 +240,13 @@ unsafe fn mk_control(
     h: i32,
     font: HFONT,
 ) -> HWND {
-    unsafe {
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            class,
-            PCWSTR(wide(text).as_ptr()),
-            style,
-            s(x),
-            s(y),
-            s(w),
-            s(h),
-            Some(parent),
-            Some(HMENU(id as *mut _)),
-            None,
-            None,
-        )
-        .expect("ctx manager control");
-        let _ = SendMessageW(
-            hwnd,
-            WM_SETFONT,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
-        );
-        hwnd
-    }
+    unsafe { crate::kit::controls::raw(parent, class, text, style, id, font, (x, y, w, h)) }
 }
 
 /// Owner-draw static card surface pinned beneath every hosted row (settings
 /// section-card grammar): the parent's WM_DRAWITEM paints its face.
 unsafe fn surface_card(parent: HWND, id: usize, x: i32, y: i32, w: i32, h: i32) -> HWND {
-    unsafe {
-        let card = mk_control(
-            parent,
-            windows::core::w!("STATIC"),
-            "",
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | 13), // SS_OWNERDRAW
-            id,
-            x,
-            y,
-            w,
-            h,
-            body_font(),
-        );
-        // Pin beneath everything: z-order passes must never float the card
-        // above its rows (their owner-draw DCs would clip to nothing).
-        let _ = SetWindowPos(
-            card,
-            Some(windows::Win32::Foundation::HWND(
-                std::ptr::NonNull::dangling().as_ptr(),
-            )), // HWND_BOTTOM
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        card
-    }
+    unsafe { crate::kit::controls::section_card(parent, id as i32, body_font(), (x, y, w, h)) }
 }
 
 fn scope_items() -> Vec<crate::choice::ChoiceItem> {
@@ -955,103 +904,31 @@ pub fn refresh_config_state() {
     refresh_options();
 }
 
-/// Centers the manager over the control panel (settings parity).
-fn center_on_panel(win_w: i32, win_h: i32) -> (i32, i32) {
-    let panel = crate::hwnd(&crate::PANEL);
-    let mut rect = RECT::default();
-    let placed =
-        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(panel, &mut rect) }.is_ok();
-    let (cx, cy) = if placed {
-        ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
-    } else {
-        (
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                    windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-                )
-            } / 2,
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                    windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
-                )
-            } / 2,
-        )
-    };
-    (cx - win_w / 2, cy - win_h / 2)
-}
-
 // ---- Window ---------------------------------------------------------------
 
 unsafe fn ensure_created() {
-    // MAKEINTRESOURCE(1): the app icon resource (automation-manager parity).
-    #[allow(clippy::manual_dangling_ptr)]
-    let icon_resource = PCWSTR(1usize as *const u16);
     unsafe {
         if !mgr().is_invalid() {
             return;
         }
         let instance =
             windows::Win32::System::LibraryLoader::GetModuleHandleW(None).expect("module handle");
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(mgr_proc),
-            hInstance: instance.into(),
-            lpszClassName: windows::core::w!("IdleTriggerCtxMgr"),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hIcon: windows::Win32::UI::WindowsAndMessaging::LoadIconW(
-                Some(instance.into()),
-                icon_resource,
-            )
-            .unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::GetSysColorBrush(
+        let form = crate::kit::form::FormWindow::create(crate::kit::form::FormSpec {
+            class: windows::core::w!("IdleTriggerCtxMgr"),
+            kind: crate::kit::registry::Kind::ContextRules,
+            title: crate::t_pub("ctx_manager_title"),
+            proc: Some(mgr_proc),
+            client_w: CLIENT_W,
+            client_h: CLIENT_H,
+            style: crate::kit::form::secondary_style(),
+            anchor: crate::hwnd(&crate::PANEL),
+            bg_brush: windows::Win32::Graphics::Gdi::GetSysColorBrush(
                 windows::Win32::Graphics::Gdi::COLOR_WINDOW,
             ),
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-
-        let style = WINDOW_STYLE(
-            (windows::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW.0
-                & !windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZEBOX.0
-                & !windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME.0
-                & !windows::Win32::UI::WindowsAndMessaging::WS_MINIMIZEBOX.0)
-                | WS_CLIPCHILDREN.0,
-        );
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: s(CLIENT_W),
-            bottom: s(CLIENT_H),
-        };
-        let _ = windows::Win32::UI::WindowsAndMessaging::AdjustWindowRectEx(
-            &mut frame,
-            style,
-            false,
-            WINDOW_EX_STYLE(0),
-        );
-        let win_w = frame.right - frame.left;
-        let win_h = frame.bottom - frame.top;
-        let (x, y) = center_on_panel(win_w, win_h);
-
-        let title = crate::t_pub("ctx_manager_title");
-        let window = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("IdleTriggerCtxMgr"),
-            PCWSTR(wide(&title).as_ptr()),
-            style,
-            x,
-            y,
-            win_w,
-            win_h,
-            Some(crate::hwnd(&crate::PANEL)),
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .expect("ctx manager window");
+        });
+        let window = form.hwnd;
         MGR_HWND.store(window.0 as isize, Ordering::SeqCst);
-        crate::dpi::install(window);
-        theme::apply_to_window(window);
-        crate::set_window_icons_pub(window);
+        form.finish();
         build_controls(window, instance);
         crate::tooltips::register_controls(window);
         theme::retheme_children(window);
@@ -1070,37 +947,20 @@ unsafe fn ensure_created() {
 
 unsafe fn owner_button(window: HWND, id: usize, key: &str, x: i32, y: i32, w: i32, h: i32) -> HWND {
     unsafe {
-        let btn = mk_control(
-            window,
-            windows::core::w!("BUTTON"),
-            &crate::t_pub(key),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0000000B), // BS_OWNERDRAW
-            id,
-            x,
-            y,
-            w,
-            h,
-            body_font(),
-        );
-        crate::nativeform::track(btn);
-        btn
+        crate::kit::controls::push_button(window, id as i32, &crate::t_pub(key), (x, y, w, h))
     }
 }
 
 /// Field label above its slot (editor label grammar).
 unsafe fn form_label(window: HWND, id: usize, key: &str, x: i32, y: i32, w: i32) {
     unsafe {
-        mk_control(
+        crate::kit::controls::label(
             window,
-            windows::core::w!("STATIC"),
+            id as i32,
             &crate::t_pub(key),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | 0x0080), // SS_NOPREFIX
-            id,
-            x,
-            y,
-            w,
-            LABEL_H,
             label_font(),
+            (x, y, w, LABEL_H),
+            false,
         );
     }
 }
@@ -1126,7 +986,7 @@ unsafe fn form_edit(window: HWND, id: usize, x: i32, y: i32, w: i32) {
         let margin = s(6) as usize;
         let _ = SendMessageW(
             edit,
-            EM_SETMARGINS_RAW,
+            crate::kit::controls::EM_SETMARGINS_RAW,
             Some(WPARAM(3)),
             Some(LPARAM((margin | (margin << 16)) as isize)),
         );
