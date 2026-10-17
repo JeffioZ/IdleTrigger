@@ -111,7 +111,7 @@ const IDC_SCREEN_ENABLE: usize = 165;
 const IDC_CTX_BUTTON: usize = 190;
 /// Muted version label on the More card (footer convention; fills the row
 /// and keeps the chip group from stretching across the card).
-const IDC_FOOTER_VERSION: usize = 191;
+pub(crate) const IDC_FOOTER_VERSION: usize = 191;
 const IDC_SETTINGS_BUTTON: usize = 148;
 const IDC_THEME_ENABLE: usize = 149;
 const IDC_THEME_SWITCH: usize = 150;
@@ -175,7 +175,7 @@ fn panel_font_status() -> HFONT {
 // section: group label, single-control rows, and a status line on the card
 // face; section actions sit at the right end of the header row. A bare
 // button row closes the panel — the cards separate it, no hairline needed.
-const PANEL_CLIENT_WIDTH: i32 = 486;
+pub(crate) const PANEL_CLIENT_WIDTH: i32 = 486;
 // Three feature cards and a footer with lock-key controls and navigation.
 // An available update adds its own row below this fixed content height.
 const PANEL_CLIENT_HEIGHT: i32 = 538;

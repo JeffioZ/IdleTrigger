@@ -11,8 +11,7 @@ use windows::core::{PCWSTR, w};
 use crate::kit::layout::{CARD_PAD_X, PAD, SECTION_H, SUBTITLE_H};
 use crate::nativeform;
 
-const PANEL_CLIENT_WIDTH: i32 = 486;
-const IDC_FOOTER_VERSION: usize = 191;
+use crate::{IDC_FOOTER_VERSION, PANEL_CLIENT_WIDTH};
 
 fn scale(v: i32) -> i32 {
     crate::dpi::scale(v)
