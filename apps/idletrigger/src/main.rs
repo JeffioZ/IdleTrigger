@@ -254,6 +254,7 @@ mod popups;
 mod render_tests;
 mod runtime;
 mod selfupdate;
+mod settings_pages;
 mod settings_ui;
 mod single_instance;
 mod system;
