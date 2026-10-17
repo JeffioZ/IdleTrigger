@@ -907,7 +907,7 @@ pub fn draw_compact_switch_row(
     let compact = RECT {
         left: bounds
             .left
-            .max(bounds.right - size.cx - sp(crate::layout::SWITCH_HIT_W + 8, scale)),
+            .max(bounds.right - size.cx - sp(crate::kit::layout::SWITCH_HIT_W + 8, scale)),
         ..*bounds
     };
     draw_switch_row(
@@ -927,7 +927,7 @@ pub fn draw_switch_row(
     progress: SwitchProgress,
 ) {
     fill_rect(hdc, bounds, background);
-    let column = sp(crate::layout::SWITCH_HIT_W, scale);
+    let column = sp(crate::kit::layout::SWITCH_HIT_W, scale);
     let pill = RECT {
         left: bounds.right - column,
         top: bounds.top,

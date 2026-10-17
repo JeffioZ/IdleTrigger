@@ -1004,7 +1004,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             crate::make_font_pub(18, 600),
         );
         let master = owner_button(window, ID_MASTER, "ctx_master_live", 360, 16, 304, ACT_H);
-        crate::nativeform::set_hover_column(master, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(master, s(crate::kit::layout::SWITCH_HIT_W));
         form_label(window, ID_STATUS, "ctx_manager_disabled", EDGE, 56, 516);
         owner_button(window, ID_REPAIR, "ctx_repair_action", 552, 48, 112, ACT_H);
         owner_button(window, ID_TAB_RULES, "ctx_tab_rules", EDGE, 88, 144, ACT_H);
@@ -1113,7 +1113,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             244,
             ACT_H,
         );
-        crate::nativeform::set_hover_column(enabled, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(enabled, s(crate::kit::layout::SWITCH_HIT_W));
         surface_card(window, ID_FORM, EDGE, FORM_Y, CLIENT_W - 2 * EDGE, 368);
 
         let field1 = FORM_Y + 12 + LABEL_H + LABEL_GAP;
@@ -1237,7 +1237,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             COL_W,
             ACT_H,
         );
-        crate::nativeform::set_hover_column(console, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(console, s(crate::kit::layout::SWITCH_HIT_W));
 
         mk_control(
             window,
@@ -1292,7 +1292,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             624,
             ACT_H,
         );
-        crate::nativeform::set_hover_column(grouped, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(grouped, s(crate::kit::layout::SWITCH_HIT_W));
         form_label(window, ID_LAYOUT_HINT, "ctx_layout_hint", IN_X, 260, 624);
         let classic = owner_button(
             window,
@@ -1303,7 +1303,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             624,
             ACT_H,
         );
-        crate::nativeform::set_hover_column(classic, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(classic, s(crate::kit::layout::SWITCH_HIT_W));
         let copy_y = 208 + layout_h + 16;
         form_label(window, ID_COPY_TITLE, "ctx_copy_section", EDGE, copy_y, 648);
         surface_card(window, ID_COPY_CARD, EDGE, copy_y + 28, 648, 148);
@@ -1316,7 +1316,7 @@ unsafe fn build_controls(window: HWND, instance: windows::Win32::Foundation::HMO
             624,
             32,
         );
-        crate::nativeform::set_hover_column(copy, s(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(copy, s(crate::kit::layout::SWITCH_HIT_W));
         form_label(
             window,
             ID_QUOTE_L,

@@ -163,7 +163,10 @@ pub unsafe fn checkbox(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32
         );
         crate::nativeform::track(hwnd);
         // Toggle rows hover on the pill column alone (panel parity).
-        crate::nativeform::set_hover_column(hwnd, crate::scale_pub(crate::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(
+            hwnd,
+            crate::scale_pub(crate::kit::layout::SWITCH_HIT_W),
+        );
     }
 }
 

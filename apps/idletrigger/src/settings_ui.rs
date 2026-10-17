@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
 use crate::kit::controls::{label, logical_text_width, push_button, tab_button};
-use crate::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, GAP, LABEL_GAP, TITLE_GAP, row_slot};
+use crate::kit::layout::{CARD_GAP, CARD_PAD_X, CARD_PAD_Y, GAP, LABEL_GAP, TITLE_GAP, row_slot};
 use crate::{t_pub, theme};
 
 // Control ids — Go settingspanel.go numbering, extended in the Rust port.

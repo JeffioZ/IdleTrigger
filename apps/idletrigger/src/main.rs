@@ -17,7 +17,7 @@ use std::time::Duration;
 use idletrigger_core::config;
 use idletrigger_core::i18n::I18n;
 
-use layout::{
+use kit::layout::{
     BUTTON_H, CARD_GAP, CARD_PAD_X, CARD_PAD_Y, CHIP_H, GAP, LABEL_GAP, LINK_BOX_H, PAD, SECTION_H,
     SUBTITLE_H, SWITCH_HIT_W, TITLE_GAP, row_slot,
 };
@@ -228,6 +228,7 @@ fn post_theme_refresh() {
 
 mod accessibility;
 mod automation;
+mod automation_picker;
 mod automation_ui;
 #[cfg(feature = "devtools")]
 mod capture;
@@ -245,7 +246,6 @@ mod idle_monitor;
 mod ipc;
 mod iplocate;
 mod kit;
-mod layout;
 mod list_style;
 mod nativeform;
 mod paint;

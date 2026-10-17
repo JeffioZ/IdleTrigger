@@ -9,5 +9,6 @@ pub mod controls;
 pub mod flow;
 pub mod fonts;
 pub mod form;
+pub mod layout;
 pub mod registry;
 pub mod spec;
