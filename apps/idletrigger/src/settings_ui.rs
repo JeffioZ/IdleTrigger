@@ -944,8 +944,8 @@ fn appearance_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
 fn app_page_spec(hwnd: HWND) -> Vec<crate::kit::spec::ControlSpec> {
     use crate::kit::spec::{ControlSpec, FontRole, Text};
     let project_label = t_pub("settings_project_home_label");
-    let label_w = logical_text_width(hwnd, body_font(), &project_label, 96) + 2;
-    let url_w = logical_text_width(hwnd, body_font(), PROJECT_URL, 376) + 2;
+    let label_w = logical_text_width(hwnd, crate::kit::fonts::body(), &project_label, 96) + 2;
+    let url_w = logical_text_width(hwnd, crate::kit::fonts::body(), PROJECT_URL, 376) + 2;
     let mut link_x = CONTENT_X + label_w + GAP;
     if is_chinese() {
         // CJK advance boxes carry extra trailing space (Go optical fix).
@@ -1433,10 +1433,6 @@ fn browse_wallpaper_file(owner: HWND) -> Option<String> {
         let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
         Some(String::from_utf16_lossy(&file[..end]))
     }
-}
-
-fn body_font() -> HFONT {
-    crate::kit::fonts::body()
 }
 
 fn is_chinese() -> bool {
@@ -2786,7 +2782,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_text_link(
             dc,
             bounds,
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             // The fix link sits below the card on the window background;
@@ -2817,7 +2813,7 @@ unsafe fn draw_settings_item_impl(
             dc,
             bounds,
             crate::kit::fonts::section(),
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             p.window_bg,
@@ -2831,7 +2827,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_button(
             dc,
             bounds,
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             p.window_bg,
@@ -2848,7 +2844,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_switch_row(
             dc,
             bounds,
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             p.surface,
@@ -2863,7 +2859,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_button(
             dc,
             bounds,
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             p.surface,
@@ -2875,7 +2871,7 @@ unsafe fn draw_settings_item_impl(
         crate::paint::draw_button(
             dc,
             bounds,
-            body_font(),
+            crate::kit::fonts::body(),
             &label,
             p,
             p.window_bg,

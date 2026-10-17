@@ -1,16 +1,15 @@
 //! Registry of live form windows: the single source for "which window is
 //! open / which modal is on top" queries (tray focus routing, devtools
 //! capture enumeration). Entries self-heal: queries prune HWNDs that have
-//! been destroyed, so no destroy hooks are required.
+//! been destroyed, so no destroy hooks are required. The query surface is
+//! staged (compiled, unused) until those paths adopt it; registration
+//! itself is live via FormWindow::finish.
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 /// Identity of one form window kind, mirroring the window classes.
-/// Consumers of the not-yet-wired variants (tray focus routing, devtools
-/// capture enumeration) land with the automation / context-rule
-/// migrations; the staged surface stays compiled but unused until then.
-#[allow(dead_code)]
+/// One variant per form window; all are registered via FormWindow::finish.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Settings,

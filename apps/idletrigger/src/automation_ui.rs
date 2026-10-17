@@ -383,39 +383,6 @@ fn is_chinese() -> bool {
     crate::i18n_is_chinese()
 }
 
-/// Centers on the window the new dialog is modal to (Go centers on the
-/// actual owner, not the panel behind it).
-fn center_on_parent(owner: HWND, w: i32, h: i32) -> (i32, i32) {
-    unsafe {
-        let parent = if owner.is_invalid() {
-            crate::hwnd(&crate::PANEL)
-        } else {
-            owner
-        };
-        let mut wr = RECT::default();
-        if GetWindowRect(parent, &mut wr).is_ok() {
-            let pw = wr.right - wr.left;
-            let ph = wr.bottom - wr.top;
-            let work = crate::display::work_area_for(parent);
-            return (
-                (wr.left + (pw - w) / 2).clamp(work.left, (work.right - w).max(work.left)),
-                (wr.top + (ph - h) / 2).clamp(work.top, (work.bottom - h).max(work.top)),
-            );
-        }
-        (s(200), s(200))
-    }
-}
-
-fn secondary_style() -> WINDOW_STYLE {
-    // WS_CLIPCHILDREN: these forms host overlay scrollbar siblings above
-    // their lists - without the clip the form's background erase would blank
-    // the bar between its repaints.
-    WINDOW_STYLE(
-        (WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZEBOX.0 & !WS_THICKFRAME.0 & !WS_MINIMIZEBOX.0)
-            | WS_CLIPCHILDREN.0,
-    )
-}
-
 fn confirm_dialog(parent: HWND, title: &str, body: &str) -> bool {
     unsafe {
         let result = MessageBoxW(
@@ -1854,7 +1821,7 @@ unsafe fn resize_manager(client_h: i32) {
         if mgr.is_invalid() {
             return;
         }
-        let style = secondary_style();
+        let style = crate::kit::form::secondary_style();
         let mut frame = RECT {
             left: 0,
             top: 0,
@@ -1864,7 +1831,7 @@ unsafe fn resize_manager(client_h: i32) {
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE(0));
         let width = frame.right - frame.left;
         let height = frame.bottom - frame.top;
-        let (x, y) = center_on_parent(crate::hwnd(&crate::PANEL), width, height);
+        let (x, y) = crate::kit::form::center_on_anchor(crate::hwnd(&crate::PANEL), width, height);
         let _ = SetWindowPos(
             mgr,
             None,
