@@ -229,6 +229,7 @@ fn post_theme_refresh() {
 mod accessibility;
 mod automation;
 mod automation_picker;
+mod automation_rules;
 mod automation_ui;
 #[cfg(feature = "devtools")]
 mod capture;

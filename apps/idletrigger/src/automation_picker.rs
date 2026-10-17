@@ -486,19 +486,6 @@ static PK_RESULT: Mutex<Option<PickerResult>> = Mutex::new(None);
 static PK_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PK_ENRICHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PK_UPDATED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-static DESCRIPTIONS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
-pub(crate) fn described_target(target: &auto::ProcessTarget) -> String {
-    let descriptions = crate::runtime::lock(&DESCRIPTIONS);
-    match descriptions
-        .get(&target.key())
-        .filter(|value| !value.is_empty())
-    {
-        Some(description) => format!("{} ({description})", target.executable),
-        None => target.executable.clone(),
-    }
-}
 
 fn publish_picker(
     pk: isize,
@@ -566,10 +553,11 @@ fn picker_load() {
                             return Ok(items);
                         }
                         let count = snapshot.count_target(&target);
-                        let description = crate::runtime::lock(&DESCRIPTIONS)
-                            .get(&target.key())
-                            .cloned()
-                            .unwrap_or_default();
+                        let description =
+                            crate::runtime::lock(&crate::automation_rules::DESCRIPTIONS)
+                                .get(&target.key())
+                                .cloned()
+                                .unwrap_or_default();
                         let name = if target.kind == auto::MATCH_PATH {
                             target.path.clone()
                         } else {
@@ -629,7 +617,7 @@ fn finish_picker_load(pk: HWND) {
         Ok(items) => {
             if complete {
                 *crate::runtime::lock(&PK_UPDATED) = Some(std::time::Instant::now());
-                let mut descriptions = crate::runtime::lock(&DESCRIPTIONS);
+                let mut descriptions = crate::runtime::lock(&crate::automation_rules::DESCRIPTIONS);
                 if descriptions.len() > 2048 {
                     descriptions.clear();
                 }
@@ -1050,7 +1038,7 @@ fn update_preview(pk: HWND) {
             );
         } else {
             for target in &selected {
-                let name = &described_target(target);
+                let name = &crate::automation_rules::described_target(target);
                 let label = if target.kind == auto::MATCH_PATH {
                     fill_template(&t_pub("process_picker_preview_path"), &[name, &target.path])
                 } else {
@@ -1413,7 +1401,7 @@ unsafe extern "system" fn picker_proc(
                     crate::runtime::lock(&PK_VISIBLE).clear();
                     crate::runtime::lock(&PK_SELECTED).clear();
                     *crate::runtime::lock(&PK_SORT) = (0, true);
-                    crate::runtime::lock(&DESCRIPTIONS).clear();
+                    crate::runtime::lock(&crate::automation_rules::DESCRIPTIONS).clear();
                     *crate::runtime::lock(&PK_RESULT) = None;
                     *crate::runtime::lock(&PK_UPDATED) = None;
                     // The modal disable targeted the manager ROOT, not the
