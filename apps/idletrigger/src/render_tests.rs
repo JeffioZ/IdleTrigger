@@ -512,14 +512,14 @@ fn hidden_theme_reopen_preserves_background_and_geometry() {
                 DestroyWindow(manager).unwrap();
             }
             devtools::WARNING_PREVIEW.store(true, Ordering::SeqCst);
-            popups_show_warning_preview();
+            crate::warning::popups_show_warning_preview();
             pump(20);
             capture::capture_client_bmp(
-                hwnd(&WARNING),
+                crate::warning::hwnd_of_warning(),
                 &folder.join(format!("{language}-idle-warning-{dark}.bmp")),
             )
             .unwrap();
-            hide_warning("audit preview");
+            crate::warning::hide_warning("audit preview");
             popups::create();
             *crate::runtime::lock(&automation::PENDING_ACTION) = Some(automation::PendingAction {
                 rule: None,

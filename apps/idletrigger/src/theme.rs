@@ -404,7 +404,7 @@ fn apply_to_all_with_force(force: bool) {
     let dark_prop = windows::core::w!("IdleTrigger.ThemeDark");
     let mut windows = vec![
         crate::hwnd(&crate::PANEL),
-        crate::hwnd(&crate::WARNING),
+        crate::warning::hwnd_of_warning(),
         crate::hwnd(&crate::ACTION_WARN_HWND),
         crate::hwnd(&crate::LOCK_NOTIFY_HWND),
     ];

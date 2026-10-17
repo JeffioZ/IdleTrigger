@@ -113,7 +113,7 @@ pub fn refresh_text_scale() {
     // child) riding between the manager and picker.
     let mut windows = vec![
         crate::hwnd(&crate::PANEL),
-        crate::hwnd(&crate::WARNING),
+        crate::warning::hwnd_of_warning(),
         crate::hwnd(&crate::ACTION_WARN_HWND),
     ];
     {

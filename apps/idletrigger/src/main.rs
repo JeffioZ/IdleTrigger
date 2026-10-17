@@ -44,16 +44,15 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, BS_OWNERDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HWND_BROADCAST, IDC_ARROW, IDC_HAND,
-    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MoveWindow, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SendMessageTimeoutW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AdjustWindowRectEx, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW,
+    FindWindowW, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IsWindowVisible,
+    KillTimer, LoadCursorW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetCursor,
+    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DRAWITEM, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -133,8 +132,6 @@ const IDC_UPDATE_BUTTON: usize = 160;
 // Opens the release page for the pending update version (same row, middle
 // slot, centered).
 const IDC_UPDATE_NOTES_LINK: usize = 161;
-const IDC_WARN_TEXT: usize = 130;
-const IDC_WARN_CANCEL: usize = 131;
 
 // Owner-drawn static ranges: 201-209 section headers, 211-219 subtitles,
 // 221-229 plain row labels, 230-239 section card backgrounds.
@@ -269,9 +266,9 @@ mod theme_repair;
 mod tooltips;
 mod tray;
 mod viewport;
+mod warning;
 
 const PANEL_TIMER: usize = 1;
-const WARN_TIMER: usize = 2;
 const POWER_STATUS_TIMER: usize = 3;
 const LOCK_POLL_TIMER: usize = 4;
 const NOSLEEP_TIMED_TIMER: usize = 5;
@@ -288,7 +285,6 @@ static DPI_SCALE: AtomicI32 = AtomicI32::new(96);
 
 static HIDDEN: AtomicIsize = AtomicIsize::new(0);
 static PANEL: AtomicIsize = AtomicIsize::new(0);
-static WARNING: AtomicIsize = AtomicIsize::new(0);
 pub static ACTION_WARN_HWND: AtomicIsize = AtomicIsize::new(0);
 pub static LOCK_NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
 static CHK_NOSLEEP: AtomicIsize = AtomicIsize::new(0);
@@ -297,18 +293,13 @@ static CHK_AUTOMATION: AtomicIsize = AtomicIsize::new(0);
 static LBL_POWER_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_AUTOMATION_SUMMARY: AtomicIsize = AtomicIsize::new(0);
 static LBL_THEME_SCHEDULE: AtomicIsize = AtomicIsize::new(0);
-static WARN_TEXT: AtomicIsize = AtomicIsize::new(0);
 
 static IDLE_MS: AtomicI64 = AtomicI64::new(0);
-static WARNING_ACTIVE: AtomicBool = AtomicBool::new(false);
-static WARN_SECONDS_LEFT: AtomicI32 = AtomicI32::new(0);
 // Recovering lock: a torn mid-update clock reads as stale, and the next
 // 250ms sample self-heals — the worst case is a cancelled warning, never a
 // spurious one (a deadline is always set after the flag that guards it).
 static IDLE_CLOCK: std::sync::LazyLock<Mutex<idle_monitor::Clock>> =
     std::sync::LazyLock::new(|| Mutex::new(idle_monitor::Clock::default()));
-static WARNING_PREVIEW_SESSION: AtomicBool = AtomicBool::new(false);
-static WARN_ACTION: Mutex<String> = Mutex::new(String::new());
 static ON_AC: AtomicBool = AtomicBool::new(true);
 static BATTERY_PERCENT: AtomicI32 = AtomicI32::new(100);
 static BATTERY_BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -916,15 +907,15 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_IDLE_WARN => {
-                show_warning();
+                warning::show_warning();
                 LRESULT(0)
             }
             WM_IDLE_CANCEL => {
                 let cancelled = crate::runtime::lock(&IDLE_CLOCK)
                     .countdown(std::time::Instant::now())
                     .is_none();
-                if cancelled && !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
-                    hide_warning("session changed");
+                if cancelled && !warning::WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
+                    warning::hide_warning("session changed");
                 }
                 LRESULT(0)
             }
@@ -1760,7 +1751,7 @@ unsafe extern "system" fn panel_proc(
 
 /// Uniform static backgrounds: primary text for section headers and the
 /// warning body, subtle color for summary lines.
-unsafe fn paint_static(wparam: WPARAM, lparam: LPARAM) {
+pub(crate) unsafe fn paint_static(wparam: WPARAM, lparam: LPARAM) {
     use windows::Win32::Graphics::Gdi::{SetBkColor, SetTextColor};
     unsafe {
         let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
@@ -1775,46 +1766,6 @@ unsafe fn paint_static(wparam: WPARAM, lparam: LPARAM) {
         SetTextColor(hdc, windows::Win32::Foundation::COLORREF(color));
         SetBkColor(hdc, windows::Win32::Foundation::COLORREF(theme::bg_color()));
     }
-}
-
-unsafe extern "system" fn warning_proc(
-    hwnd_: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    guarded_proc("warning", hwnd_, msg, wparam, lparam, move || unsafe {
-        match msg {
-            WM_COMMAND if (wparam.0 & 0xFFFF) == IDC_WARN_CANCEL => {
-                cancel_warning("user");
-                LRESULT(0)
-            }
-            WM_CLOSE => {
-                cancel_warning("user");
-                LRESULT(0)
-            }
-            WM_TIMER if wparam.0 == WARN_TIMER => {
-                tick_warning();
-                LRESULT(0)
-            }
-            WM_DRAWITEM => popups::draw_warning_button(lparam),
-            windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => {
-                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                let mut client = RECT::default();
-                let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd_, &mut client);
-                let _ = windows::Win32::Graphics::Gdi::FillRect(hdc, &client, theme::bg_brush());
-                LRESULT(1)
-            }
-            windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLORSTATIC
-            | windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLORBTN
-            | windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLOREDIT
-            | windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLORLISTBOX => {
-                paint_static(wparam, lparam);
-                LRESULT(theme::bg_brush().0 as isize)
-            }
-            _ => DefWindowProcW(hwnd_, msg, wparam, lparam),
-        }
-    })
 }
 
 fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> bool {
@@ -1840,8 +1791,8 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
                 .then(settings_ui::default_button)
             })
             .or_else(|| {
-                (root == hwnd(&WARNING))
-                    .then(|| GetDlgItem(Some(root), IDC_WARN_CANCEL as i32).ok())
+                (root == warning::hwnd_of_warning())
+                    .then(|| GetDlgItem(Some(root), warning::IDC_WARN_CANCEL as i32).ok())
                     .flatten()
             })
             .or_else(|| popups::default_button(root));
@@ -1899,7 +1850,11 @@ fn create_windows() {
         if !CLASSES_REGISTERED.swap(true, Ordering::SeqCst) {
             register_class(instance, w!("IdleTriggerHiddenWindow"), hidden_proc);
             register_class(instance, w!("IdleTriggerPanel"), panel_proc);
-            register_class(instance, w!("IdleTriggerIdleWarning"), warning_proc);
+            register_class(
+                instance,
+                w!("IdleTriggerIdleWarning"),
+                warning::warning_proc,
+            );
         }
 
         if hwnd(&HIDDEN).is_invalid() {
@@ -2498,55 +2453,7 @@ fn create_windows() {
         );
         let _ = windows::Win32::Graphics::Gdi::UpdateWindow(panel);
 
-        let warning = CreateWindowExW(
-            WINDOW_EX_STYLE(WS_EX_NOACTIVATE.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0),
-            w!("IdleTriggerIdleWarning"),
-            w!("IdleTrigger"),
-            WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0),
-            scale(600),
-            scale(300),
-            scale(430),
-            scale(180),
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )
-        .expect("warning window");
-        WARNING.store(warning.0 as isize, Ordering::SeqCst);
-        dpi::install(warning);
-
-        let warn_text = static_text(&ControlSpec {
-            parent: warning,
-            label: String::new(),
-            x: scale(20),
-            y: scale(18),
-            width: scale(380),
-            id: IDC_WARN_TEXT,
-            font,
-        });
-        WARN_TEXT.store(warn_text.0 as isize, Ordering::SeqCst);
-        let _ = SetWindowPos(
-            warn_text,
-            None,
-            0,
-            0,
-            scale(390),
-            scale(84),
-            SWP_NOMOVE | SWP_NOZORDER,
-        );
-
-        let warn_cancel = crate::kit::controls::raw_physical(
-            warning,
-            w!("BUTTON"),
-            &t("common_cancel"),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32),
-            IDC_WARN_CANCEL,
-            font,
-            (scale(160), scale(116), scale(120), scale(36)),
-        );
-        nativeform::track(warn_cancel);
-
+        warning::ensure_created(font);
         popups::create();
         popups::lock_create();
     }
@@ -3952,7 +3859,7 @@ fn refresh_status() {
     tooltips::refresh_all(hwnd(&PANEL));
 }
 
-fn set_text(slot: &AtomicIsize, text: &str) {
+pub(crate) fn set_text(slot: &AtomicIsize, text: &str) {
     if window_text(hwnd(slot)) == text {
         return;
     }
@@ -4207,7 +4114,7 @@ fn input_sample() -> Option<(u32, Duration)> {
     }
 }
 
-fn sample_idle_clock() -> idle_monitor::Update {
+pub(crate) fn sample_idle_clock() -> idle_monitor::Update {
     let settings = idle_settings();
     let input = input_sample();
     #[cfg(feature = "devtools")]
@@ -4300,105 +4207,6 @@ fn refresh_battery() {
 
 // ---- Idle warning overlay -------------------------------------------------
 
-fn show_warning() {
-    if !WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
-        sample_idle_clock();
-        let countdown = crate::runtime::lock(&IDLE_CLOCK).countdown(std::time::Instant::now());
-        let Some((seconds, action)) = countdown else {
-            return;
-        };
-        WARN_SECONDS_LEFT.store(seconds as i32, Ordering::SeqCst);
-        *crate::runtime::lock(&WARN_ACTION) = action;
-    }
-    WARNING_ACTIVE.store(true, Ordering::SeqCst);
-    if WARN_SECONDS_LEFT.load(Ordering::SeqCst) == 0 {
-        tick_warning();
-        return;
-    }
-    update_warning_text(WARN_SECONDS_LEFT.load(Ordering::SeqCst));
-    unsafe {
-        let warning = hwnd(&WARNING);
-        if let Ok(cancel) = GetDlgItem(Some(warning), IDC_WARN_CANCEL as i32) {
-            set_control_text(cancel, &t("common_cancel"));
-        }
-        popups::layout_warning(warning, hwnd(&WARN_TEXT), &[IDC_WARN_CANCEL]);
-        center_on_screen(warning);
-        viewport::fit(warning);
-        FirstFrameGate::begin(warning).reveal_no_activate();
-        let _ = SetTimer(Some(warning), WARN_TIMER, 1000, None);
-    }
-    log_line("idle warning shown");
-}
-
-fn update_warning_text(seconds: i32) {
-    let action = t(&format!(
-        "menu_action_{}",
-        crate::runtime::lock(&WARN_ACTION).clone()
-    ));
-    let text = t_args("msg_idle_warning", &[&action, &seconds.to_string()]);
-    set_text(&WARN_TEXT, &text);
-}
-
-fn center_on_screen(hwnd_: HWND) {
-    unsafe {
-        let mut wr = RECT::default();
-        if GetWindowRect(hwnd_, &mut wr).is_err() {
-            return;
-        }
-        let width = wr.right - wr.left;
-        let height = wr.bottom - wr.top;
-        let anchor = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
-        let (x, y) = display::centered_on(anchor, width, height);
-        let _ = MoveWindow(hwnd_, x, y, width, height, false);
-    }
-}
-
-fn tick_warning() {
-    if !WARNING_ACTIVE.load(Ordering::SeqCst) {
-        return;
-    }
-    let (left, action) = if WARNING_PREVIEW_SESSION.load(Ordering::SeqCst) {
-        (
-            WARN_SECONDS_LEFT.fetch_sub(1, Ordering::SeqCst) - 1,
-            crate::runtime::lock(&WARN_ACTION).clone(),
-        )
-    } else {
-        sample_idle_clock();
-        let countdown = crate::runtime::lock(&IDLE_CLOCK).countdown(std::time::Instant::now());
-        let Some((seconds, action)) = countdown else {
-            hide_warning("session no longer active");
-            return;
-        };
-        (seconds as i32, action)
-    };
-    if left <= 0 {
-        cancel_warning("timeout");
-        log_line("idle action executing");
-        execute_system_action(&action);
-    } else {
-        WARN_SECONDS_LEFT.store(left, Ordering::SeqCst);
-        *crate::runtime::lock(&WARN_ACTION) = action;
-        update_warning_text(left);
-    }
-}
-
-fn cancel_warning(reason: &str) {
-    crate::runtime::lock(&IDLE_CLOCK).restart(std::time::Instant::now());
-    WARNING_PREVIEW_SESSION.store(false, Ordering::SeqCst);
-    hide_warning(reason);
-}
-
-fn hide_warning(reason: &str) {
-    if !WARNING_ACTIVE.swap(false, Ordering::SeqCst) {
-        return;
-    }
-    unsafe {
-        let warning = hwnd(&WARNING);
-        let _ = KillTimer(Some(warning), WARN_TIMER);
-        let _ = ShowWindow(warning, SW_HIDE);
-    }
-    log_line(&format!("idle warning closed ({reason})"));
-}
 /// Executes one built-in system action by its config name. Shared by the
 /// idle monitor, automatic tasks, the system-controls menu, and hotkeys.
 pub fn execute_system_action(action: &str) {
@@ -4537,16 +4345,6 @@ pub fn t_args(key: &str, arguments: &[&str]) -> String {
     idletrigger_core::i18n::format(&t(key), arguments)
 }
 
-/// Devtools warning preview entry.
-#[cfg(feature = "devtools")]
-pub fn popups_show_warning_preview() {
-    WARNING_PREVIEW_SESSION.store(true, Ordering::SeqCst);
-    *crate::runtime::lock(&WARN_ACTION) = cfg_map(|c| c.idle_action.clone());
-    WARNING_ACTIVE.store(true, Ordering::SeqCst);
-    WARN_SECONDS_LEFT.store(10, Ordering::SeqCst);
-    show_warning();
-}
-
 /// Window capture for devtools.
 #[cfg(feature = "devtools")]
 pub fn capture_client_bmp_pub(hwnd_: HWND, path: &std::path::Path) -> std::io::Result<()> {
@@ -4675,7 +4473,7 @@ fn theme_changes_survive_native_messages() {
     FirstFrameGate::begin(hwnd(&PANEL)).reveal();
     unsafe {
         assert!(SetWindowSubclass(hwnd(&PANEL), Some(observe_show), 2, 0).as_bool());
-        for warning in [hwnd(&WARNING), hwnd(&ACTION_WARN_HWND)] {
+        for warning in [warning::hwnd_of_warning(), hwnd(&ACTION_WARN_HWND)] {
             assert!(SetWindowSubclass(warning, Some(observe_show), 2, 0).as_bool());
         }
     }
@@ -4741,7 +4539,7 @@ fn theme_changes_survive_native_messages() {
         assert!(unsafe { IsWindowVisible(hwnd(&PANEL)) }.as_bool());
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-            for warning in [hwnd(&WARNING), hwnd(&ACTION_WARN_HWND)] {
+            for warning in [warning::hwnd_of_warning(), hwnd(&ACTION_WARN_HWND)] {
                 let foreground = GetForegroundWindow();
                 let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
                 FirstFrameGate::begin(warning).reveal_no_activate();

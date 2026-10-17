@@ -136,7 +136,7 @@ pub fn apply_idle_test(config: &mut idletrigger_core::config::Config) {
 /// Shows the warning preview once the UI is up (devtools mode only).
 pub fn maybe_show_warning_preview() {
     if WARNING_PREVIEW.load(Ordering::SeqCst) {
-        crate::popups_show_warning_preview();
+        crate::warning::popups_show_warning_preview();
     }
     if ACTION_WARNING_PREVIEW.load(Ordering::SeqCst) {
         // Countdown preview (automation system-action warning): a fake
@@ -239,7 +239,7 @@ pub fn handle_capture_timer() -> bool {
     match step {
         0 => {
             for (window, name) in [
-                (crate::hwnd(&crate::WARNING), "idle-warning"),
+                (crate::warning::hwnd_of_warning(), "idle-warning"),
                 (crate::hwnd(&crate::ACTION_WARN_HWND), "action-warning"),
             ] {
                 if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }
