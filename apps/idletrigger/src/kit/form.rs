@@ -113,7 +113,6 @@ unsafe fn register_class(
 pub struct FormWindow {
     pub hwnd: HWND,
     kind: Kind,
-    anchor: HWND,
 }
 
 impl FormWindow {
@@ -153,7 +152,6 @@ impl FormWindow {
             FormWindow {
                 hwnd,
                 kind: spec.kind,
-                anchor: spec.anchor,
             }
         }
     }
@@ -168,6 +166,6 @@ impl FormWindow {
         crate::theme::apply_to_window(self.hwnd);
         crate::set_window_icons_pub(self.hwnd);
         crate::theme::stamp_current_palette(self.hwnd);
-        crate::kit::registry::register(self.kind, self.hwnd, self.anchor);
+        crate::kit::registry::register(self.kind, self.hwnd);
     }
 }

@@ -305,10 +305,6 @@ fn scope_row_index(scope: &str) -> i32 {
     .unwrap_or(0) as i32
 }
 
-pub fn theme_hwnd() -> HWND {
-    mgr()
-}
-
 pub fn default_button(window: HWND) -> Option<HWND> {
     (window == mgr() && !window.is_invalid()).then(|| {
         get_dlg_item(

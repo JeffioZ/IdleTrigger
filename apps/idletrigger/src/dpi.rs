@@ -108,16 +108,28 @@ pub fn refresh_text_scale() {
         return;
     }
     crate::choice::close(false);
-    for window in [
+    // Same audience as the theme refresh: main-owned surfaces, then the
+    // form windows via the kit registry, with the editor pane (a manager
+    // child) riding between the manager and picker.
+    let mut windows = vec![
         crate::hwnd(&crate::PANEL),
         crate::hwnd(&crate::WARNING),
         crate::hwnd(&crate::ACTION_WARN_HWND),
-        crate::settings_ui::theme_hwnd(),
-        crate::ctx_ui::theme_hwnd(),
-    ]
-    .into_iter()
-    .chain(crate::automation_ui::theme_hwnds())
+    ];
     {
+        use crate::kit::registry::Kind;
+        windows.extend(
+            [Kind::Settings, Kind::ContextRules, Kind::Automation]
+                .map(crate::kit::registry::hwnd_of)
+                .into_iter()
+                .flatten(),
+        );
+    }
+    windows.push(crate::automation_ui::editor_hwnd());
+    windows.extend(crate::kit::registry::hwnd_of(
+        crate::kit::registry::Kind::ProcessPicker,
+    ));
+    for window in windows {
         if !window.is_invalid() {
             unsafe {
                 SendMessageW(

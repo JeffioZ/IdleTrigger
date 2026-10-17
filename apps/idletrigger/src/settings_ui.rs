@@ -392,13 +392,8 @@ pub fn devtools_capture_hwnd() -> HWND {
     current()
 }
 
-/// Theme refresh support: the settings window when open.
-pub fn theme_hwnd() -> HWND {
-    current()
-}
-
 pub fn default_button() -> HWND {
-    get(theme_hwnd(), ID_SAVE)
+    get(current(), ID_SAVE)
 }
 
 /// Devtools capture support: switches the visible page.

@@ -1832,7 +1832,12 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
         }
         let default = ctx_ui::default_button(root)
             .or_else(|| automation_ui::default_button(root))
-            .or_else(|| (root == settings_ui::theme_hwnd()).then(settings_ui::default_button))
+            .or_else(|| {
+                (root
+                    == crate::kit::registry::hwnd_of(crate::kit::registry::Kind::Settings)
+                        .unwrap_or_default())
+                .then(settings_ui::default_button)
+            })
             .or_else(|| {
                 (root == hwnd(&WARNING))
                     .then(|| GetDlgItem(Some(root), IDC_WARN_CANCEL as i32).ok())
@@ -3369,11 +3374,21 @@ fn show_panel() {
 }
 
 fn active_modal_window() -> Option<HWND> {
-    automation_ui::theme_hwnds()
-        .into_iter()
-        .rev()
-        .chain([ctx_ui::theme_hwnd(), settings_ui::theme_hwnd()])
-        .find(|window| !window.is_invalid() && unsafe { IsWindowVisible(*window).as_bool() })
+    use crate::kit::registry::Kind;
+    // Modal-depth priority: the picker outranks the embedded editor pane,
+    // which outranks the manager root; the ctx manager and settings ride
+    // the panel behind them. Top-level HWNDs come from the kit registry;
+    // the editor pane is a manager child and stays automation-owned.
+    [
+        crate::kit::registry::hwnd_of(Kind::ProcessPicker),
+        Some(automation_ui::editor_hwnd()),
+        crate::kit::registry::hwnd_of(Kind::Automation),
+        crate::kit::registry::hwnd_of(Kind::ContextRules),
+        crate::kit::registry::hwnd_of(Kind::Settings),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|window| !window.is_invalid() && unsafe { IsWindowVisible(*window).as_bool() })
 }
 
 fn toggle_panel() {

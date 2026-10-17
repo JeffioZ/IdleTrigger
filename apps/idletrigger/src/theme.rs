@@ -407,10 +407,23 @@ fn apply_to_all_with_force(force: bool) {
         crate::hwnd(&crate::WARNING),
         crate::hwnd(&crate::ACTION_WARN_HWND),
         crate::hwnd(&crate::LOCK_NOTIFY_HWND),
-        crate::settings_ui::theme_hwnd(),
-        crate::ctx_ui::theme_hwnd(),
     ];
-    windows.extend(crate::automation_ui::theme_hwnds());
+    // Form windows via the kit registry (settings, ctx), then the
+    // automation family: manager, editor pane, picker. The editor is a
+    // manager child, not a registry window.
+    {
+        use crate::kit::registry::Kind;
+        windows.extend(
+            [Kind::Settings, Kind::ContextRules, Kind::Automation]
+                .map(crate::kit::registry::hwnd_of)
+                .into_iter()
+                .flatten(),
+        );
+    }
+    windows.push(crate::automation_ui::editor_hwnd());
+    windows.extend(crate::kit::registry::hwnd_of(
+        crate::kit::registry::Kind::ProcessPicker,
+    ));
     windows.retain(|hwnd| unsafe {
         !hwnd.is_invalid()
             && IsWindow(Some(*hwnd)).as_bool()

@@ -5256,6 +5256,15 @@ pub fn devtools_click_list() {
 }
 
 /// Theme refresh support: open automation top-level windows.
+/// The embedded editor pane (a manager child, not a registry window):
+/// the piece of "which window is live" that stays automation-owned.
+pub fn editor_hwnd() -> HWND {
+    HWND(EDIT_HWND.load(Ordering::SeqCst) as *mut _)
+}
+
+/// Automation's window family for devtools capture and regression tests:
+/// manager root, editor pane, process picker, indexed in that order.
+#[cfg(any(feature = "devtools", test))]
 pub fn theme_hwnds() -> [HWND; 3] {
     [
         HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _),
