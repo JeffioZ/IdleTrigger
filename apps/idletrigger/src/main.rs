@@ -17,6 +17,7 @@ use std::time::Duration;
 use idletrigger_core::config;
 use idletrigger_core::i18n::I18n;
 
+use crate::panel_controls::*;
 use kit::layout::{
     BUTTON_H, CARD_GAP, CARD_PAD_X, CARD_PAD_Y, CHIP_H, GAP, LABEL_GAP, LINK_BOX_H, PAD, SECTION_H,
     SUBTITLE_H, SWITCH_HIT_W, TITLE_GAP, row_slot,
@@ -249,6 +250,7 @@ mod kit;
 mod list_style;
 mod nativeform;
 mod paint;
+mod panel_controls;
 mod popups;
 #[cfg(test)]
 mod render_tests;
@@ -2694,38 +2696,6 @@ fn position_panel_for_show(panel: HWND) {
     }
 }
 
-/// Logical pixel width of a single-line label at the given font (Go
-/// GetTextExtent-based measuring).
-fn measured_text_width(parent: HWND, font: HFONT, label: &str) -> i32 {
-    unsafe {
-        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(parent));
-        if hdc.is_invalid() {
-            return 0;
-        }
-        let old = windows::Win32::Graphics::Gdi::SelectObject(
-            hdc,
-            windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
-        );
-        let mut text: Vec<u16> = label.encode_utf16().collect();
-        let mut bounds = RECT::default();
-        let height = windows::Win32::Graphics::Gdi::DrawTextW(
-            hdc,
-            &mut text,
-            &mut bounds,
-            windows::Win32::Graphics::Gdi::DT_LEFT
-                | windows::Win32::Graphics::Gdi::DT_SINGLELINE
-                | windows::Win32::Graphics::Gdi::DT_CALCRECT,
-        );
-        windows::Win32::Graphics::Gdi::SelectObject(hdc, old);
-        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(parent), hdc);
-        if height == 0 || bounds.right <= bounds.left {
-            return 0;
-        }
-        let dpi = scale(96).max(96);
-        (bounds.right - bounds.left) * 96 / dpi
-    }
-}
-
 /// Physical y of each section's outside title row, captured at creation so
 /// the header links can be re-fitted after language swaps move their text.
 static HEADER_LINK_ROWS: [AtomicIsize; 3] = [
@@ -2877,117 +2847,6 @@ fn layout_footer_links(panel: HWND) {
                 SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             )
         };
-    }
-}
-
-/// Right-aligned muted version text on the More card. Owner-draw like every
-/// panel static, so the themed muted ink rides the normal draw dispatch.
-unsafe fn mk_footer_version(panel: HWND, text: &str, font: HFONT, y: i32) -> HWND {
-    {
-        let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
-        let row_right = PAD + CARD_PAD_X + (card_w - 2 * CARD_PAD_X);
-        let width = scale(measured_text_width(panel, font, text).max(8));
-        owner_static(
-            &ControlSpec {
-                parent: panel,
-                label: text.to_string(),
-                // ControlSpec coordinates are PHYSICAL like every other
-                // creation site — the raw logical values placed the label
-                // at the panel's top-left corner.
-                x: scale(row_right) - width,
-                y: scale(y),
-                width,
-                id: IDC_FOOTER_VERSION,
-                font,
-            },
-            scale(SUBTITLE_H),
-        )
-    }
-}
-
-fn section_header(parent: HWND, label: &str, y: i32, section_id: usize, font: HFONT) -> HWND {
-    owner_static(
-        &ControlSpec {
-            parent,
-            label: label.to_string(),
-            x: scale(PAD),
-            y: scale(y),
-            width: scale(PANEL_CLIENT_WIDTH - 2 * PAD),
-            id: section_id,
-            font,
-        },
-        scale(SECTION_H),
-    )
-}
-
-pub fn set_control_text(control: HWND, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
-    unsafe {
-        let _ = SetWindowTextW(control, PCWSTR(wide.as_ptr()));
-    }
-}
-
-/// Shared creation parameters for standard child controls.
-struct ControlSpec {
-    parent: HWND,
-    label: String,
-    x: i32,
-    y: i32,
-    width: i32,
-    id: usize,
-    font: HFONT,
-}
-
-unsafe fn create_control(spec: &ControlSpec, class: PCWSTR, extra_style: u32, height: i32) -> HWND {
-    // The panel positions children in physical pixels at runtime, so the
-    // kit's physical-rect creator serves it directly.
-    unsafe {
-        crate::kit::controls::raw_physical(
-            spec.parent,
-            class,
-            &spec.label,
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | extra_style),
-            spec.id,
-            spec.font,
-            (spec.x, spec.y, spec.width, height),
-        )
-    }
-}
-
-/// Owner-drawn toggle/command button (Go: bsOwnerDraw BUTTON). Visuals come
-/// from paint::draw_button / paint::draw_switch_row in the parent's WM_DRAWITEM.
-fn owner_button(spec: &ControlSpec, height: i32) -> HWND {
-    unsafe {
-        let hwnd_ = create_control(
-            spec,
-            w!("BUTTON"),
-            BS_OWNERDRAW as u32 | WS_TABSTOP.0,
-            height,
-        );
-        nativeform::track(hwnd_);
-        hwnd_
-    }
-}
-
-/// Owner-drawn static (Go: ssOwnerDraw STATIC) painted by the parent.
-fn owner_static(spec: &ControlSpec, height: i32) -> HWND {
-    // SS_OWNERDRAW = 13 (Go raw style value).
-    unsafe { create_control(spec, w!("STATIC"), 13, height) }
-}
-
-fn static_text(spec: &ControlSpec) -> HWND {
-    unsafe { create_control(spec, w!("STATIC"), 0, scale(20)) }
-}
-
-fn set_control_font(control: HWND, font: HFONT) -> bool {
-    unsafe {
-        SendMessageW(
-            control,
-            0x0030,
-            Some(WPARAM(font.0 as usize)),
-            Some(LPARAM(1)),
-        )
-        .0 != 0
     }
 }
 
