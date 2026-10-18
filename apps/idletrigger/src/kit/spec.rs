@@ -366,31 +366,43 @@ pub unsafe fn apply_relayout(parent: HWND, specs: &[ControlSpec]) {
                 ControlKind::Edit { .. } => controls::edit_rect(spec.rect),
                 _ => spec.rect,
             };
-            if rect_changed(parent, existing, rect) {
-                let (x, y, w, h) = rect;
-                let _ = SetWindowPos(
-                    existing,
-                    None,
-                    crate::scale_pub(x),
-                    crate::scale_pub(y),
-                    crate::scale_pub(w),
-                    crate::scale_pub(h),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            match rect_changed(parent, existing, rect) {
+                Some(true) => {
+                    let (x, y, w, h) = rect;
+                    let _ = SetWindowPos(
+                        existing,
+                        None,
+                        crate::scale_pub(x),
+                        crate::scale_pub(y),
+                        crate::scale_pub(w),
+                        crate::scale_pub(h),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    // A failed move must not re-anchor: the physical rect
+                    // still matches the previous anchor, and remembering the
+                    // spec rect would teleport the control at the next DPI
+                    // or text-scale change.
+                    if rect_changed(parent, existing, rect) != Some(true) {
+                        crate::dpi::remember_rect(existing, rect);
+                    }
+                }
+                // Already at the spec rect: refreshing the anchor is a no-op.
+                Some(false) => crate::dpi::remember_rect(existing, rect),
+                // The rect is unknown; keep the previous anchor.
+                None => {}
             }
-            crate::dpi::remember_rect(existing, rect);
         }
         apply(parent, specs);
     }
 }
 
 /// Whether a control's physical client rect differs from the logical spec
-/// rect at the current scale.
-fn rect_changed(parent: HWND, control: HWND, rect: (i32, i32, i32, i32)) -> bool {
+/// rect at the current scale. `None` when the rect could not be read.
+fn rect_changed(parent: HWND, control: HWND, rect: (i32, i32, i32, i32)) -> Option<bool> {
     unsafe {
         let mut wr = RECT::default();
         if GetWindowRect(control, &mut wr).is_err() {
-            return false;
+            return None;
         }
         let mut origin = windows::Win32::Foundation::POINT {
             x: wr.left,
@@ -398,9 +410,11 @@ fn rect_changed(parent: HWND, control: HWND, rect: (i32, i32, i32, i32)) -> bool
         };
         let _ = windows::Win32::Graphics::Gdi::ScreenToClient(parent, &mut origin);
         let (x, y, w, h) = rect;
-        origin.x != crate::scale_pub(x)
-            || origin.y != crate::scale_pub(y)
-            || (wr.right - wr.left) != crate::scale_pub(w)
-            || (wr.bottom - wr.top) != crate::scale_pub(h)
+        Some(
+            origin.x != crate::scale_pub(x)
+                || origin.y != crate::scale_pub(y)
+                || (wr.right - wr.left) != crate::scale_pub(w)
+                || (wr.bottom - wr.top) != crate::scale_pub(h),
+        )
     }
 }

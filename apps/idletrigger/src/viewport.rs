@@ -241,6 +241,19 @@ pub fn fit_content(hwnd: HWND, width: i32, height: i32) {
 /// size, then the form records its content extents.
 unsafe fn ensure_state(hwnd: HWND, width: i32, height: i32) {
     unsafe {
+        // WM_DPICHANGED reads the dpi subclass's retained previous DPI before
+        // that subclass runs (subclasses run newest-installed first), so a
+        // top-level window must have the dpi subclass — FormWindow::finish —
+        // installed before fit(). Child panes never receive WM_DPICHANGED;
+        // their manager rescales them as containers.
+        let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+        );
+        debug_assert!(
+            root != hwnd || crate::dpi::window_dpi(hwnd).is_some(),
+            "viewport::fit on a top-level window before dpi::install would make WM_DPICHANGED read old == new"
+        );
         if state(hwnd).is_some() {
             return;
         }

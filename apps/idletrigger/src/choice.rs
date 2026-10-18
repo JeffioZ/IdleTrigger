@@ -248,15 +248,21 @@ unsafe extern "system" fn button_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    // F4 and Down/Alt+Down open the dropdown, like a native combo box.
+    // F4 and Down/Alt+Down open the dropdown, like a native combo box. The
+    // key is forwarded as the same BN_CLICKED a mouse press produces, so the
+    // owner's pre-open work (row refreshes, selection snapshots) runs on the
+    // keyboard path too — calling toggle() directly would skip it.
     if (msg == WM_KEYDOWN && (wparam.0 == 0x73 || wparam.0 == VK_DOWN.0 as usize))
         || (msg == WM_SYSKEYDOWN && wparam.0 == VK_DOWN.0 as usize)
     {
         unsafe {
-            toggle(
-                hwnd,
+            let _ = SendMessageW(
                 GetParent(hwnd).unwrap_or_default(),
-                GetDlgCtrlID(hwnd),
+                WM_COMMAND,
+                Some(WPARAM(
+                    (GetDlgCtrlID(hwnd) as usize & 0xFFFF) | ((BN_CLICKED as usize) << 16),
+                )),
+                Some(LPARAM(hwnd.0 as isize)),
             );
         }
         return LRESULT(0);

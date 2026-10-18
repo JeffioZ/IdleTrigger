@@ -44,6 +44,10 @@ const PENDING_APPLY_MARKER: &str = "pending-apply";
 const READY_FILE: &str = "ready.json";
 const REPLACE_SCRIPT: &str = "update.ps1";
 const REPLACE_ERROR_LOG: &str = "replace-error.log";
+// Writability probe beside the EXE; the writing process's PID is appended so
+// concurrent probes never share a file. Startup reclaims every leftover by
+// this prefix.
+const PROBE_PREFIX: &str = ".idletrigger-update-probe";
 
 // ---- UI-facing state (read by the panel) ----------------------------------
 
@@ -998,7 +1002,7 @@ fn apply_ready_update(expected_version: &str) -> Result<(), String> {
     // A restricted folder (Program Files) would doom the script after the
     // process is gone; bail out while the app is still alive instead.
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let probe = exe.with_file_name(format!(".idletrigger-update-probe-{}", std::process::id()));
+    let probe = exe.with_file_name(format!("{PROBE_PREFIX}-{}", std::process::id()));
     if let Err(error) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1164,14 +1168,30 @@ pub(crate) fn cleanup_on_startup() {
         // Downloads never resume across runs; a leftover .part is junk.
         let _ = std::fs::remove_file(&part);
     }
-    // A crash between the writability probe's write and remove leaves this
-    // marker file beside the EXE; a hard-killed replace script equally never
-    // reaches its finally, stranding the copied candidate. Reclaim both with
-    // the other leftovers — after any successful swap the candidate is gone,
-    // so a leftover here is always junk (the staged original lives on in the
-    // update folder until its own cleanup).
+    // A crash between the writability probe's write and remove — or a remove
+    // blocked by antivirus — strands the probe beside the EXE; probe names
+    // carry the writer's PID, and a later PID reuse would fail create_new
+    // with a spurious not-writable verdict. Reclaim every prefixed leftover
+    // (the pre-PID fixed name included). A hard-killed replace script equally
+    // never reaches its finally, stranding the copied candidate — after any
+    // successful swap the candidate is gone, so a leftover here is always
+    // junk (the staged original lives on in the update folder until its own
+    // cleanup).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(PROBE_PREFIX)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(exe.with_file_name(".idletrigger-update-probe"));
         let mut leftover = exe.into_os_string();
         leftover.push(".new");
         let _ = std::fs::remove_file(PathBuf::from(leftover));
