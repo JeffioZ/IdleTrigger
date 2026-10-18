@@ -339,7 +339,7 @@ pub(crate) fn default_rule() -> auto::Rule {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ValidationField {
     BatteryLevel,
     Processes,
@@ -462,5 +462,47 @@ pub(crate) fn described_target(target: &auto::ProcessTarget) -> String {
     {
         Some(description) => format!("{} ({description})", target.executable),
         None => target.executable.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_shot_rules_need_a_future_time_only_when_the_schedule_changes() {
+        let mut draft = default_rule();
+        draft.trigger = auto::TRIGGER_ONCE.into();
+        draft.action = auto::ACTION_LOCK.into();
+        draft.date = "2000-01-01".into();
+        draft.time = "12:00".into();
+        // Creating an enabled one-shot scheduled in the past is refused.
+        assert_eq!(
+            validate_draft(&draft, None).map(|(field, _)| field),
+            Some(ValidationField::Date)
+        );
+        // A far-future schedule passes.
+        draft.date = "2999-01-01".into();
+        assert_eq!(validate_draft(&draft, None), None);
+        // Historical one-shot rules stay editable: resubmitting an already
+        // saved schedule is accepted even though its date has passed...
+        let mut saved = draft.clone();
+        saved.date = "2000-01-01".into();
+        draft = saved.clone();
+        assert_eq!(validate_draft(&draft, Some(&saved)), None);
+        // ...but a disabled baseline re-enables the future requirement...
+        let mut disabled = saved.clone();
+        disabled.enabled = false;
+        assert_eq!(
+            validate_draft(&draft, Some(&disabled)).map(|(field, _)| field),
+            Some(ValidationField::Date)
+        );
+        // ...and so does moving the schedule.
+        let mut moved = saved.clone();
+        moved.time = "13:00".into();
+        assert_eq!(
+            validate_draft(&draft, Some(&moved)).map(|(field, _)| field),
+            Some(ValidationField::Date)
+        );
     }
 }

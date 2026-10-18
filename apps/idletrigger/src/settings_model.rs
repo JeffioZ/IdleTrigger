@@ -323,3 +323,519 @@ impl Changes {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One representative Config mutation per merge invocation. Every closure
+    /// provably changes its field against any baseline, so a drifted default
+    /// cannot turn a scenario vacuous.
+    type Rep = (&'static str, Box<dyn Fn(&mut Config)>);
+
+    fn representatives() -> Vec<Rep> {
+        let mut reps: Vec<Rep> = Vec::new();
+        reps.push((
+            "keep_screen",
+            Box::new(|c: &mut Config| c.keep_screen_on = !c.keep_screen_on),
+        ));
+        reps.push((
+            "battery_allowed",
+            Box::new(|c: &mut Config| c.nosleep_on_battery = !c.nosleep_on_battery),
+        ));
+        reps.push((
+            "pause_on_lock",
+            Box::new(|c: &mut Config| c.nosleep_pause_on_lock = !c.nosleep_pause_on_lock),
+        ));
+        reps.push((
+            "battery_threshold",
+            Box::new(|c: &mut Config| {
+                c.nosleep_battery_threshold = if c.nosleep_battery_threshold == 77 {
+                    78
+                } else {
+                    77
+                }
+            }),
+        ));
+        reps.push((
+            "idle_timeout",
+            Box::new(|c: &mut Config| {
+                c.idle_timeout_minutes = if c.idle_timeout_minutes == 91 { 92 } else { 91 }
+            }),
+        ));
+        reps.push((
+            "idle_action",
+            Box::new(|c: &mut Config| {
+                let index = IDLE_ACTIONS
+                    .iter()
+                    .position(|action| *action == c.idle_action)
+                    .unwrap_or(0);
+                c.idle_action = IDLE_ACTIONS[(index + 2) % IDLE_ACTIONS.len()].to_string();
+            }),
+        ));
+        reps.push((
+            "idle_warning",
+            Box::new(|c: &mut Config| {
+                c.idle_warning_seconds = if c.idle_warning_seconds == 501 {
+                    502
+                } else {
+                    501
+                }
+            }),
+        ));
+        reps.push((
+            "idle_enhanced",
+            Box::new(|c: &mut Config| c.idle_enhanced_monitor = !c.idle_enhanced_monitor),
+        ));
+        reps.push((
+            "theme_mode",
+            Box::new(|c: &mut Config| {
+                c.theme_mode = if c.theme_mode == "sunrise" {
+                    "fixed"
+                } else {
+                    "sunrise"
+                }
+                .to_string()
+            }),
+        ));
+        reps.push((
+            "schedule_times",
+            Box::new(|c: &mut Config| {
+                c.theme_light_time = if c.theme_light_time == "07:31" {
+                    "07:32"
+                } else {
+                    "07:31"
+                }
+                .to_string()
+            }),
+        ));
+        reps.push((
+            "location",
+            Box::new(|c: &mut Config| c.theme_ip_location_enabled = !c.theme_ip_location_enabled),
+        ));
+        reps.push((
+            "theme_battery",
+            Box::new(|c: &mut Config| c.theme_dark_on_battery = !c.theme_dark_on_battery),
+        ));
+        reps.push((
+            "theme_fullscreen",
+            Box::new(|c: &mut Config| c.theme_skip_fullscreen = !c.theme_skip_fullscreen),
+        ));
+        reps.push((
+            "wallpaper_value",
+            Box::new(|c: &mut Config| {
+                c.theme_light_wallpaper = format!("{}#external", c.theme_light_wallpaper)
+            }),
+        ));
+        reps.push((
+            "wallpaper_lib",
+            Box::new(|c: &mut Config| c.theme_wallpapers.push("external-library.png".into())),
+        ));
+        reps.push((
+            "cursor_light",
+            Box::new(|c: &mut Config| {
+                c.theme_light_cursor_scheme = if c.theme_light_cursor_scheme == "External Light" {
+                    "External Light 2"
+                } else {
+                    "External Light"
+                }
+                .to_string()
+            }),
+        ));
+        reps.push((
+            "cursor_dark",
+            Box::new(|c: &mut Config| {
+                c.theme_dark_cursor_scheme = if c.theme_dark_cursor_scheme == "External Dark" {
+                    "External Dark 2"
+                } else {
+                    "External Dark"
+                }
+                .to_string()
+            }),
+        ));
+        reps.push((
+            "language",
+            Box::new(|c: &mut Config| {
+                c.language = if c.language == "zh-CN" {
+                    "auto"
+                } else {
+                    "zh-CN"
+                }
+                .to_string()
+            }),
+        ));
+        reps.push((
+            "lock_keys_enabled",
+            Box::new(|c: &mut Config| c.lock_keys_enabled = !c.lock_keys_enabled),
+        ));
+        reps.push((
+            "lock_fullscreen",
+            Box::new(|c: &mut Config| c.lock_keys_skip_fullscreen = !c.lock_keys_skip_fullscreen),
+        ));
+        reps.push((
+            "hotkeys",
+            Box::new(|c: &mut Config| c.hotkeys_enabled = !c.hotkeys_enabled),
+        ));
+        reps.push((
+            "logging",
+            Box::new(|c: &mut Config| c.logging_enabled = !c.logging_enabled),
+        ));
+        reps.push((
+            "update_auto",
+            Box::new(|c: &mut Config| c.update_check_enabled = !c.update_check_enabled),
+        ));
+        reps
+    }
+
+    struct Row {
+        name: &'static str,
+        edit: Box<dyn Fn(&mut Draft)>,
+        /// Representatives belonging to the same merge invocation: these are
+        /// the external edits that must conflict instead of surviving.
+        same_group: Vec<&'static str>,
+        conflict: Option<&'static str>,
+    }
+
+    fn rows() -> Vec<Row> {
+        let mut rows: Vec<Row> = Vec::new();
+        rows.push(Row {
+            name: "keep_screen",
+            edit: Box::new(|d: &mut Draft| d.keep_screen = !d.keep_screen),
+            same_group: vec!["keep_screen"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "battery_allowed",
+            edit: Box::new(|d: &mut Draft| d.battery_allowed = !d.battery_allowed),
+            same_group: vec!["battery_allowed"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "pause_on_lock",
+            edit: Box::new(|d: &mut Draft| d.pause_on_lock = !d.pause_on_lock),
+            same_group: vec!["pause_on_lock"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "battery_threshold",
+            edit: Box::new(|d: &mut Draft| {
+                let value = d.battery_threshold.unwrap_or(0);
+                d.battery_threshold = Some(if value == 65 { 66 } else { 65 });
+            }),
+            same_group: vec!["battery_threshold"],
+            conflict: Some("settings_battery_threshold"),
+        });
+        rows.push(Row {
+            name: "idle_timeout",
+            edit: Box::new(|d: &mut Draft| {
+                let value = d.idle_timeout.unwrap_or(0);
+                d.idle_timeout = Some(if value == 45 { 46 } else { 45 });
+            }),
+            same_group: vec!["idle_timeout"],
+            conflict: Some("settings_idle_timeout_minutes"),
+        });
+        rows.push(Row {
+            name: "idle_action",
+            edit: Box::new(|d: &mut Draft| {
+                d.idle_action_idx = (d.idle_action_idx + 1) % IDLE_ACTIONS.len();
+            }),
+            same_group: vec!["idle_action"],
+            conflict: Some("settings_idle_action"),
+        });
+        rows.push(Row {
+            name: "idle_warning",
+            edit: Box::new(|d: &mut Draft| {
+                let value = d.warning.unwrap_or(0);
+                d.warning = Some(if value == 301 { 302 } else { 301 });
+            }),
+            same_group: vec!["idle_warning"],
+            conflict: Some("settings_idle_warning_seconds"),
+        });
+        rows.push(Row {
+            name: "idle_enhanced",
+            edit: Box::new(|d: &mut Draft| d.idle_enhanced = !d.idle_enhanced),
+            same_group: vec!["idle_enhanced"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "theme_mode",
+            edit: Box::new(|d: &mut Draft| d.theme_mode_idx = 1 - d.theme_mode_idx),
+            same_group: vec!["theme_mode", "schedule_times"],
+            conflict: Some("settings_theme_schedule_group"),
+        });
+        rows.push(Row {
+            name: "light_time",
+            edit: Box::new(|d: &mut Draft| {
+                let pick = ["05:11", "05:12", "05:13"]
+                    .into_iter()
+                    .find(|time| *time != d.light_time && *time != d.dark_time)
+                    .unwrap();
+                d.light_time = pick.to_string();
+            }),
+            same_group: vec!["theme_mode", "schedule_times"],
+            conflict: Some("settings_theme_schedule_group"),
+        });
+        rows.push(Row {
+            name: "dark_time",
+            edit: Box::new(|d: &mut Draft| {
+                let pick = ["21:11", "21:12", "21:13"]
+                    .into_iter()
+                    .find(|time| *time != d.light_time && *time != d.dark_time)
+                    .unwrap();
+                d.dark_time = pick.to_string();
+            }),
+            same_group: vec!["theme_mode", "schedule_times"],
+            conflict: Some("settings_theme_schedule_group"),
+        });
+        rows.push(Row {
+            name: "location",
+            edit: Box::new(|d: &mut Draft| d.location_idx = 1 - d.location_idx),
+            same_group: vec!["location"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "theme_battery",
+            edit: Box::new(|d: &mut Draft| d.theme_battery = !d.theme_battery),
+            same_group: vec!["theme_battery"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "theme_fullscreen",
+            edit: Box::new(|d: &mut Draft| d.theme_fullscreen = !d.theme_fullscreen),
+            same_group: vec!["theme_fullscreen"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "light_wallpaper",
+            edit: Box::new(|d: &mut Draft| {
+                d.light_wallpaper = format!("{}#mine", d.light_wallpaper);
+            }),
+            same_group: vec!["wallpaper_value", "wallpaper_lib"],
+            conflict: Some("settings_row_wallpaper"),
+        });
+        rows.push(Row {
+            name: "dark_wallpaper",
+            edit: Box::new(|d: &mut Draft| {
+                d.dark_wallpaper = format!("{}#mine", d.dark_wallpaper);
+            }),
+            same_group: vec!["wallpaper_value", "wallpaper_lib"],
+            conflict: Some("settings_row_wallpaper"),
+        });
+        rows.push(Row {
+            name: "wallpapers",
+            edit: Box::new(|d: &mut Draft| d.wallpapers.push("library-entry.png".into())),
+            same_group: vec!["wallpaper_value", "wallpaper_lib"],
+            conflict: Some("settings_row_wallpaper"),
+        });
+        rows.push(Row {
+            name: "light_cursor",
+            edit: Box::new(|d: &mut Draft| {
+                d.light_cursor = format!("{}#mine", d.light_cursor);
+            }),
+            same_group: vec!["cursor_light"],
+            conflict: Some("settings_row_cursor"),
+        });
+        rows.push(Row {
+            name: "dark_cursor",
+            edit: Box::new(|d: &mut Draft| {
+                d.dark_cursor = format!("{}#mine", d.dark_cursor);
+            }),
+            same_group: vec!["cursor_dark"],
+            conflict: Some("settings_row_cursor"),
+        });
+        rows.push(Row {
+            name: "language",
+            edit: Box::new(|d: &mut Draft| {
+                let current = LANG_VALUES[d.language_idx.min(2)];
+                let target = if current == "zh-CN" { "auto" } else { "zh-CN" };
+                d.language_idx = LANG_VALUES
+                    .iter()
+                    .position(|value| *value != current && *value != target)
+                    .unwrap();
+            }),
+            same_group: vec!["language"],
+            conflict: Some("settings_language"),
+        });
+        rows.push(Row {
+            name: "lock_keys_caps",
+            edit: Box::new(|d: &mut Draft| d.caps = !d.caps),
+            same_group: vec!["lock_keys_enabled"],
+            conflict: Some("settings_lock_keys"),
+        });
+        rows.push(Row {
+            name: "lock_keys_num",
+            edit: Box::new(|d: &mut Draft| d.num = !d.num),
+            same_group: vec!["lock_keys_enabled"],
+            conflict: Some("settings_lock_keys"),
+        });
+        rows.push(Row {
+            name: "lock_keys_scroll",
+            edit: Box::new(|d: &mut Draft| d.scroll = !d.scroll),
+            same_group: vec!["lock_keys_enabled"],
+            conflict: Some("settings_lock_keys"),
+        });
+        rows.push(Row {
+            name: "lock_fullscreen",
+            edit: Box::new(|d: &mut Draft| d.lock_fullscreen = !d.lock_fullscreen),
+            same_group: vec!["lock_fullscreen"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "hotkeys",
+            edit: Box::new(|d: &mut Draft| d.hotkeys = !d.hotkeys),
+            same_group: vec!["hotkeys"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "logging",
+            edit: Box::new(|d: &mut Draft| d.logging = !d.logging),
+            same_group: vec!["logging"],
+            conflict: None,
+        });
+        rows.push(Row {
+            name: "update_auto",
+            edit: Box::new(|d: &mut Draft| d.update_auto = !d.update_auto),
+            same_group: vec!["update_auto"],
+            conflict: None,
+        });
+        rows
+    }
+
+    /// The save invariant, per draft field: the projection changes something,
+    /// every projected field belongs to a merge group, external edits to
+    /// unrelated groups survive the save, and an external edit inside the
+    /// same group conflicts until the user confirms the current values.
+    #[test]
+    fn projection_covers_every_merge_group_and_preserves_unrelated_live_edits() {
+        let base = Config::default();
+        let reps = representatives();
+        for row in rows() {
+            let mut draft = Draft::from_config(&base, false);
+            (row.edit)(&mut draft);
+            let edited = draft_config(&draft, &base);
+            assert_ne!(edited, base, "vacuous edit row: {}", row.name);
+
+            // Merging onto a pristine live config reproduces the projection
+            // exactly: no projected field may fall outside a merge group.
+            let mut pristine = base.clone();
+            let conflicts = merge_settings(&base, &edited, &mut pristine, None);
+            assert!(conflicts.is_empty(), "row {}: {conflicts:?}", row.name);
+            assert_eq!(
+                pristine, edited,
+                "projection outside merge groups: {}",
+                row.name
+            );
+
+            // External edits to every other group survive this save.
+            let mut live = base.clone();
+            let mut expectation = edited.clone();
+            for (name, mutate) in &reps {
+                if row.same_group.contains(name) {
+                    continue;
+                }
+                mutate(&mut live);
+                mutate(&mut expectation);
+            }
+            assert_ne!(live, base, "vacuous representative set: {}", row.name);
+            let conflicts = merge_settings(&base, &edited, &mut live, None);
+            assert!(conflicts.is_empty(), "row {}: {conflicts:?}", row.name);
+            assert_eq!(live, expectation, "unrelated live edit lost: {}", row.name);
+
+            // An external edit inside the same merge invocation conflicts...
+            let mut conflicted = base.clone();
+            for (name, mutate) in &reps {
+                if row.same_group.contains(name) {
+                    mutate(&mut conflicted);
+                }
+            }
+            assert_ne!(conflicted, base, "vacuous same-group rep: {}", row.name);
+            match row.conflict {
+                Some(label) => {
+                    let conflicts = merge_settings(&base, &edited, &mut conflicted, None);
+                    assert_eq!(conflicts, vec![label], "row {}", row.name);
+                    // ...and a confirmation captured at those exact live values
+                    // applies the edit over them.
+                    let approved = conflicted.clone();
+                    let mut confirmed = conflicted.clone();
+                    let conflicts = merge_settings(&base, &edited, &mut confirmed, Some(&approved));
+                    assert!(conflicts.is_empty(), "row {}: {conflicts:?}", row.name);
+                    assert_eq!(
+                        confirmed, edited,
+                        "confirmation must apply the edit: {}",
+                        row.name
+                    );
+                }
+                None => {
+                    // Single-switch groups have only two values: the external
+                    // edit necessarily equals the user's choice and applies.
+                    let conflicts = merge_settings(&base, &edited, &mut conflicted, None);
+                    assert!(conflicts.is_empty(), "row {}: {conflicts:?}", row.name);
+                    assert_eq!(
+                        conflicted, edited,
+                        "coinciding external edit must apply: {}",
+                        row.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draft_roundtrip_preserves_a_valid_config() {
+        let base = Config {
+            keep_screen_on: true,
+            nosleep_on_battery: true,
+            nosleep_pause_on_lock: true,
+            nosleep_battery_threshold: 42,
+            idle_timeout_minutes: 77,
+            idle_action: "sleep".into(),
+            idle_warning_seconds: 301,
+            idle_enhanced_monitor: true,
+            theme_mode: "sunrise".into(),
+            theme_light_time: "06:31".into(),
+            theme_dark_time: "18:47".into(),
+            theme_ip_location_enabled: true,
+            theme_dark_on_battery: true,
+            theme_skip_fullscreen: true,
+            theme_light_wallpaper: "C:\\light.png".into(),
+            theme_dark_wallpaper: "C:\\dark.png".into(),
+            theme_wallpapers: vec!["C:\\light.png".into(), "C:\\dark.png".into()],
+            theme_light_cursor_scheme: "Aero".into(),
+            theme_dark_cursor_scheme: "Windows Black".into(),
+            language: "zh-CN".into(),
+            lock_keys_enabled: true,
+            lock_keys_caps_enabled: true,
+            lock_keys_num_enabled: false,
+            lock_keys_scroll_enabled: true,
+            lock_keys_skip_fullscreen: true,
+            hotkeys_enabled: true,
+            logging_enabled: true,
+            update_check_enabled: true,
+            ..Config::default()
+        };
+        assert_eq!(draft_config(&Draft::from_config(&base, false), &base), base);
+        // Hidden schedule fields (sunrise mode) keep the baseline times even
+        // when the invisible edits hold garbage.
+        let mut draft = Draft::from_config(&base, false);
+        draft.light_time = "garbage".into();
+        draft.dark_time = draft.light_time.clone();
+        let projected = draft_config(&draft, &base);
+        assert_eq!(projected.theme_light_time, base.theme_light_time);
+        assert_eq!(projected.theme_dark_time, base.theme_dark_time);
+    }
+
+    #[test]
+    fn appearance_changes_are_side_specific_and_ignore_the_library() {
+        let base = Config::default();
+        let mut edited = base.clone();
+        edited.theme_light_wallpaper = "C:\\light.png".into();
+        let changes = Changes::between(&base, &edited);
+        assert_eq!(changes.appearance.wallpaper, [true, false]);
+        assert_eq!(changes.appearance.cursor, [false, false]);
+        assert!(!changes.language);
+        assert!(!changes.hotkeys);
+        let mut library = base.clone();
+        library.theme_wallpapers = vec!["C:\\new.png".into()];
+        assert!(!Changes::between(&base, &library).appearance.any());
+    }
+}

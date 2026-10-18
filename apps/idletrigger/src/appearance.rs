@@ -892,15 +892,20 @@ mod restore_snapshot_tests {
     }
     #[test]
     fn cursor_scheme_maps_windows_order_and_ignores_display_resource() {
-        let scheme = "%SystemRoot%\\cursors\\aero_arrow.cur,help.cur,working.ani,busy.ani,,,pen.cur,no.cur,ns.cur,ew.cur,nwse.cur,nesw.cur,move.cur,up.cur,link.cur,pin.cur,person.cur,@%SystemRoot%\\system32\\main.cpl,-1020";
+        let scheme = "%SystemRoot%\\cursors\\aero_arrow.cur,help.cur,working.ani,busy.ani,cross.cur,beam.cur,pen.cur,no.cur,ns.cur,ew.cur,nwse.cur,nesw.cur,move.cur,up.cur,link.cur,pin.cur,person.cur,@%SystemRoot%\\system32\\main.cpl,-1020";
         let paths = parse_cursor_scheme(scheme).unwrap();
         let role =
             |name| paths[CURSOR_NAMES.iter().position(|role| *role == name).unwrap()].as_str();
         assert_eq!(role("Arrow"), "%SystemRoot%\\cursors\\aero_arrow.cur");
-        assert_eq!(role("Crosshair"), "");
-        assert_eq!(role("IBeam"), "");
+        assert_eq!(role("Crosshair"), "cross.cur");
+        assert_eq!(role("IBeam"), "beam.cur");
         assert_eq!(role("NWPen"), "pen.cur");
+        assert_eq!(role("No"), "no.cur");
         assert_eq!(role("SizeNS"), "ns.cur");
+        assert_eq!(role("SizeWE"), "ew.cur");
+        // The NESW/NWSE pair is the one a mapping can silently swap.
+        assert_eq!(role("SizeNESW"), "nesw.cur");
+        assert_eq!(role("SizeNWSE"), "nwse.cur");
         assert_eq!(role("Hand"), "link.cur");
         assert_eq!(role("Pin"), "pin.cur");
         assert_eq!(role("Person"), "person.cur");

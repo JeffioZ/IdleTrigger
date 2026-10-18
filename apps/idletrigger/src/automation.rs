@@ -1544,4 +1544,222 @@ days = []
             assert!(!in_time_window(&rule, &at(6, minute)));
         }
     }
+
+    #[test]
+    fn incoming_events_wait_for_a_fresh_observation_and_keep_their_deadline() {
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous_config = crate::runtime::lock(&crate::CONFIG)
+            .replace(idletrigger_core::config::Config::default());
+        crate::cfg_edit(|c| c.automation_enabled = true);
+        let rule: auto::Rule = toml_edit::de::from_str(
+            r#"
+id = "fresh"
+name = "fresh"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "session_locked"
+process_logic = "any"
+blocked_policy = "wait"
+max_wait_minutes = 5
+[[processes]]
+match = "name"
+executable = "missing.exe"
+"#,
+        )
+        .unwrap();
+        *crate::runtime::lock(&RULES) = vec![rule.clone()];
+        let now = || LocalNow {
+            date: "2026-09-13".into(),
+            minutes: 720,
+            weekday: 0,
+        };
+        let snapshot = || {
+            Some(Snapshot {
+                names: BTreeSet::new(),
+                display: BTreeMap::new(),
+                pids_by_name: vec![],
+            })
+        };
+        let instant = std::time::Instant::now();
+        // The event arrives DURING the scan: the observation predates its
+        // arrival, so the scan must requeue it for judgment by a snapshot
+        // taken after the triggering moment, not by the stale one.
+        crate::runtime::lock(&INCOMING_EVENTS.0).push(IncomingEvent {
+            rule: rule.clone(),
+            received_at: instant + Duration::from_secs(30),
+        });
+        tick_with_snapshot(false, snapshot(), now(), instant, instant).unwrap();
+        assert_eq!(crate::runtime::lock(&INCOMING_EVENTS.0).len(), 1);
+        assert!(crate::runtime::lock(&WAITING_EVENTS).is_empty());
+        // The next scan observes after the arrival; the wait starts and its
+        // deadline is anchored at the event's receipt, not at the scan.
+        tick_with_snapshot(
+            false,
+            snapshot(),
+            now(),
+            instant + Duration::from_secs(60),
+            instant + Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(crate::runtime::lock(&INCOMING_EVENTS.0).is_empty());
+        assert_eq!(
+            crate::runtime::lock(&WAITING_EVENTS)["fresh"].deadline,
+            instant + Duration::from_secs(330)
+        );
+        // A repeated event is dropped at the queue...
+        on_session_event(true);
+        assert!(crate::runtime::lock(&INCOMING_EVENTS.0).is_empty());
+        // ...and even one that raced into the queue cannot restart the wait.
+        crate::runtime::lock(&INCOMING_EVENTS.0).push(IncomingEvent {
+            rule: rule.clone(),
+            received_at: instant + Duration::from_secs(100),
+        });
+        tick_with_snapshot(
+            false,
+            snapshot(),
+            now(),
+            instant + Duration::from_secs(100),
+            instant + Duration::from_secs(100),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::runtime::lock(&WAITING_EVENTS)["fresh"].deadline,
+            instant + Duration::from_secs(330)
+        );
+        assert!(crate::runtime::lock(&PENDING_ACTION).is_none());
+        assert!(!ACTION_BUSY.load(Ordering::SeqCst));
+
+        crate::runtime::lock(&RULES).clear();
+        crate::runtime::lock(&WAITING_EVENTS).clear();
+        crate::runtime::lock(&INCOMING_EVENTS.0).clear();
+        *crate::runtime::lock(&PROCESS_TRACKER) = ProcessTracker::default();
+        clear_overrides();
+        *crate::runtime::lock(&crate::CONFIG) = previous_config;
+    }
+
+    #[test]
+    fn rule_edits_invalidate_pending_work_but_unchanged_rules_wait_on() {
+        let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
+        let previous_config = crate::runtime::lock(&crate::CONFIG)
+            .replace(idletrigger_core::config::Config::default());
+        crate::cfg_edit(|c| c.automation_enabled = true);
+        let previous_doc = crate::runtime::lock(&crate::CONFIG_DOC).take();
+        let previous_rules = std::mem::take(&mut *crate::runtime::lock(&RULES));
+        let previous_waiting = std::mem::take(&mut *crate::runtime::lock(&WAITING_EVENTS));
+        let previous_incoming = std::mem::take(&mut *crate::runtime::lock(&INCOMING_EVENTS.0));
+        let previous_fired = std::mem::take(&mut *crate::runtime::lock(&BATTERY_FIRED));
+        let previous_active = std::mem::take(&mut *crate::runtime::lock(&ACTIVE_RULES));
+        let previous_issues = std::mem::take(&mut *crate::runtime::lock(&ISSUES));
+        let previous_overrides = std::mem::take(&mut *crate::runtime::lock(&OVERRIDES));
+
+        let document = |text: &str| text.parse::<toml_edit::DocumentMut>().unwrap();
+        let first = document(
+            r#"
+[[automation_rules]]
+id = "keep"
+name = "keep"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "daily"
+time = "12:00"
+process_logic = "any"
+blocked_policy = "wait"
+max_wait_minutes = 5
+[[processes]]
+match = "name"
+executable = "missing.exe"
+
+[[automation_rules]]
+id = "edit"
+name = "edit"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "session_locked"
+
+[[automation_rules]]
+id = "batt"
+name = "batt"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "battery_below"
+battery_level = 40
+"#,
+        );
+        let rules = idletrigger_core::rule_document::read(&first).unwrap().0;
+        assert_eq!(rules.len(), 3);
+        let find = |id: &str| rules.iter().find(|rule| rule.id == id).unwrap().clone();
+        *crate::runtime::lock(&crate::CONFIG_DOC) = Some(first);
+        *crate::runtime::lock(&RULES) = rules.clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        crate::runtime::lock(&WAITING_EVENTS).insert(
+            "keep".into(),
+            WaitingEvent {
+                rule: find("keep"),
+                occurrence: None,
+                deadline,
+            },
+        );
+        crate::runtime::lock(&INCOMING_EVENTS.0).push(IncomingEvent {
+            rule: find("edit"),
+            received_at: std::time::Instant::now(),
+        });
+        crate::runtime::lock(&BATTERY_FIRED).insert("batt".into());
+        // An unchanged document keeps waiting deadlines, queued events and
+        // battery markers exactly as they were.
+        reload_rules();
+        assert_eq!(
+            crate::runtime::lock(&WAITING_EVENTS)["keep"].deadline,
+            deadline
+        );
+        assert_eq!(crate::runtime::lock(&INCOMING_EVENTS.0).len(), 1);
+        assert!(crate::runtime::lock(&BATTERY_FIRED).contains("batt"));
+        // Renaming a rule drops its wait; deleting drops its queued event; a
+        // new battery threshold re-arms the marker.
+        let second = document(
+            r#"
+[[automation_rules]]
+id = "keep"
+name = "renamed"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "daily"
+time = "12:00"
+process_logic = "any"
+blocked_policy = "wait"
+max_wait_minutes = 5
+[[processes]]
+match = "name"
+executable = "missing.exe"
+
+[[automation_rules]]
+id = "batt"
+name = "batt"
+enabled = true
+action = "lock"
+warning_seconds = 30
+trigger = "battery_below"
+battery_level = 50
+"#,
+        );
+        *crate::runtime::lock(&crate::CONFIG_DOC) = Some(second);
+        reload_rules();
+        assert!(crate::runtime::lock(&WAITING_EVENTS).is_empty());
+        assert!(crate::runtime::lock(&INCOMING_EVENTS.0).is_empty());
+        assert!(crate::runtime::lock(&BATTERY_FIRED).is_empty());
+
+        *crate::runtime::lock(&crate::CONFIG) = previous_config;
+        *crate::runtime::lock(&crate::CONFIG_DOC) = previous_doc;
+        *crate::runtime::lock(&RULES) = previous_rules;
+        *crate::runtime::lock(&WAITING_EVENTS) = previous_waiting;
+        *crate::runtime::lock(&INCOMING_EVENTS.0) = previous_incoming;
+        *crate::runtime::lock(&BATTERY_FIRED) = previous_fired;
+        *crate::runtime::lock(&ACTIVE_RULES) = previous_active;
+        *crate::runtime::lock(&ISSUES) = previous_issues;
+        *crate::runtime::lock(&OVERRIDES) = previous_overrides;
+    }
 }
