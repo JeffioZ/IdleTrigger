@@ -134,15 +134,7 @@ pub(crate) const ROW_W: i32 = ROW_RIGHT - ROW_X; // 444
 // section across the five pages; drawn by the WM_DRAWITEM dispatch.
 pub(crate) const CARD_BASE: i32 = 620;
 
-pub(crate) const IDLE_ACTIONS: [&str; 6] = [
-    idletrigger_core::automation::ACTION_LOCK,
-    idletrigger_core::automation::ACTION_SLEEP,
-    idletrigger_core::automation::ACTION_HIBERNATE,
-    idletrigger_core::automation::ACTION_SHUTDOWN,
-    idletrigger_core::automation::ACTION_RESTART,
-    idletrigger_core::automation::ACTION_SCREEN_OFF,
-];
-pub(crate) const LANG_VALUES: [&str; 3] = ["auto", "en", "zh-CN"];
+pub(crate) use crate::settings_model::IDLE_ACTIONS;
 pub(crate) const PROJECT_URL: &str = "https://github.com/JeffioZ/IdleTrigger";
 
 pub(crate) fn idle_action_labels() -> Vec<String> {
@@ -593,7 +585,7 @@ pub(crate) fn cursor_choice_rows() -> Vec<crate::choice::ChoiceItem> {
         "",
         &t_pub("settings_appearance_none"),
     )];
-    for scheme in crate::theme_engine::cursor_schemes() {
+    for scheme in crate::appearance::cursor_schemes() {
         rows.push(crate::choice::ChoiceItem::option(&scheme, &scheme));
     }
     rows.push(crate::choice::ChoiceItem::option(
@@ -603,12 +595,42 @@ pub(crate) fn cursor_choice_rows() -> Vec<crate::choice::ChoiceItem> {
     rows
 }
 
+/// Keep a saved scheme visible even when it is temporarily unavailable.
+pub(crate) fn cursor_pick_items(current: &str) -> Vec<crate::choice::ChoiceItem> {
+    let mut rows = cursor_choice_rows();
+    if !current.is_empty() && current != "__install__" {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.value.eq_ignore_ascii_case(current))
+        {
+            row.value = current.to_string();
+        } else {
+            rows.insert(
+                1,
+                crate::choice::ChoiceItem::option(
+                    current,
+                    &crate::t_args("settings_asset_unavailable", &[current]),
+                ),
+            );
+        }
+    }
+    rows
+}
+
 /// Picker rows for one wallpaper side: "No change", the recently used
 /// images (file names), and a trailing Browse action that opens the picker.
 pub(crate) fn wallpaper_pick_items(current: &str) -> Vec<crate::choice::ChoiceItem> {
     let none = t_pub("settings_appearance_none");
     let mut rows = vec![crate::choice::ChoiceItem::option("", &none)];
-    let library = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
+    let mut library = crate::runtime::lock(&WALLPAPER_LIBRARY).clone();
+    // Externally configured selections need not already be in the recent list.
+    if !current.is_empty()
+        && current != "__browse__"
+        && !current.starts_with("__remove__")
+        && !library.iter().any(|path| path == current)
+    {
+        library.push(current.to_string());
+    }
     for path in &library {
         let label = std::path::Path::new(path)
             .file_name()
@@ -630,6 +652,8 @@ pub(crate) fn wallpaper_pick_items(current: &str) -> Vec<crate::choice::ChoiceIt
         } else {
             label
         };
+        // Keep the path without probing it on the UI thread: an unavailable
+        // network drive can block. The appearance worker reports apply errors.
         rows.push(crate::choice::ChoiceItem::option(path, &label));
     }
     rows.push(crate::choice::ChoiceItem::option(

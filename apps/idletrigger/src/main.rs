@@ -225,10 +225,12 @@ fn post_theme_refresh() {
 }
 
 mod accessibility;
+mod appearance;
 mod automation;
 mod automation_picker;
 mod automation_rules;
 mod automation_ui;
+mod background_io;
 #[cfg(feature = "devtools")]
 mod capture;
 mod choice;
@@ -253,6 +255,7 @@ mod popups;
 mod render_tests;
 mod runtime;
 mod selfupdate;
+mod settings_model;
 mod settings_pages;
 mod settings_ui;
 mod single_instance;
@@ -617,15 +620,7 @@ fn main() {
     #[cfg(feature = "devtools")]
     let _ = devtools::load();
 
-    *lock(&CONFIG) = Some(effective_config.clone());
-    *lock(&CONFIG_DOC) = Some(loaded.document);
-    *lock(&CONFIG_SOURCE) = loaded.source_text;
-    CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
-    runtime::CTX_SYNC_BLOCKED.store(
-        loaded.load_error.is_some() || loaded.field_errors.is_some(),
-        Ordering::SeqCst,
-    );
-    *lock(&CONFIG_PATH) = Some(config_path.clone());
+    runtime::initialize_config(config_path.clone(), &loaded);
     apply_language(&effective_config.language);
 
     let _instance_guard = match single_instance::acquire() {
@@ -738,7 +733,7 @@ fn main() {
     automation::spawn(exe_dir.clone());
     theme::apply_to_all();
     refresh_battery();
-    theme_engine::spawn();
+    let theme_worker = theme_engine::spawn();
     spawn_config_watcher();
     #[cfg(feature = "devtools")]
     devtools::maybe_show_warning_preview();
@@ -778,14 +773,69 @@ fn main() {
     }
 
     EXITING.store(true, Ordering::SeqCst);
-    // Do not terminate the restart worker between stopping and restoring Shell.
-    settings_ui::finish_classic_restart();
+    theme_engine::wake();
     system::unregister_all();
-    tray::remove();
+    // Keep an observable exit state until critical system recovery finishes.
+    // The hidden window rejects commands while EXITING is set.
+    tray::set_tooltip(&t("status_exiting"));
     unsafe {
         let _ = SetThreadExecutionState(ES_CONTINUOUS);
+        for window in [
+            hwnd(&PANEL),
+            warning::hwnd_of_warning(),
+            hwnd(&ACTION_WARN_HWND),
+        ] {
+            let _ = ShowWindow(window, SW_HIDE);
+        }
+        use kit::registry::{Kind, hwnd_of};
+        for kind in [
+            Kind::Settings,
+            Kind::Automation,
+            Kind::ContextRules,
+            Kind::ProcessPicker,
+        ] {
+            if let Some(window) = hwnd_of(kind) {
+                let _ = ShowWindow(window, SW_HIDE);
+            }
+        }
     }
+    // An in-flight repair must restore the user's theme before process exit.
+    // Wake cancels preparation/waits; queued operations are left unstarted.
+    finish_worker_on_ui_thread(theme_worker);
+    // Likewise, never terminate between stopping and restoring Explorer.
+    settings_ui::finish_classic_restart();
+    tray::remove();
     log_line("IdleTrigger exited");
+}
+
+/// Shutdown still services synchronous Windows notifications from workers.
+/// A plain join can deadlock a system call that sends to our UI thread;
+/// posted commands, timers and input must not start new work after exit.
+pub(crate) fn finish_worker_on_ui_thread(worker: std::thread::JoinHandle<()>) {
+    use windows::Win32::UI::WindowsAndMessaging::{PM_NOREMOVE, PM_QS_SENDMESSAGE, PeekMessageW};
+    let mut msg = msg_default();
+    let mut next_notice = std::time::Instant::now();
+    while !worker.is_finished() {
+        if std::time::Instant::now() >= next_notice {
+            // Explorer may have been restarted by the worker. Re-add the
+            // retained tray icon if needed, with the same exit status.
+            if !tray::set_tooltip(&t("status_exiting")) {
+                tray::on_taskbar_created();
+                tray::set_tooltip(&t("status_exiting"));
+            }
+            next_notice = std::time::Instant::now() + Duration::from_secs(1);
+        }
+        unsafe {
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Err(payload) = worker.join() {
+        log_line(&format!(
+            "shutdown worker panic: {}",
+            runtime::panic_message(payload)
+        ));
+    }
 }
 
 fn msg_default() -> windows::Win32::UI::WindowsAndMessaging::MSG {
@@ -829,6 +879,9 @@ unsafe extern "system" fn hidden_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     guarded_proc("hidden", hwnd_, msg, wparam, lparam, move || unsafe {
+        if EXITING.load(Ordering::SeqCst) {
+            return DefWindowProcW(hwnd_, msg, wparam, lparam);
+        }
         let registered = REGISTERED_SHOW_PANEL.load(Ordering::SeqCst);
         if registered != 0 && msg == registered {
             show_panel();
@@ -884,7 +937,7 @@ unsafe extern "system" fn hidden_proc(
             windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE => {
                 // WTS_SESSION_LOCK (0x7) / WTS_SESSION_UNLOCK (0x8) for this
                 // session. The lock pause re-merges the effective state; the
-                // lock/unlock triggers fire their rules directly.
+                // lock/unlock triggers wake the automation scanner.
                 let locked = match wparam.0 {
                     0x7 => Some(true),
                     0x8 => Some(false),
@@ -925,14 +978,17 @@ unsafe extern "system" fn hidden_proc(
             }
 
             WM_REFRESH_UI => {
+                if selfupdate::take_exit_request() {
+                    log_line("exit via self-update");
+                    PostQuitMessage(0);
+                    // The replacement helper is already waiting for exit.
+                    // Do not open another modal dialog from this refresh.
+                    return LRESULT(0);
+                }
                 settings_ui::refresh_classic_restart();
                 settings_ui::refresh_location_status();
                 refresh_update_button();
                 settings_ui::refresh_update_status();
-                if selfupdate::take_exit_request() {
-                    log_line("exit via self-update");
-                    PostQuitMessage(0);
-                }
                 if let Some(error) = selfupdate::take_error() {
                     warn_dialog("", &error);
                 }
@@ -950,8 +1006,7 @@ unsafe extern "system" fn hidden_proc(
                 if selfupdate::take_update_prompt() {
                     update_prompt_and_begin();
                 }
-                theme_engine::finish_manual_switch();
-                theme_engine::finish_repair();
+                finish_theme_requests();
                 automation::show_save_errors();
                 apply_stay_awake();
                 refresh_checkboxes();
@@ -973,7 +1028,11 @@ unsafe extern "system" fn hidden_proc(
                 // refresh battery + theme state.
                 if wparam.0 == 18 || wparam.0 == 7 {
                     log_line("power resume detected");
-                    automation::on_resume();
+                    // AUTOMATIC arrives for every resume; RESUMESUSPEND may
+                    // follow it for the same wake and must not fire twice.
+                    if wparam.0 == 18 {
+                        automation::on_resume();
+                    }
                     refresh_battery();
                     apply_stay_awake();
                     theme_recovery::environment_changed(false, true);
@@ -1841,9 +1900,9 @@ fn create_windows() {
     // config commits a real temp path so save paths succeed silently
     // instead of popping a blocking "configuration path unavailable"
     // dialog (which stalled test children until someone clicked OK).
-    if crate::runtime::lock(&CONFIG_PATH).as_ref().is_none() {
+    if runtime::config_path().is_none() {
         let path = std::env::temp_dir().join(format!("idletrigger-ui-{}.toml", std::process::id()));
-        *crate::runtime::lock(&CONFIG_PATH) = Some(path);
+        runtime::ensure_config_path(path);
     }
     unsafe {
         let instance = GetModuleHandleW(None).expect("module handle");
@@ -3372,6 +3431,43 @@ fn open_update_notes() {
     }
 }
 
+/// Consume worker results on the UI thread. Never hold queue locks while
+/// changing controls or opening a dialog (which can pump more messages).
+fn finish_theme_requests() {
+    use theme_engine::Completion;
+    let completions = theme_engine::take_completions();
+    for completion in completions {
+        match completion {
+            Completion::Switch(Err(error)) => {
+                crate::log_line(&format!("manual theme switch failed: {error}"));
+                crate::warn_dialog("", &crate::t_args("theme_switch_failed", &[&error]));
+            }
+            Completion::Switch(Ok(())) => {}
+            Completion::Appearance(result) => {
+                crate::settings_ui::refresh_appearance_state();
+                if let Err(error) = result {
+                    crate::warn_dialog("", &crate::t_args("theme_appearance_failed", &[&error]));
+                }
+            }
+            Completion::Restore(id, sides) => {
+                crate::settings_ui::finish_appearance_restore(id, sides);
+            }
+            Completion::Repair(result) => {
+                crate::request_theme_repair_refresh();
+                match result {
+                    Ok(()) => {
+                        crate::log_line("theme repair completed");
+                        theme_engine::show_notice(crate::t_pub("theme_repair_done"));
+                    }
+                    Err(error) => {
+                        crate::log_line(&format!("theme repair failed: {error}"));
+                        crate::warn_dialog("", &crate::t_args("theme_repair_failed", &[&error]));
+                    }
+                }
+            }
+        }
+    }
+}
 /// One-click update, shared by the panel link and the settings button: one
 /// confirm (owned by the frontmost window), then a worker downloads (if
 /// needed), applies and requests the exit.
@@ -3393,7 +3489,7 @@ pub fn update_prompt_and_begin() {
     if choice != IDYES {
         return;
     }
-    selfupdate::begin_update();
+    selfupdate::begin_update(version);
     refresh_update_button();
     settings_ui::refresh_update_status();
 }
@@ -3449,61 +3545,22 @@ pub(crate) fn warn_dialog(heading: &str, body: &str) {
     }
 }
 
-/// Serialize application writers; publish config and rules only after saving.
 /// Publish a valid external configuration and apply its UI/platform settings.
 fn hot_reload_config() -> Result<(), String> {
-    let writer = lock(&CONFIG_WRITER);
-    let config_path = crate::runtime::lock(&CONFIG_PATH)
-        .clone()
-        .ok_or("configuration path unavailable")?;
-    let loaded = config::load(&config_path);
-    if loaded.created_from_template {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "configuration file is missing",
-        )
-        .to_string());
-    }
-    // Startup may recover mistyped fields with defaults, but a live reload
-    // must not replace a working configuration with those fallback values.
-    // Validate rule containers as well before publishing any shared state;
-    // individual rule issues still use the editors' fault-isolation policy.
-    let validation = (|| {
-        if let Some(err) = loaded.load_error.as_ref().or(loaded.field_errors.as_ref()) {
-            return Err(err.clone());
-        }
-        idletrigger_core::ctx_menu::read_rules(&loaded.document)?;
-        idletrigger_core::rule_document::read(&loaded.document)?;
-        Ok::<(), String>(())
-    })();
-    if let Err(err) = validation {
-        log_line(&format!(
-            "config reload rejected; retaining last valid configuration: {err}"
-        ));
-        return Err(err);
-    }
-    let nosleep_was_on = lock(&CONFIG).as_ref().is_some_and(|c| c.nosleep_enabled);
-    *lock(&CONFIG) = Some(loaded.config.clone());
-    *lock(&CONFIG_DOC) = Some(loaded.document);
-    *lock(&CONFIG_SOURCE) = loaded.source_text;
-    CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
-    runtime::CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
-    automation::reload_rules();
-    ctxexec::reload_rules();
-    drop(writer);
+    let (config, stay_awake_turned_off) = runtime::reload_config()?;
     // Same rule as commit_config: an external edit that turned the Stay
     // Awake switch off also drops the timed overlay; an edit that leaves
     // the switch untouched does not.
-    if nosleep_was_on && !loaded.config.nosleep_enabled {
+    if stay_awake_turned_off {
         sync_timed_with_manual();
     }
-    apply_language(&loaded.config.language);
+    apply_language(&config.language);
     ctxmenu::sync("reload");
     ctx_ui::refresh_config_state();
     theme_engine::wake();
     sync_logging();
     system::unregister_all();
-    if loaded.config.hotkeys_enabled {
+    if config.hotkeys_enabled {
         let failed = system::register_all();
         if !failed.is_empty() {
             log_line(&format!("hotkeys failed: {}", failed.join(", ")));
@@ -3521,13 +3578,13 @@ fn hot_reload_config() -> Result<(), String> {
 /// Poll exact file contents so atomic replacements and edits with preserved
 /// timestamps are detected; our own saved document is skipped automatically.
 fn spawn_config_watcher() {
-    let Some(path) = lock(&CONFIG_PATH).clone() else {
+    let Some(path) = runtime::config_path() else {
         return;
     };
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || {
-            let mut observed = lock(&CONFIG_SOURCE).clone();
+            let mut observed = runtime::config_source();
             while !EXITING.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_secs(3));
                 runtime::catch_and_log("config-watch", || {
@@ -3537,7 +3594,7 @@ fn spawn_config_watcher() {
                     if observed.as_ref() == Some(&text) {
                         return;
                     }
-                    if lock(&CONFIG_SOURCE).as_ref() != Some(&text) {
+                    if runtime::config_source().as_ref() != Some(&text) {
                         let posted = unsafe {
                             PostMessageW(
                                 Some(hwnd(&HIDDEN)),
@@ -3875,7 +3932,7 @@ pub(crate) fn set_text(slot: &AtomicIsize, text: &str) {
 /// its location source.
 fn theme_schedule_text() -> String {
     // A running repair owns the line: the operation takes seconds (theme
-    // apply plus two broadcast rounds), so an instantly visible state beats
+    // apply plus system notifications), so an instantly visible state beats
     // a short-lived completion notice.
     if theme_engine::repair_running() {
         return t("theme_repair_started");
@@ -3886,8 +3943,10 @@ fn theme_schedule_text() -> String {
     if !cfg_map(|c| c.theme_switch_enabled) {
         return t("theme_schedule_disabled");
     }
-    // Battery dark outranks schedule and snooze in the engine, so it owns
-    // the line ahead of the snooze state too.
+    if let Some(manual) = theme_engine::manual_override_status() {
+        return manual;
+    }
+    // Battery dark outranks the schedule and its snooze, after manual intent.
     if battery_dark_forced() {
         return t("theme_schedule_battery_dark");
     }

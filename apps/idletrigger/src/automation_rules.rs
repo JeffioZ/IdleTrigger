@@ -1,14 +1,10 @@
 //! Automation editing domain: the rule vocabulary shared by the manager,
 //! editor, and picker - label/key mapping, summaries, validation, date/time
-//! parsing, templates, persistence, and process-target descriptions. Pure
-//! data in, data out; no HWNDs live here.
+//! parsing, templates, persistence, and process-target descriptions.
+//! Validation identifies rule fields; controls and focus belong to the UI.
 
 use idletrigger_core::automation as auto;
 
-use crate::automation_ui::{
-    ED_BATTERY, ED_CHOOSE, ED_DATE, ED_DAYS_MON, ED_END_TIME, ED_IDLE_MIN, ED_MAX_WAIT, ED_TIME,
-    ED_WARNING,
-};
 use crate::t_pub;
 
 /// Executable-description cache shared by the picker's enrichment and the
@@ -307,9 +303,15 @@ pub(crate) fn default_rule() -> auto::Rule {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    let date = format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay);
-    let next_hour = format!("{:02}:{:02}", (st.wHour as i32 + 1) % 24, st.wMinute);
-    let two_hours = format!("{:02}:{:02}", (st.wHour as i32 + 2) % 24, st.wMinute);
+    let (date, next_hour) = scheduled_after(60).unwrap_or_else(|| {
+        (
+            format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay),
+            format!("{:02}:{:02}", st.wHour, st.wMinute),
+        )
+    });
+    let two_hours = scheduled_after(120)
+        .map(|(_, time)| time)
+        .unwrap_or_else(|| next_hour.clone());
     auto::Rule {
         id: format!("rule-{now:x}"),
         name: String::new(),
@@ -337,46 +339,97 @@ pub(crate) fn default_rule() -> auto::Rule {
     }
 }
 
-/// Go validateDraft: returns the first error message (with its control).
-pub(crate) fn validate_draft(draft: &auto::Rule) -> Option<(usize, String)> {
+#[derive(Clone, Copy)]
+pub(crate) enum ValidationField {
+    BatteryLevel,
+    Processes,
+    Date,
+    Time,
+    EndTime,
+    Days,
+    IdleMinutes,
+    WarningSeconds,
+    MaxWaitMinutes,
+}
+
+/// Validate an edit against its saved baseline. `None` identifies a new rule.
+pub(crate) fn validate_draft(
+    draft: &auto::Rule,
+    previous: Option<&auto::Rule>,
+) -> Option<(ValidationField, String)> {
     let t = |key: &str| t_pub(key);
     let trigger = draft.trigger.as_str();
     if trigger == auto::TRIGGER_BATTERY_BELOW && !(1..=95).contains(&draft.battery_level) {
-        return Some((ED_BATTERY, t("automation_error_battery_level")));
+        return Some((
+            ValidationField::BatteryLevel,
+            t("automation_error_battery_level"),
+        ));
     }
     let needs_process = matches!(
         trigger,
         "process_running" | "process_started" | "process_exited"
     );
     if needs_process && draft.processes.is_empty() {
-        return Some((ED_CHOOSE, t("automation_error_process_required")));
+        return Some((
+            ValidationField::Processes,
+            t("automation_error_process_required"),
+        ));
     }
     if trigger == auto::TRIGGER_ONCE && !parse_date(&draft.date) {
-        return Some((ED_DATE, t("automation_error_date")));
+        return Some((ValidationField::Date, t("automation_error_date")));
     }
     if matches!(
         trigger,
         auto::TRIGGER_ONCE | auto::TRIGGER_DAILY | auto::TRIGGER_WEEKLY | auto::TRIGGER_TIME_WINDOW
     ) && !parse_time(&draft.time)
     {
-        return Some((ED_TIME, t("automation_error_time")));
+        return Some((ValidationField::Time, t("automation_error_time")));
+    }
+    // Historical one-shot tasks remain editable. Require a future time only
+    // when creating, re-enabling or changing an enabled one-shot schedule.
+    if draft.enabled
+        && trigger == auto::TRIGGER_ONCE
+        && previous.is_none_or(|saved| {
+            !saved.enabled
+                || saved.trigger != draft.trigger
+                || saved.date != draft.date
+                || saved.time != draft.time
+        })
+    {
+        let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let today = format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay);
+        let time = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        if (draft.date.as_str(), draft.time.as_str()) <= (today.as_str(), time.as_str()) {
+            let field = if draft.date < today {
+                ValidationField::Date
+            } else {
+                ValidationField::Time
+            };
+            return Some((field, t("automation_error_future_time")));
+        }
     }
     if trigger == auto::TRIGGER_TIME_WINDOW && !parse_time(&draft.end_time) {
-        return Some((ED_END_TIME, t("automation_error_end_time")));
+        return Some((ValidationField::EndTime, t("automation_error_end_time")));
     }
     if matches!(trigger, auto::TRIGGER_WEEKLY | auto::TRIGGER_TIME_WINDOW) && draft.days.is_empty()
     {
-        return Some((ED_DAYS_MON, t("automation_error_days")));
+        return Some((ValidationField::Days, t("automation_error_days")));
     }
     if draft.action == "enable_idle_monitor"
         && (draft.idle_minutes <= 0 || draft.idle_minutes > auto::MAX_IDLE_MINUTES)
     {
-        return Some((ED_IDLE_MIN, t("automation_error_idle_minutes")));
+        return Some((
+            ValidationField::IdleMinutes,
+            t("automation_error_idle_minutes"),
+        ));
     }
     if auto::is_event_action(&draft.action)
         && (draft.warning_seconds < auto::MIN_WARNING_SECONDS || draft.warning_seconds > 3600)
     {
-        return Some((ED_WARNING, t("automation_error_warning")));
+        return Some((
+            ValidationField::WarningSeconds,
+            t("automation_error_warning"),
+        ));
     }
     if auto::is_event_action(&draft.action)
         && !draft.processes.is_empty()
@@ -385,7 +438,10 @@ pub(crate) fn validate_draft(draft: &auto::Rule) -> Option<(usize, String)> {
         && draft.blocked_policy == auto::BLOCKED_WAIT
         && (draft.max_wait_minutes <= 0 || draft.max_wait_minutes > auto::MAX_IDLE_MINUTES)
     {
-        return Some((ED_MAX_WAIT, t("automation_error_max_wait")));
+        return Some((
+            ValidationField::MaxWaitMinutes,
+            t("automation_error_max_wait"),
+        ));
     }
     None
 }

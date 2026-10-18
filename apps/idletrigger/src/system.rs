@@ -8,6 +8,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 pub const HOTKEY_IDS: [u32; 4] = [10, 11, 12, 13];
+static HOTKEYS_INCOMPLETE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn hotkeys_need_retry() -> bool {
+    HOTKEYS_INCOMPLETE.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// The built-in system actions this binary can execute (the whitelist
 /// behind `main::try_system_action`).
@@ -71,10 +77,12 @@ pub fn register_all() -> Vec<&'static str> {
             }
         }
     }
+    HOTKEYS_INCOMPLETE.store(!failed.is_empty(), std::sync::atomic::Ordering::SeqCst);
     failed
 }
 
 pub fn unregister_all() {
+    HOTKEYS_INCOMPLETE.store(false, std::sync::atomic::Ordering::SeqCst);
     unsafe {
         for id in HOTKEY_IDS {
             let _ = UnregisterHotKey(Some(crate::hwnd(&crate::HIDDEN)), id as i32);

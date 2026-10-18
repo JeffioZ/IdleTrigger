@@ -23,7 +23,9 @@ use crate::wide;
 /// Runs the full DWM refresh.
 pub fn refresh_dwm_colorization() -> io::Result<()> {
     let session = crate::theme_com::Session::new()?;
-    let (snapshot, encoding) = match current_theme_snapshot() {
+    let (snapshot, encoding) = match crate::background_io::read("theme snapshot", || {
+        current_theme_snapshot().map_err(|error| error.to_string())
+    }) {
         Ok(parsed) => parsed,
         Err(error) => {
             // Auto Dark Mode's light path: without a theme file to patch,
@@ -34,7 +36,8 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
             crate::log_line(&format!(
                 "dwm refresh: no theme file ({error}); broadcast-only refresh"
             ));
-            notify_theme_changed();
+            // The caller broadcasts after releasing the operation lock,
+            // including this fallback path.
             return Ok(());
         }
     };
@@ -50,6 +53,7 @@ pub fn refresh_dwm_colorization() -> io::Result<()> {
         read_registry_dword("Software\\Microsoft\\Windows\\DWM", "ColorizationColor");
     let patched = patch_theme_file(&snapshot, apps_light, system_light, accent);
     let path = write_refresh_theme(&patched, encoding)?;
+    crate::background_io::ensure_running().map_err(io::Error::other)?;
     // Apply with every mutable section ignored, the way Auto Dark Mode's
     // DwmRefreshHandler does: wallpaper, cursors, sounds and screensavers
     // stay untouched — the legacy flag-less ApplyTheme would reset them to

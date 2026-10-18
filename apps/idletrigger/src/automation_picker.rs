@@ -15,8 +15,8 @@ use windows::core::PCWSTR;
 
 use crate::automation_ui::{
     BUTTON_H, ED_CHOOSE, ED_GAP, ED_TRIGGER, WM_APP_PICKER_DESC, caption_key, choice_value,
-    clear_editor_error, dpi_changed, draw_form_item, edit_procs, enable_control, layout_editor,
-    lower_surfaces, present_control, refresh_tooltips, set_edit_procs, update_proc_summary,
+    clear_editor_error, draw_form_item, edit_procs, enable_control, layout_editor, lower_surfaces,
+    present_control, refresh_tooltips, set_edit_procs, update_proc_summary,
 };
 use crate::{t_pub, theme, wide, window_text};
 
@@ -284,13 +284,7 @@ fn create_picker(owner: HWND) {
         // AFTER the font assignment, in mk_edit's order: a font change
         // resets an edit's margins to the font-derived defaults, which
         // silently wiped a before-font setting here.
-        let margin = s(6) as usize;
-        let _ = SendMessageW(
-            search,
-            crate::kit::controls::EM_SETMARGINS_RAW,
-            Some(WPARAM(3)),
-            Some(LPARAM((margin | (margin << 16)) as isize)),
-        );
+        crate::dpi::set_edit_margins(search, 6);
         // Cue banner hint (Go NewCueBanner).
         crate::nativeform::cue_banner(search, "process_picker_search_hint");
 
@@ -387,7 +381,6 @@ fn create_picker(owner: HWND) {
             windows::Win32::UI::Shell::SetWindowSubclass(list, Some(proc), 0x5150, 0)
                 .expect("picker list subclass");
         }
-        dpi_changed(pk);
         crate::list_style::install(list);
         // The list's scrollbar is painted into its card face.
         crate::list_style::set_lane_card(list, get_dlg_item(pk, PK_LIST_SURFACE));
@@ -1447,7 +1440,6 @@ pub fn refresh_language() {
             }
         }
         update_header_captions(pk);
-        crate::automation_ui::dpi_changed(pk);
         update_selection_status(pk);
         update_preview(pk);
     }

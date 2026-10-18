@@ -885,6 +885,12 @@ fn toggle_selected() {
         return;
     }
     rules[idx].enabled = !rules[idx].enabled;
+    if rules[idx].enabled
+        && let Some((_, message)) = validate_draft(&rules[idx], Some(&base[idx]))
+    {
+        crate::warn_dialog("", &message);
+        return;
+    }
     if let Err(err) = save_rules_to_config(&base, rules) {
         crate::warn_dialog("", &err);
     } else {
@@ -933,6 +939,10 @@ unsafe extern "system" fn mgr_proc(
         lparam,
         move || unsafe {
             match msg {
+                crate::dpi::RESCALED => {
+                    dpi_changed(hwnd);
+                    LRESULT(0)
+                }
                 WM_MEASUREITEM => {
                     // Owner-draw rule rows: settings-row height rhythm.
                     let measure =
@@ -1625,6 +1635,7 @@ fn create_editor() {
         )
         .expect("editor pane");
         EDIT_HWND.store(ed.0 as isize, Ordering::SeqCst);
+        crate::dpi::track_container(ed);
         theme::apply_to_window(ed);
 
         // Section cards first (settings card grammar): owner-draw statics
@@ -1826,7 +1837,7 @@ fn create_editor() {
             ED_CHECK_H,
         );
         // Toggle rows hover on the pill column alone (panel parity).
-        crate::nativeform::set_hover_column(keep_screen, s(crate::kit::layout::SWITCH_HIT_W));
+        crate::nativeform::set_hover_column(keep_screen, crate::kit::layout::SWITCH_HIT_W);
         mk_button(
             ED_PROC_INFO,
             &t_pub(caption_key(EDITOR_TEXTS, ED_PROC_INFO)),
@@ -2018,6 +2029,21 @@ fn read_draft(ed: HWND, base: &auto::Rule) -> auto::Rule {
     draft
 }
 
+/// Map domain validation to editor controls without coupling rules to HWNDs.
+fn validation_control(field: ValidationField) -> usize {
+    match field {
+        ValidationField::BatteryLevel => ED_BATTERY,
+        ValidationField::Processes => ED_CHOOSE,
+        ValidationField::Date => ED_DATE,
+        ValidationField::Time => ED_TIME,
+        ValidationField::EndTime => ED_END_TIME,
+        ValidationField::Days => ED_DAYS_MON,
+        ValidationField::IdleMinutes => ED_IDLE_MIN,
+        ValidationField::WarningSeconds => ED_WARNING,
+        ValidationField::MaxWaitMinutes => ED_MAX_WAIT,
+    }
+}
+
 /// Go setEditorError: show the message in the validation row and focus the field.
 fn set_editor_error(ed: HWND, id: usize, message: &str) {
     EDIT_ERROR.store(true, Ordering::SeqCst);
@@ -2046,9 +2072,10 @@ pub(crate) fn clear_editor_error(ed: HWND) {
 fn save_rule(ed: HWND) {
     let orig = edit_orig().unwrap_or_else(default_rule);
     let draft = read_draft(ed, &orig);
+    let previous = (edit_index() >= 0).then_some(&orig);
 
-    if let Some((id, message)) = validate_draft(&draft) {
-        set_editor_error(ed, id, &message);
+    if let Some((field, message)) = validate_draft(&draft, previous) {
+        set_editor_error(ed, validation_control(field), &message);
         return;
     }
 
@@ -2424,7 +2451,7 @@ pub fn layout_editor() {
         // horizontal one.
         EDITOR_CONTENT_H.store(content_bottom as isize, Ordering::SeqCst);
         sync_manager_height();
-        crate::viewport::fit_content(ed, ED_W - ED_EDGE, content_bottom);
+        crate::viewport::fit_content(ed, s(ED_W - ED_EDGE), s(content_bottom));
         if IsWindowVisible(ed).as_bool() {
             crate::present_layout(ed);
         }
@@ -3394,7 +3421,7 @@ pub(crate) fn refresh_tooltips() {
     }
 }
 
-pub fn dpi_changed(hwnd: HWND) {
+fn dpi_changed(hwnd: HWND) {
     let _dpi = crate::dpi::Scope::window(hwnd);
     // The editor pane is a child window and never sees WM_DPICHANGED; the
     // manager's hook stretches it over the client area and re-lays-out its

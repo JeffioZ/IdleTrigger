@@ -8,22 +8,42 @@ IdleTrigger 使用 Rust 1.88+（见 workspace `rust-version`）、原生 Win32 �
 
 | Path | Responsibility / 职责 |
 | --- | --- |
-| `apps/idletrigger/src/main.rs` | Event loop, panel, tray, idle warning, and power state / 事件循环、面板、托盘、空闲预警与电源状态 |
-| `runtime.rs` | Runtime state: config document, serialized writes, log file / 运行态：配置文档、串行写入与日志 |
+| `apps/idletrigger/src/main.rs` | Event loop, panel, tray, and power state / 事件循环、面板、托盘与电源状态 |
+| `runtime.rs` | Config snapshots, serialized saves and validated reloads, logging / 配置快照、串行保存、校验重载与日志 |
 | `automation.rs`, `idle_monitor.rs` | Rule evaluation and idle clock / 规则计算与空闲时钟 |
-| `automation_ui.rs`, `settings_ui.rs`, `popups.rs` | Forms and warnings / 表单与提醒 |
-| `ctx_ui.rs`, `ctxmenu.rs`, `ctxexec.rs`, `ctxselection.rs` | Context-menu manager, current-user registration, command expansion, and complete Shell selections / 右键管理窗口、当前用户注册、命令展开与完整 Shell 选择集 |
+| `kit/` | Window shell, control creation, declarative page specs, flow layout, fonts, and live-window registry / 窗口壳、控件创建、声明式页面、流式布局、字体与活窗口注册表 |
+| `settings_ui.rs`, `settings_pages.rs`, `settings_model.rs` | Settings window, page specifications, and independent draft/validation/merge model / 设置窗口、页面规格与独立的草稿、校验、合并模型 |
+| `automation_ui.rs`, `automation_picker.rs`, `automation_rules.rs` | Task manager/editor, process picker, and rule editing logic / 任务管理与编辑、进程选择器、规则编辑逻辑 |
+| `panel_controls.rs`, `warning.rs`, `popups.rs` | Panel control specs, idle warnings, action countdowns, and lock-key notices / 面板控件规格、空闲预警、动作倒计时与锁定键提示 |
+| `ctx_ui.rs`, `ctxmenu.rs`, `ctxexec.rs` | Context-menu manager, current-user registration and Shell selection host, command expansion / 右键管理窗口、当前用户注册与 Shell 选择宿主、命令展开 |
 | `paint.rs`, `nativeform.rs`, `choice.rs`, `list_style.rs`, `dpi.rs`, `viewport.rs`, `accessibility.rs`, `tooltips.rs` | Shared native controls and accessibility / 共享原生控件及辅助功能 |
 | `theme*.rs`, `iplocate.rs`, `gpu_activity.rs`, `display.rs` | Themes and platform detection / 主题及平台检测 |
-| `system.rs`, `single_instance.rs`, `ipc.rs`, `pipe.rs` | System actions, instance ownership, CLI/IPC / 系统操作、单实例及通信 |
+| `appearance.rs`, `background_io.rs` | Wallpaper/pointer application and restore; bounded read-only preparation / 壁纸与指针应用、恢复，以及有等待上限的只读准备工作 |
+| `system.rs`, `single_instance.rs`, `ipc.rs` | System actions, instance ownership, CLI and named-pipe IPC / 系统操作、单实例、CLI 与命名管道通信 |
 | `selfupdate.rs` | GitHub-Releases self-update (check, verify, replace, restart) / 基于 GitHub Releases 的自更新（检查、校验、替换与重启） |
 | `crates/core/` | Config, rules, TOML document edits, locales / 配置、规则、TOML 编辑与文案 |
 | `build/windows/` | Manifest and icons / 清单及图标 |
 | `.github/workflows/` | Verification and draft releases / 验证及发布草稿 |
 
-Config writes are serialized and published only after successful saving. Drafts retain an opening baseline for conflict detection. Workers post messages to the UI thread rather than directly changing controls. Runtime task state and occurrence bookkeeping are separate from user settings.
+Config writes are serialized and published only after successful saving. Settings merge changed fields against their opening baseline, preserving unrelated live changes. Coupled schedule, wallpaper, and notification fields merge as groups. Conflicting groups require confirmation, checked again against the latest values before writing. A disk change not yet loaded still blocks saving. Rule editors retain their own conflict checks. Workers post messages to the UI thread rather than directly changing controls. Runtime task state and occurrence bookkeeping are separate from user settings.
 
-配置写入串行执行，保存成功后发布；草稿保留打开时基线以检测冲突。后台线程通过消息通知 UI，不直接修改控件。任务运行态、触发记录和用户设置分别维护。
+配置写入串行执行，保存成功后发布。设置按打开时基线合并已编辑字段，保留无关的运行态修改；相互依赖的计划、壁纸、提示按键字段按组处理。冲突组须确认，写入前再核对最新值；磁盘上尚未载入的更改仍会阻止保存。规则编辑器保留各自的冲突检测。后台线程通过消息通知 UI，不直接修改控件。任务运行态、触发记录和用户设置分别维护。
+
+New windows and controls go through `kit` or delegate to its primitives. Dependencies flow from windows to `kit` to painting/theme/choice utilities; `kit` does not read window-specific globals. Page specs own geometry and captions, while window modules own draft values. DPI scaling retains original geometry/font metrics to avoid cumulative rounding drift. Theme switching, appearance application/restoration, and repair share one worker queue; completion messages update the UI after background operations release their locks.
+
+新窗口与控件通过 `kit` 创建或委托其原语；依赖方向为窗口 → `kit` → 绘制、主题、选项控件内核，`kit` 不读取窗口级全局状态。页面规格管理布局与文案，窗口模块管理草稿值。DPI 缩放保留原始几何与字体度量，避免反复缩放累积舍入误差。主题切换、外观应用与恢复、主题修复共用后台队列，操作释放锁后通过完成消息更新 UI。
+
+Settings validation and merging live in `settings_model`, without control IDs or runtime globals. Successful transactions compute side-specific appearance changes, so unrelated saves do not reapply wallpaper or pointers. DPI utilities notify the owning window after scaling; theme operations return typed completion data to the main UI dispatcher. Configuration internals are private in production; snapshots, initialization, saves, and validated reloads go through `runtime`.
+
+设置校验与合并位于 `settings_model`，不依赖控件 ID 或运行态全局变量。成功保存后按浅/深色及壁纸/指针分别计算变化，无关保存不重新应用外观。DPI 工具缩放后通知所属窗口；主题操作返回明确的完成结果，由主消息分发层更新 UI。生产代码中的配置内部状态不可直接访问，快照、初始化、保存与校验重载统一通过 `runtime`。
+
+`background_io` bounds read-only preparation to ten seconds and stops waiting promptly on exit. Only one outstanding read is allowed, including after a timeout; a late result is discarded and may not publish config or change the system. Native mutations remain on the serial worker and are not forcibly interrupted. Exit retains the tray status until theme/Explorer recovery has completed.
+
+`background_io` 将只读准备工作的等待限制为 10 秒，退出时及时停止等待；超时后仍只允许一个未完成读取，迟到结果会丢弃，不得发布配置或修改系统。系统修改仍由串行工作线程执行，不强行中断。退出期间保留托盘状态，直到主题或 Explorer 的恢复完成。
+
+Cursor schemes combine current-user and built-in Windows entries, with current-user names taking precedence. Windows stores comma-separated paths in a different role order from the original restore snapshot; the conversion is explicit. New snapshots preserve all 17 roles. Existing 15-role snapshots retain their original values and capture the two extra roles before the first application that can change them.
+
+指针方案同时读取当前用户和 Windows 内置方案，同名时优先使用用户方案。Windows 的逗号分隔路径顺序与原有恢复快照不同，读取时明确转换。新快照保存全部 17 个角色；已有的 15 角色快照保留原值，在首次可能修改新增两个角色前补齐它们的原始状态。
 
 Explorer copying uses an STA local COM server inside the same EXE (`IExecuteCommand` / `IObjectWithSelection`); it receives the full selection and writes the clipboard once. Six fixed current-user CLSIDs serve the copy formats, with a seventh for custom rules; registration and cleanup follow the menu configuration. Folder-background commands use the direct command entry. Copy helpers query the running tray's last valid settings through `ctx:copy-settings`; an IPC failure is not permission to fall back to potentially invalid disk settings. Custom rules share the selection handler for batch execution and validate scope, filters, and expanded command length before launch.
 

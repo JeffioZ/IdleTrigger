@@ -45,6 +45,7 @@ impl Flow {
                 crate::scale_pub(h),
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
             );
+            crate::dpi::remember_rect(control, (x, y, w, h));
             self.placed.push(control);
         }
     }
@@ -57,7 +58,8 @@ impl Flow {
     /// Places a field edit inset inside its card-painted well (settings
     /// parity: x+3, y+7, w-6, h-14, floored at 20).
     pub unsafe fn place_field(&mut self, id: usize, x: i32, y: i32, w: i32, h: i32) {
-        unsafe { self.position(id, x + 3, y + 7, w - 6, (h - 14).max(20)) }
+        let (x, y, w, h) = crate::kit::controls::edit_rect((x, y, w, h));
+        unsafe { self.position(id, x, y, w, h) }
     }
 
     /// Applies deferred visibility: controls in `layout_ids` that were

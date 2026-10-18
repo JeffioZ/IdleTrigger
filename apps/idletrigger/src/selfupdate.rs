@@ -72,6 +72,9 @@ static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static COOLDOWN_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
+// A confirmed apply owns the flow through handover, including while it is
+// waiting for an in-flight check. Do not queue duplicate replacement scripts.
+static APPLY_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// An explicit (tray/settings) check is queued but its thread has not yet
 /// taken the BUSY gate; panel-show auto checks yield to it.
 static MANUAL_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -144,6 +147,7 @@ pub(crate) fn on_panel_shown() {
     if !preview
         && (!crate::cfg_map(|c| c.update_check_enabled)
             || is_busy()
+            || APPLY_REQUESTED.load(Ordering::SeqCst)
             || MANUAL_REQUESTED.load(Ordering::SeqCst))
     {
         return;
@@ -161,7 +165,7 @@ pub(crate) fn on_panel_shown() {
 /// switch and the cooldown; a "no update" outcome answers with an up-to-date
 /// dialog. The pending flag makes a panel-show auto check yield to it.
 pub(crate) fn manual_check() {
-    if is_busy() {
+    if is_busy() || APPLY_REQUESTED.load(Ordering::SeqCst) {
         return;
     }
     MANUAL_REQUESTED.store(true, Ordering::SeqCst);
@@ -182,7 +186,9 @@ pub(crate) fn manual_check_prompting() {
     // would leak into a later, unrelated check popping a stale dialog — so
     // the request is dropped instead: the download already in flight is the
     // answer.
-    if is_busy() && !matches!(&*lock(&PHASE), Phase::Checking) {
+    if APPLY_REQUESTED.load(Ordering::SeqCst)
+        || (is_busy() && !matches!(&*lock(&PHASE), Phase::Checking))
+    {
         return;
     }
     PROMPT_AFTER_CHECK.store(true, Ordering::SeqCst);
@@ -202,13 +208,15 @@ fn spawn_check(manual: bool) {
         .spawn(move || {
             crate::runtime::catch_and_log("self-update", || run_check(manual));
         });
-    if spawned.is_err() {
+    if let Err(error) = spawned {
         MANUAL_REQUESTED.store(false, Ordering::SeqCst);
-        if PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst) {
-            // The explicit-check user is waiting on a dialog answer.
-            *lock(&FEEDBACK) = Some(crate::t_pub("update_err_network"));
+        let explicit_answer = PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst);
+        if manual || explicit_answer {
+            report_error(crate::t_pub("update_err_start"));
         }
-        crate::log_line("self-update: failed to spawn the check thread");
+        crate::log_line(&format!(
+            "self-update: failed to spawn the check thread: {error}"
+        ));
     }
 }
 
@@ -216,24 +224,50 @@ fn spawn_check(manual: bool) {
 /// exit. Runs the whole tail on a worker; a confirm landing while a check
 /// round is mid-flight waits that round out (see `apply_flow`) instead of
 /// vanishing. Failures surface via `take_error`.
-pub(crate) fn begin_update() {
-    let Some(version) = pending_update_version() else {
-        return;
-    };
-    #[cfg(feature = "devtools")]
-    if crate::devtools::UPDATE_PREVIEW.load(Ordering::SeqCst) {
-        let _ = std::thread::Builder::new()
-            .name("self-update-preview".into())
-            .spawn(move || {
-                crate::runtime::catch_and_log("self-update-preview", || preview_apply(version));
-            });
+pub(crate) fn begin_update(version: String) {
+    // Use the version displayed in the confirmation, not a possibly newer
+    // offer published while its modal message loop was running.
+    if APPLY_REQUESTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    // This confirmation already answers any explicit check still finishing.
+    PROMPT_AFTER_CHECK.store(false, Ordering::SeqCst);
+    UPDATE_PROMPT_PENDING.store(false, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
         .name("self-update-apply".into())
         .spawn(move || {
-            crate::runtime::catch_and_log("self-update-apply", || apply_flow(version));
+            let mut restarting = false;
+            let panicked = crate::runtime::catch_and_log("self-update-apply", || {
+                #[cfg(feature = "devtools")]
+                if crate::devtools::UPDATE_PREVIEW.load(Ordering::SeqCst) {
+                    preview_apply(version);
+                    return;
+                }
+                restarting = apply_flow(version);
+            });
+            if panicked {
+                *lock(&PHASE) = fallback_phase();
+                report_error(crate::t_pub("update_err_interrupted"));
+            }
+            // On success keep the gate until exit; a second UI click must
+            // not start another script during the handover interval.
+            if !restarting {
+                APPLY_REQUESTED.store(false, Ordering::SeqCst);
+            }
+            notify_ui(true);
         });
+    if let Err(error) = spawned {
+        APPLY_REQUESTED.store(false, Ordering::SeqCst);
+        crate::log_line(&format!(
+            "self-update: failed to spawn the apply thread: {error}"
+        ));
+        report_error(crate::t_pub("update_err_start"));
+    }
+}
+
+fn report_error(error: String) {
+    *lock(&LAST_ERROR) = Some(error);
+    notify_ui(true);
 }
 
 /// RAII release of the update BUSY flag: whichever flow holds the slot
@@ -249,6 +283,12 @@ impl Drop for BusyGuard {
 /// Never dialogs on failure; the phase just falls back to what is known.
 /// `manual` (tray menu) additionally answers "already up to date".
 fn run_check(manual: bool) {
+    // A queued check thread may only get CPU after the user confirmed an
+    // update. It must not replace that offer or start during handover.
+    if APPLY_REQUESTED.load(Ordering::SeqCst) {
+        MANUAL_REQUESTED.store(false, Ordering::SeqCst);
+        return;
+    }
     if BUSY.swap(true, Ordering::SeqCst) {
         MANUAL_REQUESTED.store(false, Ordering::SeqCst);
         return;
@@ -266,27 +306,23 @@ fn run_check(manual: bool) {
 
     *lock(&PHASE) = Phase::Checking;
     notify_ui(true);
-    match fetch_latest() {
-        Ok(None) => {
-            *lock(&KNOWN_UPDATE) = None;
-            *lock(&PHASE) = Phase::Idle;
-            // A latched tray request gets its dialog answer even when the
-            // round itself was an auto check the click landed on.
+    let mut result = Err(crate::t_pub("update_err_interrupted"));
+    // Keep BUSY owned while recovering, so a panic cannot strand Checking
+    // or reset a newer round started by another click.
+    crate::runtime::catch_and_log("self-update-check", || result = fetch_latest());
+    match result {
+        Ok(latest) => {
+            *lock(&KNOWN_UPDATE) = latest.clone();
+            let next = offer_phase(latest);
+            let available = matches!(next, Phase::Available(_) | Phase::Ready(_));
+            *lock(&PHASE) = next;
             let explicit_answer = PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst);
-            if manual || explicit_answer {
+            if available {
+                if explicit_answer {
+                    UPDATE_PROMPT_PENDING.store(true, Ordering::SeqCst);
+                }
+            } else if manual || explicit_answer {
                 *lock(&FEEDBACK) = Some(crate::t_args("update_up_to_date", &[crate::APP_VERSION]));
-            }
-        }
-        Ok(Some(version)) => {
-            *lock(&KNOWN_UPDATE) = Some(version.clone());
-            let mut phase = lock(&PHASE);
-            if !matches!(&*phase, Phase::Ready(ready) if *ready == version) {
-                *phase = Phase::Available(version.clone());
-            }
-            drop(phase);
-            // Explicit check found a newer release: queue the confirm.
-            if PROMPT_AFTER_CHECK.swap(false, Ordering::SeqCst) {
-                UPDATE_PROMPT_PENDING.store(true, Ordering::SeqCst);
             }
         }
         Err(error) => {
@@ -307,9 +343,8 @@ fn run_check(manual: bool) {
     notify_ui(true);
 }
 
-/// Bounded patient acquisition of the BUSY gate for a confirmed apply. The
-/// only realistic competitor is one check round, whose WinHTTP timeouts sum
-/// to roughly 23 seconds; 30 seconds of polling covers it with margin.
+/// Wait up to 30 seconds for an in-flight check. Network timeouts bound
+/// individual operations, so a slow check can still exceed this wait.
 fn acquire_busy_for_apply() -> bool {
     let deadline = Instant::now() + Duration::from_secs(30);
     while BUSY.swap(true, Ordering::SeqCst) {
@@ -326,10 +361,11 @@ fn acquire_busy_for_apply() -> bool {
 /// lands while a check round is still mid-flight waits for that round; if it
 /// withdraws the offer while we waited, the apply exits without touching
 /// anything.
-fn apply_flow(version: String) {
+fn apply_flow(version: String) -> bool {
     if !acquire_busy_for_apply() {
         crate::log_line("self-update: the busy gate never freed; the confirmed update was dropped");
-        return;
+        report_error(crate::t_pub("update_err_busy"));
+        return false;
     }
     let _reset = BusyGuard;
 
@@ -341,7 +377,8 @@ fn apply_flow(version: String) {
             crate::log_line(&format!(
                 "self-update: {version} is no longer offered; the confirmed apply was skipped"
             ));
-            return;
+            report_error(crate::t_pub("update_err_version_mismatch"));
+            return false;
         }
     }
 
@@ -356,19 +393,20 @@ fn apply_flow(version: String) {
             download_staged(&meta, &version)?;
         }
         // Re-verifies the staged file before writing the replace script.
-        apply_ready_update()
+        apply_ready_update(&version)
     })();
     match outcome {
         Ok(()) => {
             EXIT_REQUESTED.store(true, Ordering::SeqCst);
+            true
         }
         Err(error) => {
             crate::log_line(&format!("self-update: applying {version} failed: {error}"));
             *lock(&LAST_ERROR) = Some(error);
             *lock(&PHASE) = fallback_phase();
+            false
         }
     }
-    notify_ui(true);
 }
 
 // ---- Devtools update preview (feature-gated; no network, no replace) ------
@@ -416,28 +454,39 @@ fn preview_apply(version: String) {
     *lock(&FEEDBACK) = Some(crate::t_pub("update_preview_feedback"));
     notify_ui(true);
 }
-/// The phase a failed round falls back to: a verified staged update stays
-/// ready (offline install), else the known newer version, else idle.
-fn fallback_phase() -> Phase {
-    if let Some((version, _)) = verified_ready() {
+/// A verified staged update remains usable without another download. A
+/// strictly newer remote offer takes precedence over that cached package.
+fn offer_phase(latest: Option<String>) -> Phase {
+    if let Some((version, _)) = verified_ready()
+        && latest
+            .as_ref()
+            .is_none_or(|latest| compare_versions(&version, latest) != std::cmp::Ordering::Less)
+    {
         return Phase::Ready(version);
     }
-    match &*lock(&KNOWN_UPDATE) {
-        Some(version) => Phase::Available(version.clone()),
-        None => Phase::Idle,
-    }
+    latest.map_or(Phase::Idle, Phase::Available)
+}
+
+fn fallback_phase() -> Phase {
+    let latest = lock(&KNOWN_UPDATE).clone();
+    offer_phase(latest)
 }
 
 fn stamp_cooldown() {
     *lock(&COOLDOWN_UNTIL) = Some(Instant::now() + CHECK_COOLDOWN);
 }
 
-/// A staged update that verifies against its recorded SHA-256 and differs
-/// from the running build (shared by the failure fallback and the startup
-/// restore).
+fn is_newer_stable(version: &str) -> bool {
+    parse_semver(version.trim_start_matches('v')).is_some()
+        && !is_prerelease_tag(version)
+        && compare_versions(version, crate::APP_VERSION) == std::cmp::Ordering::Greater
+}
+
+/// A staged update must still be newer than the running build. A manually
+/// upgraded EXE must not offer a leftover older package as an update.
 fn verified_ready() -> Option<(String, String)> {
     let (version, sha256) = ready_state()?;
-    if version == crate::APP_VERSION || verify_staged(&staged_path(), &sha256).is_err() {
+    if !is_newer_stable(&version) || verify_staged(&staged_path(), &sha256).is_err() {
         return None;
     }
     Some((version, sha256))
@@ -755,16 +804,14 @@ fn is_prerelease_tag(tag: &str) -> bool {
     main.contains('-')
 }
 
-/// First stable tag in atom order (newest release first); prerelease tags
-/// are skipped so an unswitched rc never reports "update available", and
-/// tags that do not parse as semver are skipped too — a stray non-release
-/// tag ("nightly", "demo") must never pose as an update, since
-/// compare_versions would degrade to a string comparison that can rank it
-/// above the running version.
+/// Highest stable version in the feed. Publishing a maintenance release for
+/// an older branch later must not hide a newer stable release. Ignore
+/// prereleases and non-version tags before comparing candidates.
 fn latest_stable_tag(tags: &[String]) -> Option<String> {
     tags.iter()
         .map(|tag| tag.trim_start_matches('v').to_string())
-        .find(|tag| !is_prerelease_tag(tag) && parse_semver(tag).is_some())
+        .filter(|tag| !is_prerelease_tag(tag) && parse_semver(tag).is_some())
+        .max_by(|a, b| compare_versions(a, b))
 }
 
 /// Parses the tag list from a GitHub releases.atom page (newest first). Tags
@@ -869,6 +916,9 @@ fn write_ready(version: &str, sha256: &str) -> Result<(), String> {
 /// and applying.
 fn verify_staged(path: &Path, expected_sha256: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|_| crate::t_pub("update_err_no_ready"))?;
+    if meta.len() > MAX_EXE_BYTES {
+        return Err(crate::t_pub("update_err_oversize"));
+    }
     if meta.len() < MIN_EXE_BYTES {
         return Err(crate::t_pub("update_err_too_small"));
     }
@@ -932,10 +982,13 @@ fn download_staged(meta: &ReleaseMeta, version: &str) -> Result<(), String> {
 /// Applies the staged update: re-verifies, probes the install folder for
 /// writability, writes the replacement script and starts it detached. The
 /// caller then exits the process; the script replaces the EXE and restarts.
-fn apply_ready_update() -> Result<(), String> {
+fn apply_ready_update(expected_version: &str) -> Result<(), String> {
     let Some((version, sha256)) = ready_state() else {
         return Err(crate::t_pub("update_err_no_ready"));
     };
+    if version != expected_version || !is_newer_stable(&version) {
+        return Err(crate::t_pub("update_err_version_mismatch"));
+    }
     let dir = update_dir();
     let staged = dir.join(ASSET_NAME);
     // Second verification right before the swap covers "file replaced after
@@ -945,8 +998,16 @@ fn apply_ready_update() -> Result<(), String> {
     // A restricted folder (Program Files) would doom the script after the
     // process is gone; bail out while the app is still alive instead.
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let probe = exe.with_file_name(".idletrigger-update-probe");
-    if let Err(error) = std::fs::write(&probe, b"").and_then(|_| std::fs::remove_file(&probe)) {
+    let probe = exe.with_file_name(format!(".idletrigger-update-probe-{}", std::process::id()));
+    if let Err(error) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|file| {
+            drop(file);
+            std::fs::remove_file(&probe)
+        })
+    {
         crate::log_line(&format!(
             "self-update: install folder not writable: {error}"
         ));
@@ -1005,8 +1066,8 @@ fn apply_ready_update() -> Result<(), String> {
 
 /// Stages the new EXE beside the running one and atomically replaces via
 /// `File.Replace`, re-verifying the digest inside the script before the swap.
-/// `File.Replace` fails while the running EXE locks the target, hence the
-/// bounded retry loop instead of an unconditional rename. Every failure path
+/// Wait for the old process's system-operation cleanup before replacement.
+/// A bounded retry loop handles remaining file locks. Every failure path
 /// relaunches the executable at `$dst` (rolled back or intact) — the old
 /// process already exited on the script's behalf, so a failed round must not
 /// leave the machine without a running app; the sole exception is an updated
@@ -1015,7 +1076,6 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
     let ps_quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
     format!(
         "$ErrorActionPreference = 'Stop'\n\
-         Start-Sleep -Seconds 2\n\
          $src = '{}'\n\
          $dst = '{}'\n\
          $new = $dst + '.new'\n\
@@ -1025,6 +1085,8 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
          $process = $null\n\
          $marker = Join-Path (Split-Path -Parent $src) '{PENDING_APPLY_MARKER}'\n\
          try {{\n\
+           $previous = Get-Process -Id {} -ErrorAction SilentlyContinue\n\
+           if ($null -ne $previous) {{ $previous.WaitForExit(); $previous.Dispose() }}\n\
            if ((-not (Test-Path -LiteralPath $dst)) -and (Test-Path -LiteralPath $old)) {{ Move-Item -LiteralPath $old -Destination $dst -Force }}\n\
            Copy-Item -LiteralPath $src -Destination $new -Force\n\
            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $new).Hash.ToLowerInvariant()\n\
@@ -1063,6 +1125,7 @@ fn replace_script(source: &Path, destination: &Path, expected_sha256: &str) -> S
         ps_quote(source),
         ps_quote(destination),
         expected_sha256.to_ascii_lowercase(),
+        std::process::id(),
     )
 }
 
@@ -1644,10 +1707,11 @@ mod tests {
     }
 
     #[test]
-    fn latest_stable_tag_skips_prereleases_and_takes_first_stable() {
+    fn latest_stable_tag_skips_prereleases_and_takes_highest_stable() {
         let tags = vec![
             "v2.0.0-rc.1".to_string(),
             "v1.9.1-dev.3".to_string(),
+            "v1.8.1".to_string(), // A later maintenance release on the old branch.
             "v1.9.0".to_string(),
             "v1.8.0-beta.2".to_string(),
         ];

@@ -144,6 +144,7 @@ pub fn create_rows(
             Some(WPARAM(font.0 as usize)),
             Some(LPARAM(1)),
         );
+        crate::dpi::remember_rect(hwnd, b);
         crate::nativeform::track(hwnd);
         set_rows(hwnd, rows);
         hwnd

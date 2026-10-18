@@ -1,12 +1,15 @@
 //! Registry of live form windows: the lookup source for cross-window UI
 //! mechanics (tray focus routing, theme refresh, text-scale cascades).
-//! Entries self-heal: lookups prune HWNDs that have been destroyed, so no
-//! destroy hooks are required. Top-level form windows only — child panes
+//! Entries are removed at native window destruction, before Windows can
+//! reuse the HWND. Top-level form windows only — child panes
 //! (the automation editor) and the panel/popups stay with their owning
 //! modules.
 
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{IsWindow, WM_NCDESTROY};
+
+const SUBCLASS: usize = 0x49545247;
 
 /// Identity of one form window kind, mirroring the window classes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,12 +33,32 @@ fn lock() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 
 /// Records a live form window (called by FormWindow::finish).
 pub fn register(kind: Kind, hwnd: HWND) {
+    if !unsafe { SetWindowSubclass(hwnd, Some(window_proc), SUBCLASS, 0) }.as_bool() {
+        return;
+    }
     let mut registry = lock();
     registry.retain(|entry| entry.hwnd != hwnd.0 as isize);
     registry.push(Entry {
         kind,
         hwnd: hwnd.0 as isize,
     });
+}
+
+unsafe extern "system" fn window_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _data: usize,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_NCDESTROY {
+            lock().retain(|entry| entry.hwnd != hwnd.0 as isize);
+            let _ = RemoveWindowSubclass(hwnd, Some(window_proc), id);
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
 }
 
 /// Drops entries whose HWNDs no longer exist; returns the live list.

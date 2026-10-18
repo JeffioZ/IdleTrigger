@@ -14,11 +14,10 @@ use windows::core::PCWSTR;
 
 use crate::kit::fonts;
 
-/// Standard field row height: the edit inset math below assumes it.
-pub const FIELD_H: i32 = 34;
-
-/// EM_SETMARGINS raw message id (windows-rs does not export it).
-pub(crate) const EM_SETMARGINS_RAW: u32 = 0x00D3;
+/// The native EDIT occupies the text area inside the card-painted well.
+pub fn edit_rect((x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    (x + 3, y + 7, w - 6, (h - 14).max(20))
+}
 
 unsafe fn child(
     parent: HWND,
@@ -54,6 +53,7 @@ unsafe fn child(
                 Some(WPARAM(font.0 as usize)),
                 Some(LPARAM(1)),
             );
+            crate::dpi::remember_rect(hwnd, b);
         }
         hwnd
     }
@@ -163,10 +163,7 @@ pub unsafe fn checkbox(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32
         );
         crate::nativeform::track(hwnd);
         // Toggle rows hover on the pill column alone (panel parity).
-        crate::nativeform::set_hover_column(
-            hwnd,
-            crate::scale_pub(crate::kit::layout::SWITCH_HIT_W),
-        );
+        crate::nativeform::set_hover_column(hwnd, crate::kit::layout::SWITCH_HIT_W);
     }
 }
 
@@ -193,7 +190,6 @@ pub unsafe fn link(parent: HWND, id: i32, text: &str, b: (i32, i32, i32, i32)) {
 /// (Go editWithStyle + ControlSurface parity).
 pub unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool) -> HWND {
     unsafe {
-        let (x, y, w, _) = b;
         // The edit is the inner area; the surrounding well/ring paints on
         // the hosting card's face (see the CARD arm in the draw dispatch),
         // so the field is card pixels + one inset child - no stacking, no
@@ -206,7 +202,7 @@ pub unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | extra),
             id,
             fonts::body(),
-            (x + 3, y + 7, w - 6, FIELD_H - 14),
+            edit_rect(b),
         );
         // Cap input length: 5 digits for numbers, 5 chars for HH:MM.
         let _ = SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(5)), Some(LPARAM(0)));
@@ -217,12 +213,11 @@ pub unsafe fn edit(parent: HWND, id: i32, b: (i32, i32, i32, i32), numeric: bool
 /// Go choice control: an owner-drawn button with a custom drop-down popup
 /// (nativeform choicepopup parity).
 pub fn combo(parent: HWND, id: i32, b: (i32, i32, i32, i32), items: &[String]) {
-    let (x, y, w, _) = b;
     let pairs: Vec<(String, String)> = items
         .iter()
         .map(|label| (label.clone(), label.clone()))
         .collect();
-    crate::choice::create(parent, id, (x, y, w, FIELD_H), &pairs, fonts::body());
+    crate::choice::create(parent, id, b, &pairs, fonts::body());
 }
 
 /// Choice creation from full row items (headers allowed).
@@ -232,8 +227,7 @@ pub fn combo_items(
     b: (i32, i32, i32, i32),
     rows: &[crate::choice::ChoiceItem],
 ) {
-    let (x, y, w, _) = b;
-    crate::choice::create_rows(parent, id, (x, y, w, FIELD_H), rows, fonts::body());
+    crate::choice::create_rows(parent, id, b, rows, fonts::body());
 }
 
 /// Physical text width converted back to logical pixels (Go
@@ -406,13 +400,7 @@ pub unsafe fn hidden_edit(parent: HWND, id: usize, numeric: bool) -> HWND {
             fonts::body(),
             (1, 1),
         );
-        let margin = crate::scale_pub(6) as usize;
-        let _ = SendMessageW(
-            edit,
-            EM_SETMARGINS_RAW,
-            Some(WPARAM(3)),
-            Some(LPARAM((margin | (margin << 16)) as isize)),
-        );
+        crate::dpi::set_edit_margins(edit, 6);
         edit
     }
 }

@@ -74,7 +74,7 @@ theme_light_time = "07:00"
 theme_dark_time = "19:00"
 # 通过 https://ipwho.is/ 估算公网 IP 所在城市；成功结果仅内存缓存 24 小时，失败 30 分钟后重试；关闭或失败时按时区、UTC 偏移和默认位置依次回退 / Estimate the public IP city through https://ipwho.is/; successful results are cached in memory for 24 hours and failures retry after 30 minutes; falls back to timezone, UTC offset, then default location when off or unavailable
 theme_ip_location_enabled = false
-# 电池供电时自动切换深色，接入电源后按当前计划恢复 / Switch to dark on battery, then restore by schedule on AC power
+# 电池供电时自动切换深色；手动选择保持到下个计划时间，推迟仅暂停时间计划 / Switch to dark on battery; a manual choice holds until the next schedule boundary, while snooze pauses only the time schedule
 theme_dark_on_battery = true
 # 检测到全屏应用、演示模式或前台游戏活动时暂不自动切换主题 / Pause automatic theme switching during fullscreen apps, presentations, or foreground game activity
 theme_skip_fullscreen = true

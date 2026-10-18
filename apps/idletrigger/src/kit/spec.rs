@@ -1,10 +1,9 @@
 //! Declarative control specs: a window describes a page as data, and
 //! `apply` either creates each control (first run) or relabels the
-//! existing HWND by control id (language refresh). Geometry is explicit
-//! logical rects and creation is its single authority — apply never
-//! repositions, which keeps reused windows pixel-identical across DPI
-//! ratio rescales (reflow-on-apply lands with the first window that
-//! needs it). Value state (checkbox stores, edit contents, combo
+//! existing HWND by control id (language refresh). Geometry uses logical
+//! rects: `apply` keeps positions, while `apply_relayout` updates controls
+//! whose layout depends on language and refreshes their DPI baselines.
+//! Value state (checkbox stores, edit contents, combo
 //! selections) is never touched: captions and items only, with combo
 //! selections restored by index, mirroring the hand-rolled refresh paths
 //! this replaces.
@@ -363,8 +362,12 @@ pub unsafe fn apply_relayout(parent: HWND, specs: &[ControlSpec]) {
                 create(parent, spec, &text);
                 continue;
             }
-            if rect_changed(parent, existing, spec.rect) {
-                let (x, y, w, h) = spec.rect;
+            let rect = match spec.kind {
+                ControlKind::Edit { .. } => controls::edit_rect(spec.rect),
+                _ => spec.rect,
+            };
+            if rect_changed(parent, existing, rect) {
+                let (x, y, w, h) = rect;
                 let _ = SetWindowPos(
                     existing,
                     None,
@@ -375,6 +378,7 @@ pub unsafe fn apply_relayout(parent: HWND, specs: &[ControlSpec]) {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
+            crate::dpi::remember_rect(existing, rect);
         }
         apply(parent, specs);
     }

@@ -219,6 +219,7 @@ pub fn load(path: &Path) -> Loaded {
             Err(err) => Loaded {
                 source_text: Some(text),
                 load_error: Some(format!("parse error: {err}")),
+                created_from_template: false,
                 ..base
             },
         },

@@ -2,7 +2,7 @@
 //! right, and a footer with inline validation, Save, and Cancel.
 //! Layout uses logical coordinates and adapts to DPI and text scaling.
 
-use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU64, Ordering};
 
 // Edit interior brushes (surface / disabled surface), live for the process.
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -14,13 +14,13 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
 use crate::kit::controls::{label, push_button, tab_button};
+use crate::settings_model::{Draft, draft_config, merge_settings};
 use crate::settings_pages::*;
 use crate::{t_pub, theme};
 
-/// Each cursor dropdown's selection right before it opens. The Install
-/// footer row overwrites the control value while the picker runs, so the
-/// pre-open selection is restored once the installer flow finishes.
-static CURSOR_PREVIOUS: std::sync::LazyLock<
+/// Appearance selection before opening an action footer (Browse/Install).
+/// Cancelled actions must restore that value instead of saving "no change".
+static APPEARANCE_PREVIOUS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<i32, String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -73,16 +73,20 @@ fn checks() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<i
 }
 
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
+static RESTORE_REQUEST: AtomicU64 = AtomicU64::new(0);
 static CLASSIC_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CLASSIC_RESULT: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex::new(None);
 static CLASSIC_WORKER: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
     std::sync::Mutex::new(None);
 
 pub(crate) fn finish_classic_restart() {
-    if let Some(worker) = crate::runtime::lock(&CLASSIC_WORKER).take() {
-        let _ = worker.join();
+    let worker = crate::runtime::lock(&CLASSIC_WORKER).take();
+    if let Some(worker) = worker {
+        crate::finish_worker_on_ui_thread(worker);
     }
-    refresh_classic_restart();
+    if let Some(Err(error)) = crate::runtime::lock(&CLASSIC_RESULT).take() {
+        crate::log_line(&format!("Explorer restart failed during exit: {error}"));
+    }
 }
 
 pub(crate) fn refresh_classic_restart() {
@@ -632,9 +636,10 @@ fn remove_wallpaper(hwnd: HWND, path: &str) {
 
 /// Reloads both cursor dropdowns, keeping current selections by value.
 fn refresh_cursor_choices(hwnd: HWND) {
-    let rows = cursor_choice_rows();
-    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &rows);
-    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &rows);
+    for id in [ID_LIGHT_CURSOR, ID_DARK_CURSOR] {
+        let current = crate::choice::value(get(hwnd, id));
+        refresh_choice_rows(hwnd, id, &cursor_pick_items(&current));
+    }
 }
 
 /// Reloads both wallpaper dropdowns from the recent list.
@@ -650,8 +655,17 @@ fn refresh_wallpaper_choices(hwnd: HWND) {
 /// the file, and select it on that side.
 fn browse_wallpaper_for_side(hwnd: HWND, id: i32) {
     let Some(path) = browse_wallpaper_file(hwnd) else {
-        // Keep the previous selection when the dialog is cancelled.
-        refresh_wallpaper_choices(hwnd);
+        let previous = crate::runtime::lock(&APPEARANCE_PREVIOUS)
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let rows = wallpaper_pick_items(&previous);
+        let index = rows
+            .iter()
+            .position(|row| row.value == previous)
+            .unwrap_or(0);
+        crate::choice::set_rows(get(hwnd, id), &rows);
+        crate::choice::select_index(get(hwnd, id), index as i32);
         return;
     };
     remember_wallpaper(&path);
@@ -733,18 +747,18 @@ fn install_cursor_inf(owner: HWND) {
 /// so a freshly installed scheme shows up when the dropdown next opens (its
 /// rows refresh right before the popup appears).
 fn run_cursor_install(hwnd: HWND, id: i32) {
-    let previous = crate::runtime::lock(&CURSOR_PREVIOUS)
+    let previous = crate::runtime::lock(&APPEARANCE_PREVIOUS)
         .get(&id)
         .cloned()
         .unwrap_or_default();
     install_cursor_inf(hwnd);
-    let rows = cursor_choice_rows();
-    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &rows);
-    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &rows);
+    refresh_cursor_choices(hwnd);
+    let rows = cursor_pick_items(&previous);
     let index = rows
         .iter()
         .position(|r| !r.header && r.value == previous)
         .map_or(0, |i| i as i32);
+    crate::choice::set_rows(get(hwnd, id), &rows);
     crate::choice::select_index(get(hwnd, id), index);
 }
 
@@ -887,32 +901,25 @@ fn populate(hwnd: HWND) {
         (ID_LIGHT_WALL, &light_wallpaper),
         (ID_DARK_WALL, &dark_wallpaper),
     ] {
-        // Rows carry the path as the value; missing files fall back to
-        // no-change (the file may be on an unplugged drive).
-        let index = wallpaper_pick_items(path)
+        let rows = wallpaper_pick_items(path);
+        let index = rows
             .iter()
-            .position(|r| r.value == *path && std::path::Path::new(path).is_file())
+            .position(|r| r.value == *path)
             .map(|i| i as i32)
             .unwrap_or(0);
+        crate::choice::set_rows(get(hwnd, id), &rows);
         crate::choice::select_index(get(hwnd, id), index);
     }
-    // Cursor dropdowns: rows carry the scheme name as the value ("" = no
-    // linkage); a scheme that no longer exists falls back to no linkage.
-    let cursor_rows = cursor_choice_rows();
-    refresh_choice_rows(hwnd, ID_LIGHT_CURSOR, &cursor_rows);
-    refresh_choice_rows(hwnd, ID_DARK_CURSOR, &cursor_rows);
     for (id, scheme) in [
         (ID_LIGHT_CURSOR, &light_cursor),
         (ID_DARK_CURSOR, &dark_cursor),
     ] {
-        let index = if scheme.trim().is_empty() {
-            0
-        } else {
-            cursor_rows
-                .iter()
-                .position(|r| r.value.eq_ignore_ascii_case(scheme.trim()))
-                .map_or(0, |i| i as i32)
-        };
+        let rows = cursor_pick_items(scheme);
+        let index = rows
+            .iter()
+            .position(|r| r.value == *scheme)
+            .map_or(0, |i| i as i32);
+        crate::choice::set_rows(get(hwnd, id), &rows);
         crate::choice::select_index(get(hwnd, id), index);
     }
 
@@ -1245,8 +1252,10 @@ fn apply_dependent_states(hwnd: HWND) {
         if page == 2 {
             // The pre-change restore needs a captured snapshot; the muted
             // caption under it explains when one appears.
-            let snapshot = crate::theme_engine::has_restore_snapshot();
-            let _ = EnableWindow(get(hwnd, ID_RESTORE_PREV), snapshot);
+            let snapshot = crate::appearance::has_restore_snapshot();
+            let busy = crate::theme_engine::restore_running();
+            let _ = EnableWindow(get(hwnd, ID_RESTORE_PREV), snapshot && !busy);
+            let _ = EnableWindow(get(hwnd, ID_RESTORE_DEFAULT), !busy);
             show(ID_RESTORE_HINT, !snapshot);
         }
         if page == 1 {
@@ -1292,38 +1301,6 @@ fn apply_dependent_states(hwnd: HWND) {
 }
 
 // ---- Draft collection, validation, save, cancel --------------------------
-
-struct Draft {
-    keep_screen: bool,
-    battery_allowed: bool,
-    pause_on_lock: bool,
-    battery_threshold: Option<i32>,
-    idle_timeout: Option<i32>,
-    warning: Option<i32>,
-    idle_action_idx: usize,
-    idle_enhanced: bool,
-    theme_mode_idx: usize,
-    light_time: String,
-    dark_time: String,
-    location_idx: usize,
-    theme_battery: bool,
-    theme_fullscreen: bool,
-    light_wallpaper: String,
-    dark_wallpaper: String,
-    wallpapers: Vec<String>,
-    light_cursor: String,
-    dark_cursor: String,
-    language_idx: usize,
-    lock_keys: bool,
-    caps: bool,
-    num: bool,
-    scroll: bool,
-    lock_fullscreen: bool,
-    hotkeys: bool,
-    autostart: bool,
-    logging: bool,
-    update_auto: bool,
-}
 
 fn collect_draft(hwnd: HWND) -> Draft {
     let battery_text = control_text(hwnd, ID_BATTERY_THRESH);
@@ -1393,175 +1370,26 @@ fn collect_draft(hwnd: HWND) -> Draft {
     }
 }
 
-/// Go parseSettingsDraft validation order. Returns (page, control, message).
 fn validate_draft(draft: &Draft) -> Option<(i32, i32, &'static str)> {
-    if draft.lock_keys && !(draft.caps || draft.num || draft.scroll) {
-        return Some((3, ID_LOCK_CAPS, "settings_error_notification_keys"));
-    }
-    match draft.battery_threshold {
-        Some(v) if (0..=100).contains(&v) => {}
-        _ => return Some((0, ID_BATTERY_THRESH, "settings_error_battery_threshold")),
-    }
-    match draft.idle_timeout {
-        Some(v) if (1..=idletrigger_core::automation::MAX_IDLE_MINUTES).contains(&v) => {}
-        _ => return Some((0, ID_IDLE_TIMEOUT, "settings_error_idle_timeout")),
-    }
-    match draft.warning {
-        Some(v) if (idletrigger_core::automation::MIN_WARNING_SECONDS..=3600).contains(&v) => {}
-        _ => return Some((0, ID_WARNING_SECONDS, "settings_error_warning_seconds")),
-    }
-    // The fixed-schedule times are hidden and unused in sunrise mode;
-    // validating them would report against invisible fields. Leftover junk
-    // values only persist until the user switches back to fixed mode (which
-    // validates again) or the next full config load (which sanitizes).
-    if draft.theme_mode_idx != 1 {
-        if !valid_time(&draft.light_time) {
-            return Some((1, ID_LIGHT_TIME, "settings_error_light_time"));
-        }
-        if !valid_time(&draft.dark_time) {
-            return Some((1, ID_DARK_TIME, "settings_error_dark_time"));
-        }
-        // Equal boundaries make the light window empty — the schedule would
-        // read as dark all day while the configuration still looks valid.
-        if draft.light_time == draft.dark_time {
-            return Some((1, ID_DARK_TIME, "settings_error_same_time"));
-        }
-    }
-    None
+    use crate::settings_model::ValidationField;
+    crate::settings_model::validate_draft(draft).map(|(field, key)| {
+        let (page, id) = match field {
+            ValidationField::NotificationKeys => (3, ID_LOCK_CAPS),
+            ValidationField::BatteryThreshold => (0, ID_BATTERY_THRESH),
+            ValidationField::IdleTimeout => (0, ID_IDLE_TIMEOUT),
+            ValidationField::Warning => (0, ID_WARNING_SECONDS),
+            ValidationField::LightTime => (1, ID_LIGHT_TIME),
+            ValidationField::DarkTime => (1, ID_DARK_TIME),
+        };
+        (page, id, key)
+    })
 }
 
-fn valid_time(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 5 || bytes[2] != b':' {
-        return false;
-    }
-    if !bytes[..2].iter().all(u8::is_ascii_digit) || !bytes[3..].iter().all(u8::is_ascii_digit) {
-        return false;
-    }
-    let hour: u32 = value[..2].parse().unwrap_or(99);
-    let minute: u32 = value[3..].parse().unwrap_or(99);
-    hour < 24 && minute < 60
-}
-
-/// Whether the open draft differs from the live config (Go cancel() check).
 fn draft_differs(draft: &Draft) -> bool {
     let base = crate::runtime::lock(&DRAFT_BASE)
         .clone()
         .unwrap_or_else(|| crate::cfg_map(Clone::clone));
-
-    let (
-        cfg_keep,
-        cfg_batt,
-        cfg_pause_lock,
-        cfg_thresh,
-        cfg_timeout,
-        cfg_action,
-        cfg_warning,
-        cfg_enhanced,
-    ) = {
-        let c = &base;
-        (
-            c.keep_screen_on,
-            c.nosleep_on_battery,
-            c.nosleep_pause_on_lock,
-            c.nosleep_battery_threshold,
-            c.idle_timeout_minutes,
-            c.idle_action.clone(),
-            c.idle_warning_seconds,
-            c.idle_enhanced_monitor,
-        )
-    };
-    let (
-        cfg_mode,
-        cfg_light,
-        cfg_dark,
-        cfg_ip,
-        cfg_batt_dark,
-        cfg_fullscreen,
-        cfg_light_wall,
-        cfg_dark_wall,
-        cfg_light_cursor,
-        cfg_dark_cursor,
-        cfg_lang,
-    ) = {
-        let c = &base;
-        (
-            c.theme_mode.clone(),
-            c.theme_light_time.clone(),
-            c.theme_dark_time.clone(),
-            c.theme_ip_location_enabled,
-            c.theme_dark_on_battery,
-            c.theme_skip_fullscreen,
-            c.theme_light_wallpaper.clone(),
-            c.theme_dark_wallpaper.clone(),
-            c.theme_light_cursor_scheme.clone(),
-            c.theme_dark_cursor_scheme.clone(),
-            c.language.clone(),
-        )
-    };
-    let (cfg_lock, cfg_caps, cfg_num, cfg_scroll, cfg_lock_full, cfg_hotkeys, cfg_logging) = {
-        let c = &base;
-        (
-            c.lock_keys_enabled,
-            c.lock_keys_caps_enabled,
-            c.lock_keys_num_enabled,
-            c.lock_keys_scroll_enabled,
-            c.lock_keys_skip_fullscreen,
-            c.hotkeys_enabled,
-            c.logging_enabled,
-        )
-    };
-
-    let action_idx = IDLE_ACTIONS
-        .iter()
-        .position(|a| *a == cfg_action)
-        .unwrap_or(0);
-    let mode_idx = if cfg_mode == "sunrise" { 1 } else { 0 };
-    let lang_idx = match cfg_lang.as_str() {
-        "en" => 1,
-        "zh-CN" => 2,
-        _ => 0,
-    };
-
-    draft.keep_screen != cfg_keep
-        || draft.battery_allowed != cfg_batt
-        || draft.pause_on_lock != cfg_pause_lock
-        || draft.battery_threshold != Some(cfg_thresh)
-        || draft.idle_timeout != Some(cfg_timeout)
-        || draft.idle_action_idx != action_idx
-        || draft.warning != Some(cfg_warning)
-        || draft.idle_enhanced != cfg_enhanced
-        || draft.theme_mode_idx != mode_idx
-        || draft.light_time != cfg_light
-        || draft.dark_time != cfg_dark
-        || draft.location_idx != cfg_ip as usize
-        || draft.theme_battery != cfg_batt_dark
-        || draft.theme_fullscreen != cfg_fullscreen
-        || draft.light_wallpaper != cfg_light_wall
-        || draft.dark_wallpaper != cfg_dark_wall
-        || draft.wallpapers != base.theme_wallpapers
-        || draft.light_cursor != cfg_light_cursor
-        || draft.dark_cursor != cfg_dark_cursor
-        || draft.language_idx != lang_idx
-        || draft.lock_keys != cfg_lock
-        || draft.caps != cfg_caps
-        || draft.num != cfg_num
-        || draft.scroll != cfg_scroll
-        || draft.lock_fullscreen != cfg_lock_full
-        || draft.hotkeys != cfg_hotkeys
-        || draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst)
-        || draft.logging != cfg_logging
-        || draft.update_auto != base.update_check_enabled
-}
-
-/// Draft-vs-live comparison key that ignores the restore snapshot fields:
-/// only the background appearance switch fills them, never a draft.
-fn without_restore_snapshot(
-    mut config: idletrigger_core::config::Config,
-) -> idletrigger_core::config::Config {
-    config.theme_restore_wallpaper.clear();
-    config.theme_restore_cursor.clear();
-    config
+    crate::settings_model::draft_differs(draft, &base, AUTOSTART_BASE.load(Ordering::SeqCst))
 }
 
 fn save() {
@@ -1581,91 +1409,84 @@ fn save() {
             return;
         }
 
-        let autostart_was = crate::system::autostart_is_enabled();
-        let base = crate::runtime::lock(&DRAFT_BASE).clone();
-        if let Err(err) = crate::commit_config(|c, _| {
-            // The background day/night switch may capture the restore
-            // snapshot while this dialog is open, and a draft never edits
-            // those two fields — they must not read as an external
-            // conflict, or the dialog stays unsaveable until reopened.
-            if Some(without_restore_snapshot(c.clone()))
-                != base.as_ref().map(|b| without_restore_snapshot(b.clone()))
-            {
-                return Err(t_pub("settings_save_conflict"));
-            }
-            c.keep_screen_on = draft.keep_screen;
-            c.nosleep_on_battery = draft.battery_allowed;
-            c.nosleep_pause_on_lock = draft.pause_on_lock;
-            c.nosleep_battery_threshold = draft.battery_threshold.unwrap_or(0);
-            c.idle_timeout_minutes = draft.idle_timeout.unwrap_or(30);
-            c.idle_action = IDLE_ACTIONS[draft.idle_action_idx].to_string();
-            c.idle_warning_seconds = draft.warning.unwrap_or(30);
-            c.idle_enhanced_monitor = draft.idle_enhanced;
-            c.theme_mode = if draft.theme_mode_idx == 1 {
-                "sunrise"
-            } else {
-                "fixed"
-            }
-            .to_string();
-            c.theme_light_time = draft.light_time.clone();
-            c.theme_dark_time = draft.dark_time.clone();
-            c.theme_ip_location_enabled = draft.location_idx == 1;
-            c.theme_dark_on_battery = draft.theme_battery;
-            c.theme_skip_fullscreen = draft.theme_fullscreen;
-            c.theme_light_wallpaper = draft.light_wallpaper.clone();
-            c.theme_dark_wallpaper = draft.dark_wallpaper.clone();
-            c.theme_wallpapers = draft.wallpapers.clone();
-            c.theme_light_cursor_scheme = draft.light_cursor.clone();
-            c.theme_dark_cursor_scheme = draft.dark_cursor.clone();
-            c.language = LANG_VALUES[draft.language_idx].to_string();
-            c.lock_keys_enabled = draft.lock_keys;
-            c.lock_keys_caps_enabled = draft.caps;
-            c.lock_keys_num_enabled = draft.num;
-            c.lock_keys_scroll_enabled = draft.scroll;
-            c.lock_keys_skip_fullscreen = draft.lock_fullscreen;
-            c.hotkeys_enabled = draft.hotkeys;
-            c.logging_enabled = draft.logging;
-            c.update_check_enabled = draft.update_auto;
-            Ok(())
-        }) {
-            set_validation(hwnd, &err, true);
+        let autostart_edited = draft.autostart != AUTOSTART_BASE.load(Ordering::SeqCst);
+        let Some(base) = crate::runtime::lock(&DRAFT_BASE).clone() else {
             return;
+        };
+        let edited = draft_config(&draft, &base);
+        let mut approved = None;
+        let mut changes = crate::settings_model::Changes::default();
+        loop {
+            let mut conflict = None;
+            let result = crate::commit_config(|c, _| {
+                let current = c.clone();
+                let labels = merge_settings(&base, &edited, c, approved.as_ref());
+                if !labels.is_empty() {
+                    conflict = Some((current, labels));
+                    return Err(t_pub("settings_draft_retained"));
+                }
+                changes = crate::settings_model::Changes::between(&current, c);
+                Ok(())
+            });
+            let Err(err) = result else {
+                break;
+            };
+            set_validation(hwnd, &err, true);
+            let Some((current, labels)) = conflict else {
+                return;
+            };
+            let labels = labels
+                .into_iter()
+                .map(t_pub)
+                .collect::<Vec<_>>()
+                .join("\n• ");
+            // The transaction has ended before entering the message loop.
+            // No configuration lock is held while the user decides.
+            if MessageBoxW(
+                Some(hwnd),
+                PCWSTR(wide(&crate::t_args("settings_conflict_confirm", &[&labels])).as_ptr()),
+                PCWSTR(wide(&t_pub("settings_title")).as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            ) != IDYES
+            {
+                return;
+            }
+            approved = Some(current);
         }
-        *crate::runtime::lock(&DRAFT_BASE) = Some(crate::cfg_map(Clone::clone));
         let mut failures = Vec::new();
         crate::log_line("settings changed");
-        // Appearance settings take effect for the current side right away:
-        // configuring them shows the result, no switch needed.
-        crate::theme_engine::apply_current_side();
+        // Apply only effects introduced by this successful merge, including
+        // the individual wallpaper/cursor side. Unrelated saves keep restores.
+        crate::theme_engine::apply_current_side(changes.appearance);
         crate::apply_stay_awake();
-        crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
+        if changes.language {
+            crate::apply_language(&crate::cfg_map(|c| c.language.clone()));
+        }
         crate::refresh_checkboxes();
         crate::refresh_status();
-        // apply_current_side may have captured the first appearance
-        // snapshot: refresh the restore button's enable state and caption.
-        apply_dependent_states(hwnd);
+        // The worker refreshes restore availability when the queued
+        // appearance operation completes, if this window is still open.
         // Settings do not directly change the active palette. Theme changes
         // arrive through the normal notification path; retheming here can
         // cloak/reveal this newly created dialog just before we destroy it.
 
-        {
+        if changes.hotkeys || crate::system::hotkeys_need_retry() {
             crate::system::unregister_all();
-            if draft.hotkeys {
+            if crate::cfg_map(|c| c.hotkeys_enabled) {
                 let failed = crate::system::register_all();
                 if !failed.is_empty() {
                     failures.push(format!("{}: {}", t_pub("menu_hotkeys"), failed.join(", ")));
                 }
             }
         }
-        if draft.autostart != autostart_was {
+        if autostart_edited && draft.autostart != crate::system::autostart_is_enabled() {
             if draft.autostart {
-                let exe = std::env::current_exe()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if crate::system::autostart_enable(&exe) {
-                    crate::log_line("autostart enabled from settings");
-                } else {
-                    failures.push(t_pub("menu_autostart"));
+                match std::env::current_exe() {
+                    Ok(exe) if crate::system::autostart_enable(&exe.to_string_lossy()) => {
+                        crate::log_line("autostart enabled from settings");
+                    }
+                    Ok(_) => failures.push(t_pub("menu_autostart")),
+                    Err(error) => failures.push(format!("{}: {error}", t_pub("menu_autostart"))),
                 }
             } else if crate::system::autostart_disable() {
                 crate::log_line("autostart disabled from settings");
@@ -1673,14 +1494,21 @@ fn save() {
                 failures.push(t_pub("menu_autostart"));
             }
         }
-        AUTOSTART_BASE.store(crate::system::autostart_is_enabled(), Ordering::SeqCst);
         if !failures.is_empty() {
             let details = failures.join(", ");
             crate::log_line(&format!("settings system integration failed: {details}"));
-            set_text(
+            // Config has been saved, including merged external changes.
+            // Refresh the controls/baseline together; retain only the failed
+            // autostart request so Save can retry it without undoing the merge.
+            populate(hwnd);
+            if autostart_edited {
+                set_checked(hwnd, ID_AUTOSTART, draft.autostart);
+            }
+            apply_dependent_states(hwnd);
+            set_validation(
                 hwnd,
-                ID_VALIDATION,
                 &crate::t_args("settings_system_apply_failed", &[&details]),
+                true,
             );
             return;
         }
@@ -1997,6 +1825,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             }
             windows::Win32::UI::WindowsAndMessaging::WM_NCRBUTTONUP => LRESULT(0),
             WM_DESTROY => {
+                RESTORE_REQUEST.fetch_add(1, Ordering::SeqCst);
                 SETTINGS_HWND.store(0, Ordering::SeqCst);
                 TOOLTIP_HWND.store(0, Ordering::SeqCst);
                 PAGE.store(0, Ordering::SeqCst);
@@ -2291,18 +2120,24 @@ fn handle_click(hwnd: HWND, idc: i32) {
                 // install that just finished or a library edit shows up.
                 if idc == ID_LIGHT_CURSOR || idc == ID_DARK_CURSOR {
                     refresh_cursor_choices(hwnd);
-                    // Snapshot for the Install footer's post-run restore.
+                } else if idc == ID_LIGHT_WALL || idc == ID_DARK_WALL {
+                    refresh_wallpaper_choices(hwnd);
+                }
+                if matches!(
+                    idc,
+                    ID_LIGHT_CURSOR | ID_DARK_CURSOR | ID_LIGHT_WALL | ID_DARK_WALL
+                ) {
                     let value = crate::choice::value(get(hwnd, idc));
-                    crate::runtime::lock(&CURSOR_PREVIOUS).insert(idc, value);
+                    crate::runtime::lock(&APPEARANCE_PREVIOUS).insert(idc, value);
                 }
                 crate::choice::toggle(get(hwnd, idc), hwnd, idc);
             }
             ID_LOCK_PREVIEW => crate::popups::show(crate::popups::VK_CAPITAL, true),
             ID_RESTORE_PREV => {
-                report_restore_result(hwnd, crate::theme_engine::restore_previous_appearance());
+                start_appearance_restore(hwnd, false);
             }
             ID_RESTORE_DEFAULT => {
-                report_restore_result(hwnd, crate::theme_engine::restore_default_appearance());
+                start_appearance_restore(hwnd, true);
             }
             ID_PROJECT_HOME => open_project_home(hwnd),
             ID_APP_UPDATE_CHECK => on_update_check_button(),
@@ -2313,29 +2148,77 @@ fn handle_click(hwnd: HWND, idc: i32) {
     }
 }
 
-/// Shared feedback for the two restore actions: nothing captured (tooltip-
-/// level information), partial failure (error), or success — the restore
-/// messages are informational, so they render in normal text, not the
-/// validation error color.
-fn report_restore_result(hwnd: HWND, sides: crate::theme_engine::RestoreSides) {
-    let sides = [sides.0, sides.1];
-    if sides.iter().flatten().count() == 0 {
-        set_validation(hwnd, &t_pub("settings_restore_prev_missing"), false);
+fn start_appearance_restore(hwnd: HWND, defaults: bool) {
+    if crate::theme_engine::restore_running() {
         return;
     }
-    let errors: Vec<String> = sides
-        .iter()
-        .flatten()
-        .filter_map(|result| result.as_ref().err().cloned())
-        .collect();
-    if errors.is_empty() {
-        set_validation(hwnd, &t_pub("settings_restore_done"), false);
+    let id = RESTORE_REQUEST.fetch_add(1, Ordering::SeqCst) + 1;
+    if crate::theme_engine::restore_appearance(defaults, id) {
+        set_validation(hwnd, &t_pub("settings_restore_started"), false);
+        apply_dependent_states(hwnd);
+    }
+}
+
+pub fn refresh_appearance_state() {
+    let hwnd = current();
+    if !hwnd.is_invalid() {
+        let _dpi = crate::dpi::Scope::window(hwnd);
+        apply_dependent_states(hwnd);
+    }
+}
+
+pub fn finish_appearance_restore(id: u64, sides: crate::appearance::RestoreSides) {
+    refresh_appearance_state();
+    let hwnd = current();
+    let (message, failed) = restore_feedback(sides);
+    if !hwnd.is_invalid() && RESTORE_REQUEST.load(Ordering::SeqCst) == id {
+        set_validation(hwnd, &message, failed);
     } else {
-        set_validation(
-            hwnd,
-            &crate::t_args("settings_restore_failed", &[&errors.join("; ")]),
+        // A completion from a closed dialog must not write into a new
+        // settings draft, even if Windows reused the same HWND.
+        if failed {
+            crate::warn_dialog("", &message);
+        } else {
+            crate::log_line(&message);
+        }
+    }
+}
+
+/// Report only attempted sides; a wallpaper-only snapshot must not claim
+/// that cursors were restored too. Keep successful sides visible on failure.
+fn restore_feedback(sides: crate::appearance::RestoreSides) -> (String, bool) {
+    let mut restored = Vec::new();
+    let mut errors = Vec::new();
+    for (label, result) in [
+        ("settings_row_wallpaper", sides.0),
+        ("settings_row_cursor", sides.1),
+    ] {
+        match result {
+            Some(Ok(())) => restored.push(t_pub(label)),
+            Some(Err(error)) => errors.push(format!("{}: {error}", t_pub(label))),
+            None => {}
+        }
+    }
+    if errors.is_empty() && restored.is_empty() {
+        (t_pub("settings_restore_prev_missing"), false)
+    } else if errors.is_empty() {
+        (
+            crate::t_args("settings_restore_done", &[&restored.join(", ")]),
+            false,
+        )
+    } else if restored.is_empty() {
+        (
+            crate::t_args("settings_restore_failed", &[&errors.join("; ")]),
             true,
-        );
+        )
+    } else {
+        (
+            crate::t_args(
+                "settings_restore_partial",
+                &[&restored.join(", "), &errors.join("; ")],
+            ),
+            true,
+        )
     }
 }
 
@@ -2348,6 +2231,8 @@ pub fn refresh_language() {
         return;
     }
     let _dpi = crate::dpi::Scope::window(hwnd);
+    let _frame = crate::FrameTransition::begin(hwnd);
+    crate::viewport::begin_layout(hwnd);
     unsafe {
         let _ = SetWindowTextW(hwnd, PCWSTR(wide(&t_pub("settings_title")).as_ptr()));
     }
@@ -2409,6 +2294,7 @@ pub fn refresh_language() {
     unsafe {
         create_tooltip(hwnd);
     }
+    crate::viewport::end_layout(hwnd);
     refresh_theme();
 }
 

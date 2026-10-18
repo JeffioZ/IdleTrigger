@@ -1,7 +1,7 @@
 //! Runtime state layer: the loaded configuration (values, TOML document,
 //! source snapshot), the serialized write transaction around it, and the
-//! log file. Sibling modules reach all of it through the crate-root
-//! re-export, exactly as they did when it lived in main.rs.
+//! log file. Configuration internals are private; readers get owned snapshots
+//! and writers publish only after persistence or validated external reload.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -9,16 +9,61 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use idletrigger_core::config;
 
-pub(crate) static CONFIG: Mutex<Option<config::Config>> = Mutex::new(None);
-pub(crate) static CONFIG_DOC: Mutex<Option<toml_edit::DocumentMut>> = Mutex::new(None);
-pub(crate) static CONFIG_WRITER: Mutex<()> = Mutex::new(());
+// Production callers use snapshots and transactions. Direct access remains
+// available only to the existing in-process test fixtures.
+mod config_state {
+    use super::*;
+    pub(crate) static CONFIG: Mutex<Option<config::Config>> = Mutex::new(None);
+    pub(crate) static CONFIG_DOC: Mutex<Option<toml_edit::DocumentMut>> = Mutex::new(None);
+    pub(crate) static CONFIG_WRITER: Mutex<()> = Mutex::new(());
+    pub(crate) static CONFIG_SOURCE: Mutex<Option<String>> = Mutex::new(None);
+    pub(crate) static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+    pub(crate) static CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+}
+#[cfg(not(test))]
+use config_state::*;
+#[cfg(test)]
+pub(crate) use config_state::*;
 #[cfg(test)]
 pub(crate) static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
-pub(crate) static CONFIG_SOURCE: Mutex<Option<String>> = Mutex::new(None);
-pub(crate) static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
 pub(crate) static CTX_SYNC_BLOCKED: AtomicBool = AtomicBool::new(false);
-pub(crate) static CONFIG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 pub(crate) static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Serializes consumers that must not run across a configuration publication.
+/// Do not hold this guard while calling edit_config/commit_config.
+pub(crate) fn config_writer() -> std::sync::MutexGuard<'static, ()> {
+    lock(&CONFIG_WRITER)
+}
+pub(crate) fn config_snapshot() -> Option<config::Config> {
+    lock(&CONFIG).clone()
+}
+pub(crate) fn config_document() -> Option<toml_edit::DocumentMut> {
+    lock(&CONFIG_DOC).clone()
+}
+pub(crate) fn config_path() -> Option<PathBuf> {
+    lock(&CONFIG_PATH).clone()
+}
+pub(crate) fn config_source() -> Option<String> {
+    lock(&CONFIG_SOURCE).clone()
+}
+pub(crate) fn config_load_failed() -> bool {
+    CONFIG_LOAD_FAILED.load(Ordering::SeqCst)
+}
+pub(crate) fn ensure_config_path(path: PathBuf) {
+    lock(&CONFIG_PATH).get_or_insert(path);
+}
+pub(crate) fn initialize_config(path: PathBuf, loaded: &config::Loaded) {
+    let _writer = config_writer();
+    *lock(&CONFIG_PATH) = Some(path);
+    *lock(&CONFIG) = Some(loaded.config.clone());
+    *lock(&CONFIG_DOC) = Some(loaded.document.clone());
+    *lock(&CONFIG_SOURCE) = loaded.source_text.clone();
+    CONFIG_LOAD_FAILED.store(loaded.load_error.is_some(), Ordering::SeqCst);
+    CTX_SYNC_BLOCKED.store(
+        loaded.load_error.is_some() || loaded.field_errors.is_some(),
+        Ordering::SeqCst,
+    );
+}
 
 /// Locks a runtime mutex, recovering from poisoning. A panic caught by the
 /// window-proc guard may have poisoned the lock mid-hold; published state is
@@ -236,4 +281,49 @@ pub(crate) fn save_ctx_rules(
     })?;
     crate::ctxmenu::sync("rules");
     Ok(())
+}
+
+/// Validate and publish an external edit under the same writer boundary as saves.
+pub(crate) fn reload_config() -> Result<(config::Config, bool), String> {
+    let writer = lock(&CONFIG_WRITER);
+    let config_path = lock(&CONFIG_PATH)
+        .clone()
+        .ok_or("configuration path unavailable")?;
+    let loaded = config::load(&config_path);
+    if loaded.created_from_template {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "configuration file is missing",
+        )
+        .to_string());
+    }
+    // Startup may recover mistyped fields with defaults, but a live reload
+    // must not replace a working configuration with those fallback values.
+    // Validate rule containers as well before publishing any shared state;
+    // individual rule issues still use the editors' fault-isolation policy.
+    let validation = (|| {
+        if let Some(err) = loaded.load_error.as_ref().or(loaded.field_errors.as_ref()) {
+            return Err(err.clone());
+        }
+        idletrigger_core::ctx_menu::read_rules(&loaded.document)?;
+        idletrigger_core::rule_document::read(&loaded.document)?;
+        Ok::<(), String>(())
+    })();
+    if let Err(err) = validation {
+        log_line(&format!(
+            "config reload rejected; retaining last valid configuration: {err}"
+        ));
+        return Err(err);
+    }
+    let nosleep_was_on = lock(&CONFIG).as_ref().is_some_and(|c| c.nosleep_enabled);
+    *lock(&CONFIG) = Some(loaded.config.clone());
+    *lock(&CONFIG_DOC) = Some(loaded.document);
+    *lock(&CONFIG_SOURCE) = loaded.source_text;
+    CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
+    CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
+    crate::automation::reload_rules();
+    crate::ctxexec::reload_rules();
+    drop(writer);
+    let turned_off = nosleep_was_on && !loaded.config.nosleep_enabled;
+    Ok((loaded.config, turned_off))
 }

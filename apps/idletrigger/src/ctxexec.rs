@@ -31,7 +31,7 @@ const COPY_SETTINGS_REPLY: &str = "ok ctx-settings:";
 pub(crate) static CTX_RULES: Mutex<Vec<core_ctx::CtxRule>> = Mutex::new(Vec::new());
 
 pub(crate) fn reload_rules() {
-    let document = crate::runtime::lock(&crate::CONFIG_DOC).clone();
+    let document = crate::runtime::config_document();
     let rules = document
         .and_then(|doc| core_ctx::read_rules(&doc).ok().map(|(rules, _)| rules))
         .unwrap_or_default();

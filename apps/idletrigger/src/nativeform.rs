@@ -230,24 +230,30 @@ fn with_map<R>(f: impl FnOnce(&mut HashMap<isize, Tracked>) -> R) -> R {
 /// Both hover and click use this so the pill draws, tips, and commits
 /// exactly where it hits.
 fn in_hover_column(key: isize, lparam: LPARAM) -> bool {
+    let _dpi = crate::dpi::Scope::window(HWND(key as *mut _));
     with_map(|m| match m.get(&key) {
         Some(t) if t.hover_column > 0 => {
             // Mouse messages carry client coordinates.
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let mut rect = RECT::default();
             let known = unsafe { GetClientRect(HWND(key as *mut _), &mut rect).is_ok() };
-            known && x >= rect.right - t.hover_column
+            let y = (lparam.0 >> 16) as i16 as i32;
+            known
+                && x >= (rect.right - crate::scale_pub(t.hover_column)).max(0)
+                && x < rect.right
+                && y >= 0
+                && y < rect.bottom
         }
         _ => true,
     })
 }
 
 /// Restricts a tracked control's hover state to its right-edge column of
-/// `physical_width` px (switch rows: the pill). Call after `track`.
-pub fn set_hover_column(control: HWND, physical_width: i32) {
+/// `logical_width` logical px (switch rows: the pill). Call after `track`.
+pub fn set_hover_column(control: HWND, logical_width: i32) {
     with_map(|m| {
         if let Some(t) = m.get_mut(&(control.0 as isize)) {
-            t.hover_column = physical_width;
+            t.hover_column = logical_width;
         }
     });
 }
@@ -576,6 +582,15 @@ unsafe extern "system" fn tracked_proc(
         if matches!(msg, WM_SETFOCUS | WM_KILLFOCUS | WM_ENABLE) {
             crate::accessibility::refresh(hwnd);
         }
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_SIZE
+            && let Ok(parent) = GetParent(hwnd)
+        {
+            let _dpi = crate::dpi::Scope::window(hwnd);
+            let tip = HWND(GetPropW(parent, windows::core::w!("IdleTriggerFormTooltip")).0);
+            if !tip.is_invalid() {
+                refresh_control_tooltip(tip, hwnd);
+            }
+        }
         result
     }
 }
@@ -639,6 +654,62 @@ const ODT_BUTTON: u32 = 4;
 const ODT_STATIC: u32 = 5;
 const ODT_LISTBOX: u32 = 2;
 
+fn form_tool(control: HWND) -> windows::Win32::UI::Controls::TTTOOLINFOW {
+    use windows::Win32::UI::Controls::*;
+    let mut rect = RECT::default();
+    let _ = unsafe { GetClientRect(control, &mut rect) };
+    let column = with_map(|m| m.get(&(control.0 as isize)).map_or(0, |t| t.hover_column));
+    if column > 0 {
+        rect.left = (rect.right - crate::scale_pub(column)).max(0);
+    }
+    TTTOOLINFOW {
+        cbSize: size_of::<TTTOOLINFOW>() as u32,
+        // A rectangle tool inside the control. TTF_IDISHWND would ignore
+        // rect and make the entire switch row show the tooltip.
+        uFlags: TTF_SUBCLASS,
+        hwnd: control,
+        uId: 0,
+        rect,
+        ..Default::default()
+    }
+}
+
+unsafe fn refresh_control_tooltip(tip: HWND, control: HWND) {
+    let tool = form_tool(control);
+    unsafe {
+        SendMessageW(
+            tip,
+            windows::Win32::UI::Controls::TTM_NEWTOOLRECT,
+            None,
+            Some(LPARAM(&tool as *const _ as isize)),
+        );
+    }
+}
+
+/// Tool rectangles are physical client coordinates; update them after a
+/// scale change or a dynamic row resize, using the same width as hit-testing.
+pub fn refresh_tooltip_geometry(parent: HWND) {
+    use windows::Win32::UI::Controls::*;
+    let _dpi = crate::dpi::Scope::window(parent);
+    unsafe {
+        let tip = HWND(GetPropW(parent, windows::core::w!("IdleTriggerFormTooltip")).0);
+        if tip.is_invalid() {
+            return;
+        }
+        SendMessageW(
+            tip,
+            TTM_SETMAXTIPWIDTH,
+            None,
+            Some(LPARAM(crate::scale_pub(480) as isize)),
+        );
+        let mut child = GetWindow(parent, GW_CHILD).unwrap_or_default();
+        while !child.is_invalid() {
+            refresh_control_tooltip(tip, child);
+            child = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
+        }
+    }
+}
+
 /// Owned tooltip window; reinstallation replaces translated text atomically.
 pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
     use windows::Win32::UI::Controls::*;
@@ -689,51 +760,16 @@ pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
                 .encode_utf16()
                 .chain([0])
                 .collect::<Vec<_>>();
-            let tool = TTTOOLINFOW {
-                cbSize: size_of::<TTTOOLINFOW>() as u32,
-                uFlags: TTF_IDISHWND | TTF_SUBCLASS,
-                hwnd: parent,
-                uId: control.0 as usize,
-                lpszText: PWSTR(text.as_mut_ptr()),
-                ..Default::default()
-            };
+            let mut tool = form_tool(control);
+            tool.lpszText = PWSTR(text.as_mut_ptr());
             SendMessageW(
                 tip,
                 TTM_ADDTOOLW,
                 None,
                 Some(LPARAM(&tool as *const _ as isize)),
             );
-            // Switch rows hover as their pill column alone (draw + click
-            // parity): clip the tooltip tool to that column too, so the
-            // blank half between label and pill never pops a tip over
-            // nothing. Rect is in the tool window's own client coords.
-            let column = with_map(|m| m.get(&(control.0 as isize)).map_or(0, |t| t.hover_column));
-            if column > 0 {
-                let mut client = RECT::default();
-                if GetClientRect(control, &mut client).is_ok() {
-                    let rect = RECT {
-                        left: (client.right - column).max(0),
-                        top: 0,
-                        right: client.right,
-                        bottom: client.bottom,
-                    };
-                    let clipped = TTTOOLINFOW {
-                        cbSize: size_of::<TTTOOLINFOW>() as u32,
-                        uFlags: TTF_IDISHWND,
-                        hwnd: parent,
-                        uId: control.0 as usize,
-                        rect,
-                        ..Default::default()
-                    };
-                    SendMessageW(
-                        tip,
-                        TTM_NEWTOOLRECT,
-                        None,
-                        Some(LPARAM(&clipped as *const _ as isize)),
-                    );
-                }
-            }
         }
+        refresh_tooltip_geometry(parent);
         let empty = [0u16];
         let _ = SetWindowTheme(tip, PCWSTR(empty.as_ptr()), PCWSTR(empty.as_ptr()));
         SendMessageW(

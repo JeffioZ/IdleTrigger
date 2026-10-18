@@ -395,11 +395,11 @@ fn rule_icon(rule: &core_ctx::CtxRule, app_icon: &str) -> String {
 /// Builds the complete desired tree, including its empty container keys.
 fn desired_entries() -> Result<BTreeMap<String, ValueMap>, String> {
     if crate::runtime::CTX_SYNC_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
-        || crate::runtime::CONFIG_LOAD_FAILED.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::runtime::config_load_failed()
     {
         return Err(crate::t_pub("ctx_config_blocked"));
     }
-    let (enabled, copy, submenu, grouped) = crate::runtime::lock(&crate::CONFIG)
+    let (enabled, copy, submenu, grouped) = crate::runtime::config_snapshot()
         .as_ref()
         .map(|c| {
             (
@@ -416,7 +416,7 @@ fn desired_entries() -> Result<BTreeMap<String, ValueMap>, String> {
     // A valid explicit off state must still remove registrations even if
     // unused rules are malformed. Never infer off from startup defaults.
     let rules = if enabled {
-        let doc = crate::runtime::lock(&crate::CONFIG_DOC);
+        let doc = crate::runtime::config_document();
         let doc = doc
             .as_ref()
             .ok_or_else(|| crate::t_pub("ctx_config_blocked"))?;
@@ -837,7 +837,7 @@ fn contains_registry_path(desired: &BTreeMap<String, ValueMap>, path: &str) -> b
 }
 
 pub fn sync(reason: &str) -> (bool, usize) {
-    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+    let _writer = crate::runtime::config_writer();
     let _sync = crate::runtime::lock(&SYNC_LOCK);
     let desired = match desired_entries() {
         Ok(desired) => desired,
@@ -903,7 +903,7 @@ pub fn sync(reason: &str) -> (bool, usize) {
 }
 
 pub fn registration_healthy() -> bool {
-    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+    let _writer = crate::runtime::config_writer();
     let _sync = crate::runtime::lock(&SYNC_LOCK);
     let Ok(desired) = desired_entries() else {
         return false;
@@ -917,7 +917,7 @@ pub fn registration_healthy() -> bool {
 }
 
 pub fn registration_blocked() -> bool {
-    let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+    let _writer = crate::runtime::config_writer();
     desired_entries().is_err()
 }
 
@@ -1262,7 +1262,7 @@ mod tests {
     fn menu_sync_distinguishes_invalid_config_from_explicit_off_and_empty() {
         use std::sync::atomic::Ordering;
         let _test = crate::runtime::lock(&crate::CONFIG_TEST_LOCK);
-        let _writer = crate::runtime::lock(&crate::CONFIG_WRITER);
+        let _writer = crate::runtime::config_writer();
         let old_config =
             crate::runtime::lock(&crate::CONFIG).replace(idletrigger_core::config::Config {
                 ctx_menu_enabled: true,

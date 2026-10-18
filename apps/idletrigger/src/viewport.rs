@@ -10,6 +10,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const SUBCLASS: usize = 0x49545650;
 struct State {
     width: Cell<i32>,
+    extent: Cell<[crate::dpi::ScaledValue; 2]>,
+    offset: Cell<[crate::dpi::ScaledValue; 2]>,
     x: Cell<i32>,
     restore_x: Cell<i32>,
     bar: Cell<HWND>,
@@ -41,6 +43,11 @@ pub fn metrics(hwnd: HWND) -> Option<(i32, i32, i32)> {
             state.position.get(),
         ))
     }
+}
+
+/// Full physical extent, including content hidden by a small work area.
+pub fn content_size(hwnd: HWND) -> Option<(i32, i32)> {
+    unsafe { state(hwnd).map(|s| (s.width.get(), s.height.get())) }
 }
 
 fn page_size(state: &State, client: &RECT) -> (i32, i32) {
@@ -138,6 +145,48 @@ pub fn begin_layout(hwnd: HWND) {
     }
 }
 
+/// Finish a layout pass that retained the existing content extent.
+pub fn end_layout(hwnd: HWND) {
+    unsafe {
+        if let Some(state) = state(hwnd) {
+            scroll_x(hwnd, state.restore_x.get());
+            scroll_to(hwnd, state.restore.get());
+        }
+    }
+}
+
+/// Scale in content coordinates, then restore the user's scroll position.
+/// Also used for embedded forms whose host handles the DPI message.
+pub fn rescale<R>(hwnd: HWND, old: u32, new: u32, layout: impl FnOnce() -> R) -> R {
+    let offsets = unsafe {
+        state(hwnd).map(|state| {
+            let mut offset = state.offset.get();
+            let x = offset[0].rescale(state.x.get(), old, new);
+            let y = offset[1].rescale(state.position.get(), old, new);
+            state.offset.set(offset);
+            scroll_x(hwnd, 0);
+            scroll_to(hwnd, 0);
+            let mut extent = state.extent.get();
+            state
+                .width
+                .set(extent[0].rescale(state.width.get(), old, new));
+            state
+                .height
+                .set(extent[1].rescale(state.height.get(), old, new));
+            state.extent.set(extent);
+            (x, y)
+        })
+    };
+    let result = layout();
+    if let Some((x, y)) = offsets {
+        scroll_x(hwnd, x);
+        scroll_to(hwnd, y);
+        crate::list_style::refresh(hwnd);
+        sync_horizontal(hwnd);
+    }
+    result
+}
+
 /// Called with the form's complete desired client size after layout.
 pub fn fit(hwnd: HWND) {
     unsafe {
@@ -149,6 +198,10 @@ pub fn fit(hwnd: HWND) {
         let state = state(hwnd).unwrap();
         state.height.set(client.bottom);
         state.width.set(client.right);
+        state.extent.set(
+            [client.right, client.bottom]
+                .map(|v| crate::dpi::ScaledValue::new(v, crate::dpi::factor())),
+        );
         constrain(hwnd);
         scroll_x(hwnd, state.restore_x.get());
         scroll_to(hwnd, state.restore.get());
@@ -173,6 +226,10 @@ pub fn fit_content(hwnd: HWND, width: i32, height: i32) {
         // full-width form (client minus the scrollbar is always narrower).
         state.height.set(height.max(client.bottom));
         state.width.set(width);
+        state.extent.set(
+            [width, height.max(client.bottom)]
+                .map(|v| crate::dpi::ScaledValue::new(v, crate::dpi::factor())),
+        );
         scroll_x(hwnd, state.restore_x.get());
         scroll_to(hwnd, state.restore.get());
         crate::list_style::refresh(hwnd);
@@ -189,6 +246,10 @@ unsafe fn ensure_state(hwnd: HWND, width: i32, height: i32) {
         }
         let data = Box::into_raw(Box::new(State {
             width: Cell::new(width),
+            extent: Cell::new(
+                [width, height].map(|v| crate::dpi::ScaledValue::new(v, crate::dpi::factor())),
+            ),
+            offset: Cell::new([crate::dpi::ScaledValue::new(0, crate::dpi::factor()); 2]),
             x: Cell::new(0),
             restore_x: Cell::new(0),
             bar: Cell::new(HWND::default()),
@@ -345,38 +406,26 @@ unsafe extern "system" fn window_proc(
     data: usize,
 ) -> LRESULT {
     unsafe {
-        let state = &*(data as *const State);
         let _dpi = crate::dpi::Scope::window(hwnd);
         if msg == WM_DPICHANGED || msg == crate::dpi::TEXT_CHANGED {
             let _frame = crate::FrameTransition::begin(hwnd);
-            let old = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
             // The dpi subclass retains the previous DPI until it handles this message.
             let old = if msg == crate::dpi::TEXT_CHANGED {
-                (wp.0 as u32).max(1)
+                (wp.0 as u32).max(1) * dpi
             } else {
-                crate::dpi::window_dpi(hwnd).unwrap_or(old)
+                crate::dpi::window_dpi(hwnd).unwrap_or(dpi) * crate::dpi::text_percent()
             };
             let new = if msg == crate::dpi::TEXT_CHANGED {
-                lp.0 as u32
+                (lp.0 as u32).max(1) * dpi
             } else {
-                (wp.0 as u32 & 0xffff).max(96)
+                (wp.0 as u32 & 0xffff).max(96) * crate::dpi::text_percent()
             };
-            let position = state.position.get();
-            let x = state.x.get();
-            scroll_x(hwnd, 0);
-            scroll_to(hwnd, 0);
-            state
-                .height
-                .set((state.height.get() as i64 * new as i64 / old as i64) as i32);
-            state
-                .width
-                .set((state.width.get() as i64 * new as i64 / old as i64) as i32);
-            let result = DefSubclassProc(hwnd, msg, wp, lp);
-            constrain(hwnd);
-            scroll_x(hwnd, (x as i64 * new as i64 / old as i64) as i32);
-            scroll_to(hwnd, (position as i64 * new as i64 / old as i64) as i32);
-            crate::list_style::refresh(hwnd);
-            return result;
+            return rescale(hwnd, old, new, || {
+                let result = DefSubclassProc(hwnd, msg, wp, lp);
+                constrain(hwnd);
+                result
+            });
         }
         if msg == WM_COMMAND && (wp.0 >> 16) & 0xffff == 0x100 {
             reveal_control(hwnd, HWND(lp.0 as *mut _)); // EN_SETFOCUS
