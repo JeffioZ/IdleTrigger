@@ -8,7 +8,8 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetDlgItem, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOZORDER, SetWindowPos,
+    GWL_STYLE, GetDlgItem, GetWindowLongW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowPos, WS_TABSTOP,
 };
 
 pub struct Flow {
@@ -65,7 +66,9 @@ impl Flow {
     /// Applies deferred visibility: controls in `layout_ids` that were
     /// placed this pass become visible, the rest hide. Existing fields
     /// never hide and reappear within one pass (set_visible_deferred
-    /// batches the swap into one present).
+    /// batches the swap into one present). Tab stops re-stack in placement
+    /// order: creation groups controls by type, so z-order alone would
+    /// walk the form in a jumbled sequence.
     pub unsafe fn finish(&mut self, layout_ids: &[usize]) {
         unsafe {
             for id in layout_ids {
@@ -74,6 +77,28 @@ impl Flow {
                     continue;
                 }
                 crate::nativeform::set_visible_deferred(control, self.placed.contains(&control));
+            }
+            let mut previous: Option<HWND> = None;
+            for control in &self.placed {
+                let style = GetWindowLongW(*control, GWL_STYLE) as u32;
+                if style & WS_TABSTOP.0 == 0 {
+                    continue;
+                }
+                if let Some(prev) = previous {
+                    // Insert above the previous tab stop only: relative
+                    // moves among tab stops leave statics and pinned card
+                    // surfaces at their own strata untouched.
+                    let _ = SetWindowPos(
+                        *control,
+                        Some(prev),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW,
+                    );
+                }
+                previous = Some(*control);
             }
         }
     }

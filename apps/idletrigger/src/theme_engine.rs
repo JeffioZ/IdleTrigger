@@ -105,6 +105,9 @@ static REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
 static RESTORE_RUNNING: AtomicBool = AtomicBool::new(false);
 static THEME_OPERATION: Mutex<()> = Mutex::new(());
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// True while the GPU-pause log line has been emitted for the current
+/// episode; cleared when the pause ends or the engine goes idle.
+static GPU_PAUSE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn enqueue(request: Request) {
     {
@@ -270,21 +273,47 @@ pub fn location(ip_enabled: bool) -> (f64, f64, &'static str) {
             "Korea Standard Time" => Some((37.6, 127.0)),
             "Singapore Standard Time" => Some((1.35, 103.8)),
             "India Standard Time" => Some((28.6, 77.2)),
+            "Pakistan Standard Time" => Some((24.86, 67.0)),
+            "Sri Lanka Standard Time" => Some((6.93, 79.86)),
+            "SE Asia Standard Time" => Some((13.75, 100.5)),
+            "West Asia Standard Time" => Some((41.31, 69.24)),
+            "Central Asia Standard Time" => Some((43.24, 76.89)),
+            "Ekaterinburg Standard Time" => Some((56.84, 60.61)),
             "W. Europe Standard Time" => Some((52.5, 13.4)),
             "GMT Standard Time" => Some((51.5, -0.1)),
             "Central Europe Standard Time" => Some((48.2, 16.4)),
+            "FLE Standard Time" => Some((50.45, 30.52)),
             "E. Europe Standard Time" => Some((50.4, 30.5)),
+            "Turkish Standard Time" => Some((41.05, 28.98)),
+            "Turkey Standard Time" => Some((41.05, 28.98)),
             "Russian Standard Time" => Some((55.8, 37.6)),
+            "Israel Standard Time" => Some((32.08, 34.78)),
+            "Arabic Standard Time" => Some((24.71, 46.68)),
+            "Arab Standard Time" => Some((25.2, 55.27)),
+            "Iran Standard Time" => Some((35.69, 51.39)),
+            "South Africa Standard Time" => Some((-26.2, 28.05)),
+            "E. Africa Standard Time" => Some((-1.29, 36.82)),
+            "W. Central Africa Standard Time" => Some((6.45, 3.39)),
             "Eastern Standard Time" => Some((40.7, -74.0)),
             "Central Standard Time" => Some((41.9, -87.6)),
+            "Central Standard Time (Mexico)" => Some((19.43, -99.13)),
             "Mountain Standard Time" => Some((33.4, -112.0)),
             "Pacific Standard Time" => Some((34.0, -118.2)),
             "Alaskan Standard Time" => Some((61.2, -149.9)),
             "Hawaiian Standard Time" => Some((21.3, -157.8)),
+            "Central America Standard Time" => Some((14.63, -90.51)),
+            "SA Western Standard Time" => Some((4.71, -74.07)),
+            "SA Pacific Standard Time" => Some((-12.05, -77.04)),
             "E. South America Standard Time" => Some((-23.5, -46.6)),
-            "Atlantic Standard Time" => Some((-34.6, -58.4)),
+            "Argentina Standard Time" => Some((-34.6, -58.4)),
+            "Pacific SA Standard Time" => Some((-33.45, -70.67)),
+            // Atlantic Canada (Halifax); the old entry pointed at Buenos
+            // Aires — southern hemisphere, seasons inverted for the region.
+            "Atlantic Standard Time" => Some((44.65, -63.57)),
             "AUS Eastern Standard Time" => Some((-33.9, 151.2)),
-            "AUS Central Standard Time" => Some((-34.9, 138.6)),
+            // Darwin (UTC+9:30); Adelaide belongs to Cen. Australia below.
+            "AUS Central Standard Time" => Some((-12.46, 130.84)),
+            "Cen. Australia Standard Time" => Some((-34.9, 138.6)),
             "New Zealand Standard Time" => Some((-36.8, 174.8)),
             _ => None,
         };
@@ -314,6 +343,31 @@ fn next_transition(absolute: i64, minutes: i32, window: Option<(i32, i32)>) -> i
         if delta == 0 { 1440 } else { delta }
     };
     absolute + delay(light).min(delay(dark)) as i64
+}
+
+/// How long the engine loop sleeps: right up to the next schedule boundary
+/// (waking ~250ms early so the switch lands on the minute), capped at the
+/// 60s cadence — the cap keeps periodic re-evaluation (solar window, state
+/// drift) alive when the boundary is hours away. External events still
+/// interrupt via the WAKE condvar.
+fn next_wake_delay() -> Duration {
+    const MAX: Duration = Duration::from_secs(60);
+    let Some((light, dark)) = light_window() else {
+        return MAX;
+    };
+    // Second-granular countdown to the boundary: local_time's minute
+    // truncation would round every wait up to a full minute (the fixed
+    // pre-change cadence) and never land on the boundary itself.
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let now_secs = u64::from(st.wHour) * 3600 + u64::from(st.wMinute) * 60 + u64::from(st.wSecond);
+    let delay = |boundary: i32| {
+        let delta = (i64::from(boundary) * 60 - now_secs as i64).rem_euclid(86_400);
+        if delta == 0 { 86_400 } else { delta }
+    };
+    let secs = delay(light).min(delay(dark)) as u64;
+    Duration::from_secs(secs)
+        .saturating_sub(Duration::from_millis(250))
+        .min(MAX)
 }
 
 fn day_of_year_now() -> i32 {
@@ -574,18 +628,6 @@ fn tick() {
     if !enabled {
         return;
     }
-    // Fullscreen / presentation pause, then windowed GPU activity (Go
-    // DetectThemeSwitchPause: 4 levels, GPU is the windowed-game check).
-    // One config read feeds both probes (the GPU probe itself costs a
-    // 2×500ms sampling baseline and must never run twice per tick).
-    let skip_pause = crate::cfg_map(|c| c.theme_skip_fullscreen);
-    if skip_pause && crate::display::foreground_is_fullscreen() {
-        return;
-    }
-    if skip_pause && crate::gpu_activity::foreground_gpu_active() {
-        crate::log_line("theme engine: paused by foreground GPU activity");
-        return;
-    }
     let operation = crate::runtime::lock(&THEME_OPERATION);
     if !crate::cfg_map(|c| c.theme_switch_enabled) {
         return;
@@ -593,9 +635,29 @@ fn tick() {
     let Some(target) = automatic_target() else {
         return;
     };
+    // Cheap gate first: with the theme already matching and no pending
+    // recovery there is nothing to switch, and the pause probes below must
+    // not run as an idle poll — the GPU probe costs a 2×500ms sampling
+    // baseline plus a PDH enumeration.
     if matches_theme(target) && !crate::theme_recovery::pending() {
+        GPU_PAUSE_LOGGED.store(false, Ordering::SeqCst);
         return;
     }
+    // Fullscreen / presentation pause, then windowed GPU activity (Go
+    // DetectThemeSwitchPause: 4 levels, GPU is the windowed-game check).
+    // One config read feeds both probes; both must never run twice per tick.
+    let skip_pause = crate::cfg_map(|c| c.theme_skip_fullscreen);
+    if skip_pause && crate::display::foreground_is_fullscreen() {
+        return;
+    }
+    if skip_pause && crate::gpu_activity::foreground_gpu_active() {
+        // Log the pause once per pause episode, not once per tick.
+        if !GPU_PAUSE_LOGGED.swap(true, Ordering::SeqCst) {
+            crate::log_line("theme engine: paused by foreground GPU activity");
+        }
+        return;
+    }
+    GPU_PAUSE_LOGGED.store(false, Ordering::SeqCst);
     drop(operation);
     let Some(prepared) = crate::theme_recovery::prepare(generation) else {
         return;
@@ -684,10 +746,10 @@ pub fn spawn() -> std::thread::JoinHandle<()> {
                     tick();
                     let pending = crate::runtime::lock(&WAKE.0);
                     // Recover from poisoning like every other lock: a dead
-                    // engine thread is worse than one more 60s poll cycle.
+                    // engine thread is worse than one more poll cycle.
                     let (mut pending, _) = WAKE
                         .1
-                        .wait_timeout_while(pending, Duration::from_secs(60), |pending| !*pending)
+                        .wait_timeout_while(pending, next_wake_delay(), |pending| !*pending)
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *pending = false;
                 });

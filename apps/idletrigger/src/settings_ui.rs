@@ -133,6 +133,11 @@ fn set_text(parent: HWND, id: i32, text: &str) {
         if !target.is_invalid() && control_text(parent, id) != text {
             let _ = SetWindowTextW(target, PCWSTR(wide(text).as_ptr()));
         }
+        // The validation line ellipsizes in place; its tooltip carries the
+        // full text. The tool is registered empty and retargeted here.
+        if id == ID_VALIDATION && !target.is_invalid() {
+            crate::nativeform::set_form_tool_text(parent, target, text);
+        }
     }
 }
 
@@ -465,6 +470,14 @@ unsafe fn build_controls(hwnd: HWND, font: HFONT, title_font: HFONT) {
         // Day/night page (language-dependent geometry rides the relayout
         // spec flavor).
         crate::kit::spec::apply_relayout(hwnd, &theme_page_spec());
+        // The schedule fields share the editor's HH:MM normalization (a
+        // Chinese IME's full-width "０７：３０" must not fail validation).
+        for id in [ID_LIGHT_TIME, ID_DARK_TIME] {
+            let field = get(hwnd, id);
+            if !field.is_invalid() {
+                crate::automation_ui::install_time_edit(field);
+            }
+        }
 
         // Appearance page: the wallpaper library dropdowns refresh by
         // value in their own path; the spec owns creation and captions.
@@ -1109,23 +1122,28 @@ fn location_status_text(ip_enabled: bool) -> String {
     )
 }
 
-/// Preview the selected source without saving the settings draft.
+/// Preview the selected source without saving the settings draft. A fixed
+/// schedule never consults the location — requesting one anyway would fire
+/// a network round trip whose result the schedule cannot use.
 fn request_location_preview(hwnd: HWND) {
-    if combo_sel(hwnd, ID_LOCATION_SOURCE) == 1 {
+    if combo_sel(hwnd, ID_THEME_MODE) == 1 && combo_sel(hwnd, ID_LOCATION_SOURCE) == 1 {
         crate::iplocate::request();
     }
     refresh_location_status();
 }
 
 /// Refresh only the runtime label; never repopulate an open settings draft.
+/// In fixed-schedule mode the line keeps the fixed-schedule note — the
+/// location status belongs to sunrise mode only.
 pub fn refresh_location_status() {
     let hwnd = current();
     if !hwnd.is_invalid() {
-        set_text(
-            hwnd,
-            ID_THEME_LOCATION_STATUS,
-            &location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1),
-        );
+        let text = if combo_sel(hwnd, ID_THEME_MODE) == 1 {
+            location_status_text(combo_sel(hwnd, ID_LOCATION_SOURCE) == 1)
+        } else {
+            t_pub("settings_theme_fixed_note")
+        };
+        set_text(hwnd, ID_THEME_LOCATION_STATUS, &text);
     }
 }
 
@@ -1597,6 +1615,9 @@ unsafe fn create_tooltip(hwnd: HWND) {
         (ID_PROJECT_HOME, "tip_project_home"),
         (ID_CANCEL, "tip_settings_cancel"),
         (ID_SAVE, "tip_settings_save"),
+        // Registered empty; set_text retargets it to the live validation
+        // text so an ellipsized message stays readable in full on hover.
+        (ID_VALIDATION, ""),
     ];
     let bindings: Vec<(usize, &str)> = TOOLS.iter().map(|(id, key)| (*id as usize, *key)).collect();
     crate::nativeform::form_tooltips(hwnd, &bindings);
@@ -2151,6 +2172,21 @@ fn handle_click(hwnd: HWND, idc: i32) {
 fn start_appearance_restore(hwnd: HWND, defaults: bool) {
     if crate::theme_engine::restore_running() {
         return;
+    }
+    // Restoring factory defaults rewrites wallpaper and cursors and cannot
+    // be undone; the "…" in the label promises this confirmation step.
+    if defaults {
+        let choice = unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                PCWSTR(wide(&t_pub("settings_restore_default_confirm")).as_ptr()),
+                PCWSTR(wide(&t_pub("settings_restore_default_confirm_title")).as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        };
+        if choice != IDYES {
+            return;
+        }
     }
     let id = RESTORE_REQUEST.fetch_add(1, Ordering::SeqCst) + 1;
     if crate::theme_engine::restore_appearance(defaults, id) {

@@ -256,9 +256,9 @@ pub fn normalize_rules(rules: Vec<Rule>) -> Vec<Rule> {
         }
         seen_ids.insert(r.id.to_lowercase());
         r.name = r.name.trim().to_string();
-        if r.name.is_empty() {
-            r.name = r.id.clone();
-        }
+        // A blank name stays blank: displays generate a language-following
+        // summary for it (see the app's display_name), so persisting the id
+        // here would freeze a stale placeholder instead.
         if !matches!(&r.process_logic[..], LOGIC_ANY | LOGIC_ALL | LOGIC_NONE) {
             r.process_logic = LOGIC_ANY.to_string();
         }
@@ -705,7 +705,12 @@ pub fn save_runtime_state(path: &Path, state: &RuntimeState) -> std::io::Result<
         std::process::id()
     ));
     let result = (|| {
-        std::fs::write(&tmp, data)?;
+        // Same flush barrier as config::save_candidate: the rename must not
+        // be journaled ahead of the data blocks.
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, data.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
@@ -840,11 +845,12 @@ mod tests {
         r.warning_seconds = 3600; // out of range: normalize clamps to default
         let (normalized, issues) = prepare_rules(&[r]);
         // The raw empty id is still reported like in Go, while normalization
-        // assigns a stable fallback id and name.
+        // assigns a stable fallback id; a blank name stays blank for
+        // display-time summaries.
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("id is required"));
         assert_eq!(normalized[0].id, "rule-1");
-        assert_eq!(normalized[0].name, "rule-1");
+        assert_eq!(normalized[0].name, "");
         assert_eq!(normalized[0].warning_seconds, 3600); // upper bound is legal
     }
 

@@ -909,7 +909,10 @@ fn delete_selected(mgr: HWND) {
         return;
     };
 
-    let body = crate::t_args("automation_delete_confirm", &[&rule.name]);
+    let body = crate::t_args(
+        "automation_delete_confirm",
+        &[&crate::automation::display_name(&rule)],
+    );
     if !confirm_dialog(mgr, &t_pub("automation_delete_title"), &body) {
         return;
     }
@@ -1095,13 +1098,18 @@ unsafe extern "system" fn mgr_proc(
                     LRESULT(pair.0.0 as isize)
                 }
                 WM_DESTROY => {
+                    // Release the panel modal while the manager HWND is
+                    // still valid: reading it after the store(0) below
+                    // released HWND(0) and left the panel disabled if the
+                    // manager ever closed while shown.
+                    let mgr = HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _);
+                    crate::release_panel_modal(mgr);
                     MGR_HWND.store(0, Ordering::SeqCst);
                     MGR_LIST_HWND.store(0, Ordering::SeqCst);
                     // The pane is a child window and dies with the manager;
                     // clear its slot so lazy creation can run again.
                     EDIT_HWND.store(0, Ordering::SeqCst);
                     crate::runtime::lock(&MGR_DISPLAYED_RULES).clear();
-                    crate::release_panel_modal(HWND(MGR_HWND.load(Ordering::SeqCst) as *mut _));
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -1269,7 +1277,9 @@ fn draw_manager_item_impl(item: &crate::nativeform::DrawItem, dc: HDC, bounds: &
 // ===== Time edit subclass (Go time_edit.go) ================================
 
 const TIME_EDIT_SUBCLASS: usize = 0x49545445;
-fn install_time_edit(edit: HWND) {
+/// Installs the HH:MM normalization subclass (full-width digits/colon,
+/// auto separator, blur padding). Shared with the settings schedule fields.
+pub(crate) fn install_time_edit(edit: HWND) {
     unsafe {
         let _ = windows::Win32::UI::Shell::SetWindowSubclass(
             edit,
@@ -1619,8 +1629,11 @@ fn create_editor() {
         // Overlay pane: a full-client child of the manager shown while a
         // draft is open (the list view hides underneath). It keeps its own
         // class and proc, so all editor message handling stays unchanged.
+        // WS_EX_CONTROLPARENT lets IsDialogMessage (the manager's Tab
+        // routing) descend into the pane and walk its fields; without it
+        // the whole pane reads as one dead control.
         let ed = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            WINDOW_EX_STYLE(windows::Win32::UI::WindowsAndMessaging::WS_EX_CONTROLPARENT.0),
             windows::core::w!("IdleTriggerAutoEdit"),
             PCWSTR(wide(&t_pub("automation_new_title")).as_ptr()),
             WINDOW_STYLE(WS_CHILD.0 | WS_CLIPSIBLINGS.0),
@@ -1946,8 +1959,8 @@ fn populate_editor() {
             .iter()
             .find(|i| i.index as i32 == idx || (!i.rule_id.is_empty() && i.rule_id == rule.id));
         EDIT_ERROR.store(issue.is_some(), Ordering::SeqCst);
-        set_text(
-            get_dlg_item(ed, ED_VALIDATION),
+        set_editor_status(
+            ed,
             &match &issue {
                 Some(i) => crate::t_args("automation_rule_issue", &[&i.message]),
                 None => t_pub("automation_runtime_note"),
@@ -2044,10 +2057,17 @@ fn validation_control(field: ValidationField) -> usize {
     }
 }
 
+/// Writes the editor status row and mirrors it into its tooltip: the row
+/// itself is a single ellipsizing line, so the full text must stay reachable.
+fn set_editor_status(ed: HWND, message: &str) {
+    set_text(get_dlg_item(ed, ED_VALIDATION), message);
+    crate::nativeform::set_form_tool_text(ed, get_dlg_item(ed, ED_VALIDATION), message);
+}
+
 /// Go setEditorError: show the message in the validation row and focus the field.
 fn set_editor_error(ed: HWND, id: usize, message: &str) {
     EDIT_ERROR.store(true, Ordering::SeqCst);
-    set_text(get_dlg_item(ed, ED_VALIDATION), message);
+    set_editor_status(ed, message);
     let control = get_dlg_item(ed, id);
     if !control.is_invalid() {
         unsafe {
@@ -2062,10 +2082,7 @@ pub(crate) fn clear_editor_error(ed: HWND) {
         return;
     }
     EDIT_ERROR.store(false, Ordering::SeqCst);
-    set_text(
-        get_dlg_item(ed, ED_VALIDATION),
-        &t_pub("automation_runtime_note"),
-    );
+    set_editor_status(ed, &t_pub("automation_runtime_note"));
 }
 
 /// Go saveEditor: validate, default the name, persist, close on success.
@@ -2079,10 +2096,9 @@ fn save_rule(ed: HWND) {
         return;
     }
 
-    let mut draft = draft;
-    if draft.name.is_empty() {
-        draft.name = rule_summary(&draft);
-    }
+    // A blank name stays blank: the summary already follows the UI
+    // language at display time, and freezing it into the saved name made
+    // every language switch leave stale bilingual rows.
 
     let (mut normalized, issues) = auto::prepare_rules(std::slice::from_ref(&draft));
     if let Some(issue) = issues.first() {
@@ -2734,11 +2750,11 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let muted = matches!(id, ED_NAME_HINT | ED_NO_OPTIONS);
                     let color = if id == ED_VALIDATION {
                         if EDIT_ERROR.load(Ordering::SeqCst) {
-                            if theme::is_dark() {
-                                palette.danger_border
-                            } else {
-                                palette.danger_bg
-                            }
+                            // The fill/border tokens are surface colors: in
+                            // high contrast danger_bg maps to COLOR_HIGHLIGHT,
+                            // which only reads against HighlightText. The
+                            // dedicated danger text token is the safe pair.
+                            palette.danger_surface_text
                         } else {
                             palette.muted
                         }
@@ -3401,6 +3417,9 @@ pub(crate) fn refresh_tooltips() {
                 (ED_DAYS_EVERYDAY, "tip_automation_days_everyday"),
                 (ED_SAVE, "tip_automation_save"),
                 (ED_CANCEL, "tip_automation_cancel"),
+                // The status row's real text is dynamic (set_editor_status
+                // retargets this tool); the key is the neutral default.
+                (ED_VALIDATION, "automation_runtime_note"),
             ][..],
         ),
         (
@@ -3639,6 +3658,20 @@ pub fn refresh_language() {
                 "automation_new_title"
             }),
         );
+        // The pane's own window text is invisible: the visible mode title
+        // and the neutral status line must follow the language switch too
+        // (an active validation error stays until the next edit).
+        set_text(
+            get_dlg_item(ed, ED_MODE_TITLE),
+            &t_pub(if edit_index() >= 0 {
+                "automation_edit_title"
+            } else {
+                "automation_new_title"
+            }),
+        );
+        if !EDIT_ERROR.load(Ordering::SeqCst) {
+            set_editor_status(ed, &t_pub("automation_runtime_note"));
+        }
         for &(id, key) in EDITOR_TEXTS {
             set_text(get_dlg_item(ed, id), &t_pub(key));
         }

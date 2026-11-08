@@ -30,6 +30,11 @@ static TEXT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::ne
 struct Countdown {
     pending: automation::PendingAction,
     deadline: std::time::Instant,
+    /// Seconds rendered by the previous tick. A one-second timer can only
+    /// decrement this by one; a large drop to zero means the clock jumped
+    /// across a suspend (QPC counts sleep time) and the window must not
+    /// fire without giving the user a chance to cancel.
+    last_secs: u64,
 }
 static CURRENT: Mutex<Option<Countdown>> = Mutex::new(None);
 
@@ -163,6 +168,7 @@ pub fn show_pending() {
         pending: pending.clone(),
         deadline: std::time::Instant::now()
             + std::time::Duration::from_secs(pending.seconds as u64),
+        last_secs: pending.seconds as u64,
     });
     ACTION_BUSY.store(true, Ordering::SeqCst);
     update_text(&pending, pending.seconds);
@@ -194,14 +200,10 @@ pub fn show_pending() {
     ));
 }
 
-pub fn default_button(hwnd: HWND) -> Option<HWND> {
-    if hwnd.0 as isize != WINDOW.load(Ordering::SeqCst) {
-        return None;
-    }
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), IDC_CANCEL as i32).ok()
-    }
-}
+// No default_button hook here on purpose: the window is WS_EX_NOACTIVATE
+// and can never hold keyboard focus, so the Enter/Esc routing in
+// pre_translate_dialog cannot reach it. The keyboard escape is polled in
+// poll_escape instead.
 
 /// Measure wrapped content before showing; the shared viewport handles a small work area.
 pub fn layout_warning(hwnd: HWND, label: HWND, buttons: &[usize]) {
@@ -262,13 +264,15 @@ pub fn layout_warning(hwnd: HWND, label: HWND, buttons: &[usize]) {
 
 fn update_text(pending: &automation::PendingAction, seconds: i32) {
     let action_label = crate::t_pub(&format!("menu_action_{}", pending.action));
+    // Blank names show their language-following summary; the raw rule id is
+    // the last resort (rule detached from the pending action).
     let name = pending
         .rule
         .as_ref()
-        .map_or(pending.rule_id.as_str(), |rule| rule.name.as_str());
+        .map_or_else(|| pending.rule_id.clone(), automation::display_name);
     let text = crate::t_args(
         "automation_warning_body",
-        &[name, &action_label, &seconds.to_string()],
+        &[&name, &action_label, &seconds.to_string()],
     );
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     unsafe {
@@ -312,10 +316,62 @@ fn tick() {
         .deadline
         .saturating_duration_since(std::time::Instant::now());
     let seconds = left.as_secs() + u64::from(left.subsec_nanos() != 0);
-    if seconds == 0 {
+    if seconds == 0 && current.last_secs > 3 {
+        // The deadline jumped (suspend crossed the countdown — QPC counts
+        // sleep time). Restart the full window instead of executing while
+        // the user may not even be at the machine yet.
+        restart(current);
+    } else if seconds == 0 {
         execute_now();
     } else {
+        let mut current = current;
+        current.last_secs = seconds;
+        *crate::runtime::lock(&CURRENT) = Some(current.clone());
         update_text(&current.pending, seconds as i32);
+    }
+}
+
+/// Re-arms an active countdown from its full duration. Called on power
+/// resume and when a tick detects a time jump, so a wake never lands in an
+/// already-expired (uncancellable) countdown.
+fn restart(current: Countdown) {
+    let seconds = current.pending.seconds as u64;
+    let mut current = current;
+    current.deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    current.last_secs = seconds;
+    *crate::runtime::lock(&CURRENT) = Some(current.clone());
+    update_text(&current.pending, seconds as i32);
+    crate::log_line("action countdown restarted after a time jump or resume");
+}
+
+/// Power-resume hook: with the deadline left as-is, a wake after a long
+/// suspend would find it already expired and execute with no cancel window.
+pub fn restart_after_resume() {
+    let current = crate::runtime::lock(&CURRENT).clone();
+    if let Some(current) = current {
+        restart(current);
+    }
+}
+
+/// Keyboard escape for the countdown card. The window is WS_EX_NOACTIVATE
+/// and never owns focus, so WM_KEYDOWN routing can never reach it; poll the
+/// async key state from the hidden window's 50ms timer instead. Skipped
+/// while one of this thread's windows holds focus — that path consumes Esc
+/// through pre_translate_dialog (closing the focused window), and one press
+/// must not do both.
+pub fn poll_escape() {
+    if crate::runtime::lock(&CURRENT).is_none() {
+        return;
+    }
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetFocus, VK_ESCAPE};
+        if !GetFocus().is_invalid() {
+            return;
+        }
+        let state = GetAsyncKeyState(i32::from(VK_ESCAPE.0));
+        if state as u32 & 0x8000 != 0 {
+            close(true);
+        }
     }
 }
 

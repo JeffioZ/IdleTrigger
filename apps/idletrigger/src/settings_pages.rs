@@ -228,11 +228,13 @@ pub(crate) fn power_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
         ID_IDLE_ACTION_LBL,
         Text::Key("settings_idle_action"),
         FontRole::Body,
-        (ROW_X, 388, 308, 22),
+        (ROW_X, 388, 276, 22),
     ));
     specs.push(ControlSpec::combo(
         ID_IDLE_ACTION,
-        (512, 382, 128, FIELD_H),
+        // 160px (right edge unchanged at 640): "Turn Off Display" needs
+        // ~116px of label area and clipped mid-glyph in the 128px combo.
+        (480, 382, 160, FIELD_H),
         idle_action_labels,
     ));
     specs
@@ -379,7 +381,9 @@ pub(crate) fn appearance_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
             ID_ROW_WALL_LBL,
             Text::Key("settings_row_wallpaper"),
             FontRole::Body,
-            (ROW_X, 132, 56, 22),
+            // 64px: the English "Wallpaper" measures ~61px and would
+            // clip mid-glyph in the old 56px slot.
+            (ROW_X, 132, 64, 22),
         ),
         ControlSpec::combo_rows(ID_LIGHT_WALL, (264, 126, 182, FIELD_H), wall_pick_rows),
         ControlSpec::combo_rows(ID_DARK_WALL, (458, 126, 182, FIELD_H), wall_pick_rows),
@@ -387,7 +391,7 @@ pub(crate) fn appearance_page_spec() -> Vec<crate::kit::spec::ControlSpec> {
             ID_ROW_CURSOR_LBL,
             Text::Key("settings_row_cursor"),
             FontRole::Body,
-            (ROW_X, 172, 56, 22),
+            (ROW_X, 172, 64, 22),
         ),
         ControlSpec::combo_rows(
             ID_LIGHT_CURSOR,

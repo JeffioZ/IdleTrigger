@@ -732,7 +732,6 @@ fn main() {
     automation::reload_rules();
     automation::spawn(exe_dir.clone());
     theme::apply_to_all();
-    refresh_battery();
     let theme_worker = theme_engine::spawn();
     spawn_config_watcher();
     #[cfg(feature = "devtools")]
@@ -741,6 +740,8 @@ fn main() {
     devtools::start_capture_sequence();
     ipc::spawn_server();
 
+    // Single startup read (after the workers exist so the battery
+    // thresholds reach the automation scanner in one pass).
     refresh_battery();
     apply_stay_awake();
     refresh_checkboxes();
@@ -931,6 +932,9 @@ unsafe extern "system" fn hidden_proc(
                 settings_ui::refresh_classic_restart();
                 // Lock-key sampling must stay on this message-pumping thread.
                 popups::poll();
+                // The countdown card never takes focus, so its Esc escape
+                // rides the same poll.
+                popups::poll_escape();
                 LRESULT(0)
             }
 
@@ -1032,6 +1036,16 @@ unsafe extern "system" fn hidden_proc(
                     // follow it for the same wake and must not fire twice.
                     if wparam.0 == 18 {
                         automation::on_resume();
+                        // QPC-based deadlines and GetLastInputInfo both
+                        // count the suspend: without a reset, the first
+                        // post-wake sample would see the idle threshold as
+                        // already passed and execute the action with no
+                        // cancel window. Restart both clocks so the wake
+                        // itself is the start of a fresh idle session, and
+                        // re-arm any visible action countdown in full.
+                        crate::runtime::lock(&IDLE_CLOCK).restart(std::time::Instant::now());
+                        warning::hide_warning("power resume");
+                        popups::restart_after_resume();
                     }
                     refresh_battery();
                     apply_stay_awake();
@@ -1050,7 +1064,21 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             WM_EXTERNAL_RELOAD => {
-                let _ = hot_reload_config();
+                // A hand-edited file that no longer validates keeps the last
+                // good config running — silently. Surface the reason once
+                // per distinct failure; the log stays default-off, and every
+                // later save only reports a vague conflict without this.
+                static ANNOUNCED: Mutex<Option<String>> = Mutex::new(None);
+                if let Err(error) = hot_reload_config() {
+                    let first_time = runtime::lock(&ANNOUNCED).as_deref() != Some(error.as_str());
+                    if first_time {
+                        *runtime::lock(&ANNOUNCED) = Some(error.clone());
+                        log_line(&format!("external config reload failed: {error}"));
+                        warn_dialog("", &t_args("warning_config_reload_rejected", &[&error]));
+                    }
+                } else {
+                    *runtime::lock(&ANNOUNCED) = None;
+                }
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE => {
@@ -1853,8 +1881,7 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
                 (root == warning::hwnd_of_warning())
                     .then(|| GetDlgItem(Some(root), warning::IDC_WARN_CANCEL as i32).ok())
                     .flatten()
-            })
-            .or_else(|| popups::default_button(root));
+            });
         if default.is_none() && root != hwnd(&PANEL) {
             return false;
         }
@@ -1873,9 +1900,15 @@ fn pre_translate_dialog(msg: &windows::Win32::UI::WindowsAndMessaging::MSG) -> b
                 let focus = GetFocus();
                 let mut class = [0u16; 32];
                 let len = GetClassNameW(focus, &mut class);
-                let button = if String::from_utf16_lossy(&class[..len.max(0) as usize])
-                    .eq_ignore_ascii_case("BUTTON")
-                {
+                let is_button = String::from_utf16_lossy(&class[..len.max(0) as usize])
+                    .eq_ignore_ascii_case("BUTTON");
+                // Switch rows are BUTTONs whose only hit area is the pill
+                // column; BM_CLICK synthesizes its press at (0, 0), which
+                // lands in the drag region and never toggles (it can start
+                // a caption drag instead). Route those to the default
+                // button so Enter still means "confirm".
+                let is_switch_row = is_button && nativeform::hover_column(focus) > 0;
+                let button = if is_button && !is_switch_row {
                     Some(focus)
                 } else {
                     default
@@ -2827,23 +2860,58 @@ fn make_font(size_px: i32, weight: i32) -> HFONT {
 /// units. Only call on the UI thread. Skips the `Shell_NotifyIconW` round
 /// trip when the truncated text is unchanged: this runs every second from
 /// `refresh_status`.
-fn tray_update_tooltip(line: &str) {
+/// Graceful degradation for the 120-unit tooltip cap: rank 0 lines never
+/// drop; higher ranks drop first when the joined text overflows.
+fn tray_update_tooltip(lines: &[(u8, String)]) {
     static LAST: Mutex<Option<String>> = Mutex::new(None);
-    // Graceful degradation before the hard cut: dropping the version suffix
-    // from the first line usually frees room for the last status line.
-    let mut text = line.to_string();
-    if text.encode_utf16().count() > 118
+    let utf16_len = |text: &str| text.encode_utf16().count();
+    let mut text = lines
+        .iter()
+        .map(|(_, l)| l.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // First tier: dropping the version suffix from the first line usually
+    // frees room for the last status line.
+    if utf16_len(&text) > 118
         && let Some((first, rest)) = text.split_once('\n')
         && let Some((_, bare_name)) = first.split_once(" v")
     {
-        let candidate = format!("{bare_name}{rest}");
-        if candidate.encode_utf16().count() <= 118 {
+        let candidate = format!("{bare_name}\n{rest}");
+        if utf16_len(&candidate) <= 118 {
             text = candidate;
+        }
+    }
+    // Second tier: drop whole lines by ascending importance (highest rank
+    // first, cumulatively — each round also keeps every lower rank dropped)
+    // instead of hard-cutting the tail mid-word.
+    if utf16_len(&text) > 118 {
+        let mut drop_rank = lines.iter().filter(|(r, _)| *r > 0).map(|(r, _)| *r).max();
+        while let Some(rank) = drop_rank {
+            text = lines
+                .iter()
+                .filter(|(r, _)| *r < rank)
+                .map(|(_, l)| l.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if utf16_len(&text) <= 118 {
+                break;
+            }
+            drop_rank = lines
+                .iter()
+                .filter(|(r, _)| *r > 0 && *r < rank)
+                .map(|(r, _)| *r)
+                .max();
         }
     }
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     if wide.len() > 118 {
-        wide.truncate(118);
+        // Back off one unit when the cut would split a UTF-16 surrogate
+        // pair; the ellipsis must not follow an orphaned half-character.
+        let mut cut = 118;
+        if (0xD800..0xDC00).contains(&wide[cut - 1]) {
+            cut -= 1;
+        }
+        wide.truncate(cut);
         wide.extend_from_slice("…".encode_utf16().collect::<Vec<u16>>().as_slice());
     }
     let text = String::from_utf16_lossy(&wide);
@@ -2860,18 +2928,23 @@ fn tray_update_tooltip(line: &str) {
 
 /// Go buildTooltip parity: title + 保持唤醒/空闲监测/主题/自动任务 lines,
 /// "%s：%s" per line, joined by newlines, capped at 120 UTF-16 units.
+/// Each line carries a drop rank: 0 never drops; higher ranks drop first
+/// when the joined text exceeds the cap (see tray_update_tooltip).
 fn build_tray_tooltip(
     effective_nosleep: bool,
     idle_running: bool,
     power: &EffectivePowerState,
-) -> String {
+) -> Vec<(u8, String)> {
     let line = |key: &str, value: String| t_args("status_line", &[&t(key), &value]);
 
-    let mut lines = vec![if APP_VERSION.is_empty() || APP_VERSION == "dev" {
-        "IdleTrigger".to_string()
-    } else {
-        format!("IdleTrigger v{APP_VERSION}")
-    }];
+    let mut lines = vec![(
+        0u8,
+        if APP_VERSION.is_empty() || APP_VERSION == "dev" {
+            "IdleTrigger".to_string()
+        } else {
+            format!("IdleTrigger v{APP_VERSION}")
+        },
+    )];
 
     // Stay awake: effective state, paused wording under battery block. When
     // the saved switch is off and only the timed overlay is awake, the line
@@ -2893,7 +2966,7 @@ fn build_tray_tooltip(
     } else {
         t("status_short_off")
     };
-    lines.push(line("tooltip_nosleep", stay_awake));
+    lines.push((0, line("tooltip_nosleep", stay_awake)));
 
     // Timed override: a distinct line only when the first line doesn't
     // already carry it (manual switch or a task is the primary source).
@@ -2901,7 +2974,10 @@ fn build_tray_tooltip(
         && (manual_on || task_awake)
         && let Some((remaining, _)) = timed
     {
-        lines.push(line("tooltip_nosleep_timed", format_remaining(remaining)));
+        lines.push((
+            3,
+            line("tooltip_nosleep_timed", format_remaining(remaining)),
+        ));
     }
 
     // Idle monitor: paused by stay-awake, or "Nm 动作" when running.
@@ -2911,29 +2987,37 @@ fn build_tray_tooltip(
             "menu_action_{}",
             cfg_map(|c| c.idle_action.clone())
         ));
-        lines.push(line(
-            "tooltip_idle",
-            format!("{} {unit} {action_label}", power.idle_minutes),
+        lines.push((
+            1,
+            line(
+                "tooltip_idle",
+                format!("{} {unit} {action_label}", power.idle_minutes),
+            ),
         ));
     } else if power.idle_requested && (effective_nosleep || power.idle_paused) {
-        lines.push(line("tooltip_idle", t("status_paused")));
+        lines.push((1, line("tooltip_idle", t("status_paused"))));
     } else {
-        lines.push(line("tooltip_idle", t("status_short_off")));
+        lines.push((1, line("tooltip_idle", t("status_short_off"))));
     }
 
-    lines.push(line("tooltip_theme", theme_tooltip_value_short()));
+    // Go line order keeps 主题 before 自动任务; only the drop rank (theme
+    // first to go when the cap forces a choice) is our addition.
+    lines.push((4, line("tooltip_theme", theme_tooltip_value_short())));
 
     let enabled_count = crate::runtime::lock(&automation::RULES)
         .iter()
         .filter(|r| r.enabled)
         .count();
     if enabled_count > 0 {
-        lines.push(line(
-            "tooltip_automation",
-            crate::t_args("status_automation_count", &[&enabled_count.to_string()]),
+        lines.push((
+            2,
+            line(
+                "tooltip_automation",
+                crate::t_args("status_automation_count", &[&enabled_count.to_string()]),
+            ),
         ));
     }
-    lines.join("\n")
+    lines
 }
 
 /// Go themeTooltipValueShort: 开 + short schedule, 关, or 不支持.
@@ -3762,7 +3846,17 @@ fn power_status_impl(compact: bool) -> (String, String) {
     } else if power.lock_paused {
         pick("panel_status_paused_lock", "status_paused_by_lock")
     } else if !power.battery_allowed {
-        pick("panel_status_paused_battery", "status_paused_by_battery")
+        // Fold the live percentage in: the user's next question is always
+        // "how far until it recovers" (data already polled every 30s).
+        let percent = BATTERY_PERCENT.load(Ordering::SeqCst).to_string();
+        t_args(
+            if compact {
+                "panel_status_paused_battery_pct"
+            } else {
+                "status_paused_by_battery_pct"
+            },
+            &[&percent],
+        )
     } else if !manual_on && !reasons.is_empty() {
         let key = if compact {
             "panel_status_awake_overrides"
@@ -4093,17 +4187,31 @@ pub(crate) fn sync_timed_with_manual() {
     }
 }
 
-/// Short countdown for tooltip/status: whole minutes, or seconds below one.
+/// Short countdown for tooltip/status: whole hours (with leftover minutes)
+/// at an hour or more, whole minutes below that, seconds under a minute.
+/// Matches the preset chips' "1 hour / 2 hours" wording instead of reading
+/// "120 minutes" back at the user.
 fn format_remaining(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
-    if secs >= 60 {
-        format!(
-            "{} {}",
-            secs / 60,
-            if i18n_is_chinese() { "分钟" } else { "min" }
-        )
+    let chinese = i18n_is_chinese();
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        if minutes == 0 {
+            format!("{} {}", hours, if chinese { "小时" } else { "h" })
+        } else {
+            format!(
+                "{} {} {} {}",
+                hours,
+                if chinese { "小时" } else { "h" },
+                minutes,
+                if chinese { "分钟" } else { "min" }
+            )
+        }
+    } else if secs >= 60 {
+        format!("{} {}", secs / 60, if chinese { "分钟" } else { "min" })
     } else {
-        format!("{} {}", secs, if i18n_is_chinese() { "秒" } else { "s" })
+        format!("{} {}", secs, if chinese { "秒" } else { "s" })
     }
 }
 
@@ -4149,6 +4257,18 @@ fn idle_settings() -> idle_monitor::Settings {
     } else {
         threshold
     };
+    // Runtime safety net mirroring the settings cross-check (warning may
+    // use at most threshold−10s so the countdown keeps its cancel window):
+    // older configs, or task-driven idle monitors whose threshold comes
+    // from a rule while the warning stays global, bypass the form's
+    // validation. The floor keeps a sane window on tiny devtools
+    // thresholds.
+    let min_warning = Duration::from_secs(idletrigger_core::automation::MIN_WARNING_SECONDS as u64);
+    let warn_ceiling = threshold
+        .saturating_sub(min_warning)
+        .max(min_warning)
+        .as_secs() as i32;
+    let warning = warning.min(warn_ceiling);
     idle_monitor::Settings {
         enabled: power.idle_running(),
         threshold,

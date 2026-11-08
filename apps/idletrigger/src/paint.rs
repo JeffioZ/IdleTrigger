@@ -1288,10 +1288,12 @@ pub fn draw_label(
         SetTextColor(hdc, COLORREF(color));
         SetBkMode(hdc, TRANSPARENT);
         let old = SelectObject(hdc, HGDIOBJ(font.0));
+        // DT_END_ELLIPSIS: a single-line label that outgrows its slot
+        // ellipsizes instead of clipping mid-glyph.
         let flags = if left {
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
         } else {
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
         };
         let _ = DrawTextW(hdc, &mut text, &mut bounds, flags | DT_NOPREFIX);
         SelectObject(hdc, old);

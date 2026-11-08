@@ -130,7 +130,18 @@ pub(crate) fn log_line(msg: &str) {
     {
         guard.take();
         if let Some(path) = lock(&CONFIG_PATH).as_ref().and_then(|path| path.parent()) {
-            *guard = open_log(&path.join("IdleTrigger.log")).ok();
+            let log_path = path.join("IdleTrigger.log");
+            // Rotation renames the live file; when another program holds it
+            // (AV scan, a viewer) the rename fails — keep appending to the
+            // original instead of silently dropping the session's logs.
+            *guard = open_log(&log_path)
+                .or_else(|_| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                })
+                .ok();
         }
     }
     if let Some(file) = guard.as_mut() {
@@ -188,6 +199,11 @@ pub(crate) fn sync_logging() {
     }
 }
 
+/// The most recent reason an external reload was rejected, so save-time
+/// conflict messages can name the underlying cause. Cleared on the next
+/// successful reload.
+pub(crate) static LAST_RELOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
 pub(crate) fn commit_config(
     edit: impl FnOnce(&mut config::Config, &mut toml_edit::DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -204,7 +220,15 @@ pub(crate) fn commit_config(
         Err(err) => return Err(err.to_string()),
     };
     if source != *lock(&CONFIG_SOURCE) {
-        return Err(crate::t_pub("settings_save_conflict"));
+        // Most conflicts trace back to a hand edit that failed validation
+        // and left the watcher's view of the file stale; name that reason
+        // when we have one instead of a bare "retry later".
+        let mut message = crate::t_pub("settings_save_conflict");
+        if let Some(reason) = lock(&LAST_RELOAD_ERROR).clone() {
+            message.push('\n');
+            message.push_str(&reason);
+        }
+        return Err(message);
     }
     let mut candidate = lock(&CONFIG)
         .clone()
@@ -313,12 +337,14 @@ pub(crate) fn reload_config() -> Result<(config::Config, bool), String> {
         log_line(&format!(
             "config reload rejected; retaining last valid configuration: {err}"
         ));
+        *lock(&LAST_RELOAD_ERROR) = Some(err.clone());
         return Err(err);
     }
     let nosleep_was_on = lock(&CONFIG).as_ref().is_some_and(|c| c.nosleep_enabled);
     *lock(&CONFIG) = Some(loaded.config.clone());
     *lock(&CONFIG_DOC) = Some(loaded.document);
     *lock(&CONFIG_SOURCE) = loaded.source_text;
+    *lock(&LAST_RELOAD_ERROR) = None;
     CONFIG_LOAD_FAILED.store(false, Ordering::SeqCst);
     CTX_SYNC_BLOCKED.store(false, Ordering::SeqCst);
     crate::automation::reload_rules();

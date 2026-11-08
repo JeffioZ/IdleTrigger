@@ -1473,7 +1473,29 @@ unsafe extern "system" fn mgr_proc(
                             LRESULT(0)
                         }
                         ID_DISCARD if code == BN_CLICKED as usize => {
-                            finish_edit(false);
+                            // Cancel sits right beside Save: an unsaved draft
+                            // gets the same Yes/No/Cancel every other exit
+                            // path asks for (Yes saves, No discards).
+                            let original = crate::runtime::lock(&DRAFT).clone();
+                            let dirty = original.is_some_and(|orig| draft_from_form() != orig);
+                            if !dirty {
+                                finish_edit(false);
+                            } else {
+                                let answer = MessageBoxW(
+                                    Some(mgr()),
+                                    PCWSTR(wide(&crate::t_pub("ctx_unsaved_prompt")).as_ptr()),
+                                    PCWSTR(wide(&crate::t_pub("ctx_manager_title")).as_ptr()),
+                                    windows::Win32::UI::WindowsAndMessaging::MB_YESNOCANCEL
+                                        | MB_ICONQUESTION,
+                                );
+                                match answer {
+                                    IDYES if apply_form() => finish_edit(true),
+                                    windows::Win32::UI::WindowsAndMessaging::IDNO => {
+                                        finish_edit(false);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             LRESULT(0)
                         }
                         ID_PREVIEW if code == BN_CLICKED as usize => {
@@ -2742,7 +2764,9 @@ fn browse_for_file(edit_id: usize, filter_key: &str) {
         lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
         nMaxFile: file.len() as u32,
         lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+        Flags: OFN_FILEMUSTEXIST
+            | OFN_HIDEREADONLY
+            | windows::Win32::UI::Controls::Dialogs::OPEN_FILENAME_FLAGS(0x0000_0008), // OFN_NOCHANGEDIR
         ..Default::default()
     };
     let picked = unsafe { GetOpenFileNameW(&mut ofn) };

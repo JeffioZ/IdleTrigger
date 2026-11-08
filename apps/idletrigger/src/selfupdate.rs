@@ -38,8 +38,13 @@ const DOWNLOAD_TIMEOUTS: (i32, i32, i32, i32) = (10000, 10000, 10000, 30000);
 // hostile responses filling the disk.
 const MAX_EXE_BYTES: u64 = 128 * 1024 * 1024;
 const MIN_EXE_BYTES: u64 = 256 * 1024;
-// Panel-show checks stay at most one per minute; the check itself is silent.
+// Panel-show checks stay at most one per minute while an update is known;
+// the check itself is silent. A "no update" answer caches for half a day
+// (frequent panel opens must not hammer GitHub), and a failed round backs
+// off for ten minutes instead of retrying every minute.
 const CHECK_COOLDOWN: Duration = Duration::from_secs(60);
+const UP_TO_DATE_CACHE: Duration = Duration::from_secs(12 * 60 * 60);
+const FAILURE_BACKOFF: Duration = Duration::from_secs(10 * 60);
 const PENDING_APPLY_MARKER: &str = "pending-apply";
 const READY_FILE: &str = "ready.json";
 const REPLACE_SCRIPT: &str = "update.ps1";
@@ -314,6 +319,14 @@ fn run_check(manual: bool) {
     // Keep BUSY owned while recovering, so a panic cannot strand Checking
     // or reset a newer round started by another click.
     crate::runtime::catch_and_log("self-update-check", || result = fetch_latest());
+    // Outcome-tiered cooldown: "no update" answers cache for hours, a known
+    // update keeps the short cadence, failures back off. Manual checks
+    // ignore the cooldown either way.
+    let cooldown = match &result {
+        Ok(latest) if offer_phase(latest.clone()) == Phase::Idle => UP_TO_DATE_CACHE,
+        Ok(_) => CHECK_COOLDOWN,
+        Err(_) => FAILURE_BACKOFF,
+    };
     match result {
         Ok(latest) => {
             *lock(&KNOWN_UPDATE) = latest.clone();
@@ -343,7 +356,7 @@ fn run_check(manual: bool) {
             }
         }
     }
-    stamp_cooldown();
+    stamp_cooldown(cooldown);
     notify_ui(true);
 }
 
@@ -476,8 +489,8 @@ fn fallback_phase() -> Phase {
     offer_phase(latest)
 }
 
-fn stamp_cooldown() {
-    *lock(&COOLDOWN_UNTIL) = Some(Instant::now() + CHECK_COOLDOWN);
+fn stamp_cooldown(duration: Duration) {
+    *lock(&COOLDOWN_UNTIL) = Some(Instant::now() + duration);
 }
 
 fn is_newer_stable(version: &str) -> bool {
@@ -1155,13 +1168,24 @@ pub(crate) fn cleanup_on_startup() {
     // replacement the marker never matches, so the marker branch alone would
     // never surface this error.
     if let Some(error) = drain_replace_error(&dir) {
-        crate::log_line(&format!(
-            "self-update: the previous replace script failed (old version restored or kept for retry):\n{error}"
-        ));
-        // The relaunched app comes up silently (rolled back or intact), so
-        // the trail is surfaced once here — without it a failed round leaves
-        // no user-visible trace beyond the panel still offering the update.
-        crate::warn_dialog("", &crate::t_args("update_rollback_notice", &[&error]));
+        // The one benign trail: the replace succeeded but the script's
+        // startup-confirmation window timed out (e.g. the new build showed
+        // a startup dialog the user left open). When the running version
+        // is the marker's target, this process IS the updated build —
+        // surfacing a rollback notice would be a false alarm.
+        if replace_error_is_stale(&dir, crate::APP_VERSION) {
+            crate::log_line(
+                "self-update: replace script flagged a timeout, but this build matches the apply marker; ignoring the stale trail",
+            );
+        } else {
+            crate::log_line(&format!(
+                "self-update: the previous replace script failed (old version restored or kept for retry):\n{error}"
+            ));
+            // The relaunched app comes up silently (rolled back or intact), so
+            // the trail is surfaced once here — without it a failed round leaves
+            // no user-visible trace beyond the panel still offering the update.
+            crate::warn_dialog("", &crate::t_args("update_rollback_notice", &[&error]));
+        }
     }
     let part = part_path();
     if part.exists() {
@@ -1206,6 +1230,18 @@ pub(crate) fn cleanup_on_startup() {
             "self-update: previous update confirmed, staging folder and old backup reclaimed",
         );
     }
+}
+
+/// True when the pending-apply marker names the running version: the last
+/// replace round actually landed, so a replace-error trail is stale (the
+/// script's confirmation timeout fired while the new build was already up).
+fn replace_error_is_stale(dir: &Path, running_version: &str) -> bool {
+    std::fs::read_to_string(dir.join(PENDING_APPLY_MARKER))
+        .map(|target| {
+            let target = target.trim();
+            !target.is_empty() && target == running_version
+        })
+        .unwrap_or(false)
 }
 
 /// Marker-driven cleanup decision (pure for tests): true when cleanup ran.
@@ -1913,6 +1949,7 @@ mod tests {
         std::fs::write(&staged, b"new").unwrap();
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", None));
         assert!(staged.exists());
+        assert!(!replace_error_is_stale(&dir, "1.2.3"));
         let nomarker_dir = dir;
 
         // Marker mismatch (replacement failed or rolled back): keep staging,
@@ -1922,6 +1959,7 @@ mod tests {
         std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.9.9").unwrap();
         let old = temp("mismatch-old").join("IdleTrigger.exe.old");
         std::fs::write(&old, b"old").unwrap();
+        assert!(!replace_error_is_stale(&dir, "1.2.3"));
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", Some(&old)));
         assert!(dir.join(ASSET_NAME).exists());
         assert!(dir.join(PENDING_APPLY_MARKER).exists());
@@ -1930,12 +1968,15 @@ mod tests {
         let mismatch_old = old.parent().unwrap().to_path_buf();
 
         // Matching marker (running == target): reclaim everything, idempotent.
+        // A replace-error trail alongside it is stale (confirmation timeout
+        // while the updated build was already up).
         let dir = temp("match");
         std::fs::write(dir.join(ASSET_NAME), b"new").unwrap();
         std::fs::write(dir.join(REPLACE_SCRIPT), b"script").unwrap();
         std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.2.3").unwrap();
         let old = temp("match-old").join("IdleTrigger.exe.old");
         std::fs::write(&old, b"old").unwrap();
+        assert!(replace_error_is_stale(&dir, "1.2.3"));
         assert!(cleanup_applied_update_in(&dir, "1.2.3", Some(&old)));
         assert!(!dir.exists());
         assert!(!old.exists());

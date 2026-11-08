@@ -207,8 +207,28 @@ pub fn autostart_ensure_current() -> Result<(), String> {
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .into_owned();
-            if current != format!("\"{path}\" --minimized") && !autostart_enable(&path) {
-                return Err("could not update autostart registration".into());
+            let expected = format!("\"{path}\" --minimized");
+            if current != expected {
+                // A registration pointing at a *different existing* EXE is
+                // another copy the user deliberately runs (x86 beside x64, a
+                // downloaded test build): re-pointing autostart at whichever
+                // copy happened to start last would silently hijack logins.
+                // Repair only when the registered target is gone (the app
+                // was moved/deleted and the registration is dead weight).
+                let registered_path = current
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.split_once('"'))
+                    .map(|(target, _)| target.to_string())
+                    .unwrap_or_else(|| current.split_whitespace().next().unwrap_or("").to_string());
+                if std::path::Path::new(&registered_path).exists() {
+                    crate::log_line(&format!(
+                        "autostart points at another existing copy; left as registered: {registered_path}"
+                    ));
+                    return Ok(());
+                }
+                if !autostart_enable(&path) {
+                    return Err("could not update autostart registration".into());
+                }
             }
             Ok(())
         })();

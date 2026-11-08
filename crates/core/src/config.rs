@@ -360,23 +360,23 @@ fn read_config(
         // The library rides the same mistyped-field contract as every
         // other field: a non-array value (or any non-string element) is
         // recorded in bad_fields so the startup notice names it and one
-        // save rewrites the offender, instead of silently vanishing.
+        // save rewrites the offender. Well-formed entries survive a bad
+        // neighbor — dropping the whole list made the "save once to fix"
+        // hint erase the library for real.
         theme_wallpapers: match document.get("theme_wallpapers") {
             Some(toml_edit::Item::Value(toml_edit::Value::Array(array))) => {
                 let mut parsed = Vec::with_capacity(array.len());
-                let mut all_strings = true;
+                let mut dropped = false;
                 for value in array.iter() {
                     match value.as_str() {
                         Some(path) => parsed.push(path.to_string()),
-                        None => all_strings = false,
+                        None => dropped = true,
                     }
                 }
-                if all_strings {
-                    parsed
-                } else {
+                if dropped {
                     bad_fields.push("theme_wallpapers".to_string());
-                    defaults.theme_wallpapers.clone()
                 }
+                parsed
             }
             Some(_) => {
                 bad_fields.push("theme_wallpapers".to_string());
@@ -614,8 +614,24 @@ fn save_candidate(
     if std::fs::read_to_string(path).is_ok_and(|original| original == text) {
         return Ok(());
     }
+    // Keep the last on-disk state as a sibling .bak: NTFS only journals
+    // metadata, so a power cut between data write and rename can leave a
+    // zeroed/truncated file — the backup is the user's only way back.
+    let mut bak = parent.to_path_buf();
+    bak.push(format!(
+        "{}.bak",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config")
+    ));
+    let _ = std::fs::copy(path, &bak);
     let result = (|| {
-        std::fs::write(&tmp, text)?;
+        // sync_all before the rename: without the flush barrier the rename
+        // can be journaled ahead of the data blocks.
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
@@ -681,6 +697,36 @@ mod save_tests {
                 .is_some_and(|err| err.contains("idle_timeout_minutes"))
         );
         assert_eq!(loaded.config.idle_timeout_minutes, 30); // default, not the string
+    }
+    #[test]
+    fn wallpaper_library_keeps_good_entries_beside_bad_ones() {
+        let path = std::env::temp_dir().join(format!(
+            "idletrigger-walllib-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "theme_wallpapers = [\"C:\\\\a.png\", 7, \"C:\\\\b.png\"]
+",
+        )
+        .unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        // The well-formed entries survive; only the bad element is flagged.
+        assert_eq!(
+            loaded.config.theme_wallpapers,
+            vec!["C:\\a.png".to_string(), "C:\\b.png".to_string()]
+        );
+        assert!(
+            loaded
+                .field_errors
+                .as_deref()
+                .is_some_and(|err| err.contains("theme_wallpapers"))
+        );
     }
     #[test]
     fn save_load_preserves_comments_and_ui_limits() {

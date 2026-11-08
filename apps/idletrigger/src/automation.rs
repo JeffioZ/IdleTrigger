@@ -30,6 +30,41 @@ static ACTIVE_RULES: Mutex<Vec<auto::Rule>> = Mutex::new(Vec::new());
 static BATTERY_FIRED: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
+/// Display name for a rule: saved names verbatim, or the language-following
+/// summary when the user left the name blank (blank names persist since the
+/// summary must follow language switches, not freeze at creation time).
+pub fn display_name(rule: &auto::Rule) -> String {
+    if rule.name.is_empty() {
+        crate::automation_rules::rule_summary(rule)
+    } else {
+        rule.name.clone()
+    }
+}
+
+/// aggregate_state with the display fallback applied: nameless stay-awake
+/// rules contribute their summary to the reason sources, so the panel never
+/// renders an empty 「task ""」.
+fn aggregate_display_state<'a>(
+    rules: impl IntoIterator<Item = &'a auto::Rule>,
+) -> auto::EffectiveState {
+    let rules: Vec<&auto::Rule> = rules.into_iter().collect();
+    let mut state = auto::aggregate_state(rules.iter().copied());
+    // aggregate_state pushes enabled stay-awake names in iteration order;
+    // the nameless summaries line up with the empty slots one-to-one.
+    let mut summaries = rules
+        .iter()
+        .filter(|r| r.enabled && r.action == auto::ACTION_STAY_AWAKE && r.name.is_empty())
+        .map(|r| crate::automation_rules::rule_summary(r));
+    for source in &mut state.stay_awake_sources {
+        if source.is_empty()
+            && let Some(summary) = summaries.next()
+        {
+            *source = summary;
+        }
+    }
+    state
+}
+
 pub fn overrides() -> auto::EffectiveState {
     crate::runtime::lock(&OVERRIDES).clone()
 }
@@ -267,7 +302,7 @@ pub fn reload_rules() {
                 .iter()
                 .any(|current| current.enabled && current == rule)
     });
-    publish_overrides(auto::aggregate_state(active.iter()));
+    publish_overrides(aggregate_display_state(active.iter()));
     drop(active);
     let is_current = |rule: &auto::Rule| {
         enabled
@@ -305,6 +340,11 @@ pub fn reload_rules() {
         crate::runtime::lock(&RULES).len(),
         issue_count
     ));
+    // State rules whose entries were dropped above only regain effect at the
+    // scanner's next wakeup (up to 5s away) — nudge it now so a rename-only
+    // edit doesn't blip the panel's reason line or briefly release Stay
+    // Awake.
+    INCOMING_EVENTS.1.notify_one();
 }
 
 pub fn spawn(config_dir: PathBuf) {
@@ -495,7 +535,7 @@ fn tick_with_snapshot(
         }
     }
     *crate::runtime::lock(&ACTIVE_RULES) = active.iter().map(|rule| (*rule).clone()).collect();
-    publish_overrides(auto::aggregate_state(active));
+    publish_overrides(aggregate_display_state(active));
     if snapshot.is_none() {
         Err("process snapshot failed".into())
     } else {
@@ -670,7 +710,7 @@ fn dispatch_event(rule: &auto::Rule, occurrence: Option<String>, notify: impl Fn
         // a scheduled action silently is hard to diagnose from the tray.
         crate::runtime::lock(&SAVE_ERRORS).insert(
             format!("{}-busy", rule.id),
-            crate::t_args("automation_event_skipped_busy", &[&rule.name]),
+            crate::t_args("automation_event_skipped_busy", &[&display_name(rule)]),
         );
         request_refresh();
         return;
@@ -712,7 +752,7 @@ fn record_occurrence(rule: &auto::Rule, occurrence: String) -> bool {
                 rule.id.clone(),
                 crate::t_args(
                     "automation_checkpoint_failed",
-                    &[&rule.name, &error.to_string()],
+                    &[&display_name(rule), &error.to_string()],
                 ),
             );
             request_refresh();
@@ -739,6 +779,8 @@ fn persist_state() -> std::io::Result<()> {
 
 /// Cancelling a one-shot rule disables only that specific rule (identified
 /// by the rule_id carried in the pending action), not every once rule.
+/// Save failures surface through the async save-error channel: a blocking
+/// dialog here would delay (or, unattended, stop) the action that follows.
 pub fn disable_rule_after_cancel(rule_id: &str) {
     let base = crate::runtime::lock(&RULES).clone();
     let mut rules = base.clone();
@@ -749,8 +791,13 @@ pub fn disable_rule_after_cancel(rule_id: &str) {
         return;
     };
     rule.enabled = false;
+    let rule_name = display_name(rule);
     if let Err(err) = crate::save_automation_rules(&base, &rules) {
-        crate::warn_dialog("", &err);
+        crate::runtime::lock(&SAVE_ERRORS).insert(
+            format!("{rule_id}-disable"),
+            crate::t_args("automation_once_disable_failed", &[&rule_name, &err]),
+        );
+        request_refresh();
     }
 }
 /// A schedule is "due" when now is within the 2-minute grace past the

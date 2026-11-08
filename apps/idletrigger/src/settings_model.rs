@@ -44,7 +44,7 @@ pub(crate) struct Draft {
     pub update_auto: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ValidationField {
     NotificationKeys,
     BatteryThreshold,
@@ -79,19 +79,32 @@ pub(crate) fn validate_draft(draft: &Draft) -> Option<(ValidationField, &'static
         Some(v) if (idletrigger_core::automation::MIN_WARNING_SECONDS..=3600).contains(&v) => {}
         _ => return Some((ValidationField::Warning, "settings_error_warning_seconds")),
     }
+    // The countdown must retain a cancellable window: the warning may use
+    // at most timeout−10s, mirroring the runtime clamp in idle_settings —
+    // a warning that reaches the threshold makes every pause qualify for
+    // the countdown immediately, and one that leaves under 10 seconds
+    // breaks the minimum cancel window.
+    if let (Some(timeout), Some(warning)) = (draft.idle_timeout, draft.warning)
+        && warning
+            > timeout
+                .saturating_mul(60)
+                .saturating_sub(idletrigger_core::automation::MIN_WARNING_SECONDS)
+    {
+        return Some((ValidationField::Warning, "settings_error_warning_ge_idle"));
+    }
     // The fixed-schedule times are hidden and unused in sunrise mode;
     // validating them would report against invisible fields. Saving keeps
     // the baseline times if these hidden edits are incomplete.
     if draft.theme_mode_idx != 1 {
-        if !valid_time(&draft.light_time) {
+        if !valid_time(&normalize_time(&draft.light_time)) {
             return Some((ValidationField::LightTime, "settings_error_light_time"));
         }
-        if !valid_time(&draft.dark_time) {
+        if !valid_time(&normalize_time(&draft.dark_time)) {
             return Some((ValidationField::DarkTime, "settings_error_dark_time"));
         }
         // Equal boundaries make the light window empty — the schedule would
         // read as dark all day while the configuration still looks valid.
-        if draft.light_time == draft.dark_time {
+        if normalize_time(&draft.light_time) == normalize_time(&draft.dark_time) {
             return Some((ValidationField::DarkTime, "settings_error_same_time"));
         }
     }
@@ -109,6 +122,20 @@ fn valid_time(value: &str) -> bool {
     let hour: u32 = value[..2].parse().unwrap_or(99);
     let minute: u32 = value[3..].parse().unwrap_or(99);
     hour < 24 && minute < 60
+}
+
+/// Maps full-width digits and the full-width colon from a Chinese IME onto
+/// the ASCII editing grammar, so "０７：３０" validates and saves as
+/// "07:30" (the rule editor's time fields already normalize on input).
+pub(crate) fn normalize_time(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c as u32 {
+            0xFF10..=0xFF19 => char::from_u32(c as u32 - 0xFF10 + 0x30).unwrap_or(c),
+            0xFF1A => ':',
+            _ => c,
+        })
+        .collect()
 }
 
 impl Draft {
@@ -175,12 +202,13 @@ pub(crate) fn draft_config(draft: &Draft, base: &Config) -> Config {
         "fixed"
     }
     .to_string();
-    if valid_time(&draft.light_time)
-        && valid_time(&draft.dark_time)
-        && draft.light_time != draft.dark_time
-    {
-        c.theme_light_time = draft.light_time.clone();
-        c.theme_dark_time = draft.dark_time.clone();
+    let (light, dark) = (
+        normalize_time(&draft.light_time),
+        normalize_time(&draft.dark_time),
+    );
+    if valid_time(&light) && valid_time(&dark) && light != dark {
+        c.theme_light_time = light;
+        c.theme_dark_time = dark;
     }
     c.theme_ip_location_enabled = draft.location_idx == 1;
     c.theme_dark_on_battery = draft.theme_battery;
@@ -778,6 +806,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn warning_at_least_the_idle_timeout_is_rejected_and_normalized_times_save() {
+        // The cross-field check mirrors the runtime clamp: the warning may
+        // use at most timeout−10s so the countdown keeps its cancel window.
+        let base = Config::default();
+        let mut draft = Draft::from_config(&base, false);
+        draft.idle_timeout = Some(1);
+        draft.warning = Some(55);
+        assert_eq!(
+            validate_draft(&draft),
+            Some((ValidationField::Warning, "settings_error_warning_ge_idle"))
+        );
+        draft.warning = Some(50);
+        assert_eq!(validate_draft(&draft), None);
+
+        // Full-width digits and colon from a Chinese IME normalize before
+        // validation and save as plain HH:MM.
+        let mut draft = Draft::from_config(&base, false);
+        draft.light_time = "０７：３０".to_string();
+        draft.dark_time = "１９：４５".to_string();
+        assert_eq!(validate_draft(&draft), None);
+        let projected = draft_config(&draft, &base);
+        assert_eq!(projected.theme_light_time, "07:30");
+        assert_eq!(projected.theme_dark_time, "19:45");
     }
 
     #[test]

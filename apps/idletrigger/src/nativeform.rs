@@ -258,6 +258,12 @@ pub fn set_hover_column(control: HWND, logical_width: i32) {
     });
 }
 
+/// The tracked hover-column width for a control (0 = whole client area).
+/// Identifies switch rows outside this module (e.g. keyboard routing).
+pub fn hover_column(control: HWND) -> i32 {
+    with_map(|m| m.get(&(control.0 as isize)).map_or(0, |t| t.hover_column))
+}
+
 /// Shared blank-drag hit-test for the panel-family top-level windows: a
 /// HTCLIENT point that resolves to the window itself becomes HTCAPTION,
 /// so true blanks drag with the system's move (and snap) while controls
@@ -783,6 +789,29 @@ pub fn form_tooltips(parent: HWND, bindings: &[(usize, &str)]) {
             TTM_SETTIPTEXTCOLOR,
             Some(WPARAM(crate::theme::tooltip_text_color() as usize)),
             None,
+        );
+    }
+}
+
+/// Retargets one registered form tool's text (dynamic status lines that
+/// ellipsize in place). The tool must have been registered by
+/// `form_tooltips`; a missing tooltip window or control is a no-op.
+pub fn set_form_tool_text(parent: HWND, control: HWND, text: &str) {
+    use windows::Win32::UI::Controls::TTM_UPDATETIPTEXTW;
+    use windows::core::PWSTR;
+    unsafe {
+        let tip = HWND(GetPropW(parent, windows::core::w!("IdleTriggerFormTooltip")).0);
+        if tip.is_invalid() || control.is_invalid() {
+            return;
+        }
+        let mut wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        let mut tool = form_tool(control);
+        tool.lpszText = PWSTR(wide.as_mut_ptr());
+        SendMessageW(
+            tip,
+            TTM_UPDATETIPTEXTW,
+            None,
+            Some(LPARAM(&tool as *const _ as isize)),
         );
     }
 }
