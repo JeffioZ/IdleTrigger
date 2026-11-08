@@ -349,7 +349,7 @@
   "update_err_unexpected_url": "下载地址不符合预期，已取消更新。",
   "update_err_rate_limit": "GitHub 暂时限制了请求，请约 %d 分钟后重试。",
   "update_err_http": "更新请求失败（HTTP %d）。",
-  "update_err_network": "无法连接更新服务，请检查网络后重试。",
+  "update_err_network": "无法连接更新服务，请检查网络与代理设置后重试。",
   "update_err_read": "读取响应失败。",
   "update_err_oversize": "响应超过大小上限。",
   "update_err_download_size": "下载内容超出预期大小，已取消。",

@@ -32,7 +32,6 @@ pub(crate) const ASSET_NAME: &str = "IdleTrigger-x86.exe";
 #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
 pub(crate) const ASSET_NAME: &str = "IdleTrigger.exe";
 
-const CHECK_TIMEOUTS: (i32, i32, i32, i32) = (5000, 5000, 5000, 8000);
 const DOWNLOAD_TIMEOUTS: (i32, i32, i32, i32) = (10000, 10000, 10000, 30000);
 // The release EXE is a few MB; the cap only guards against pathological or
 // hostile responses filling the disk.
@@ -45,6 +44,10 @@ const MIN_EXE_BYTES: u64 = 256 * 1024;
 const CHECK_COOLDOWN: Duration = Duration::from_secs(60);
 const UP_TO_DATE_CACHE: Duration = Duration::from_secs(12 * 60 * 60);
 const FAILURE_BACKOFF: Duration = Duration::from_secs(10 * 60);
+// Metadata fetches (feed, checksums, API fallback): proxied routes to
+// GitHub often need more than five seconds to establish, so the connect
+// budget is generous; HTTP status errors never pay it (they answer fast).
+const CHECK_TIMEOUTS: (i32, i32, i32, i32) = (5000, 10000, 10000, 15000);
 const PENDING_APPLY_MARKER: &str = "pending-apply";
 const READY_FILE: &str = "ready.json";
 const REPLACE_SCRIPT: &str = "update.ps1";
@@ -1478,7 +1481,19 @@ fn http_get(
     use windows::Win32::Networking::WinHttp::{WinHttpQueryDataAvailable, WinHttpReadData};
 
     let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
-    let opened = open_get_request(url, timeouts, &network_error)?;
+    // AUTOMATIC_PROXY can spend the whole first attempt on proxy discovery
+    // (WPAD/PAC); the immediate second attempt then uses the discovered
+    // route and usually succeeds. Only transport failures reach this
+    // branch — HTTP statuses return Ok and are judged by the caller — and
+    // the first error stays the reported one.
+    let first = open_get_request(url, timeouts, &network_error);
+    let opened = match first {
+        Ok(opened) => opened,
+        Err(first_error) => match open_get_request(url, timeouts, &network_error) {
+            Ok(opened) => opened,
+            Err(_) => return Err(first_error),
+        },
+    };
     let request = opened.request.0;
     unsafe {
         let headers = query_headers_block(request, &network_error)?;

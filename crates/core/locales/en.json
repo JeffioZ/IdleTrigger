@@ -349,7 +349,7 @@
   "update_err_unexpected_url": "The download URL was unexpected. The update was cancelled.",
   "update_err_rate_limit": "GitHub is temporarily limiting requests. Retry in about %d minutes.",
   "update_err_http": "The update request failed (HTTP %d).",
-  "update_err_network": "Could not connect to the update service. Check your connection and try again.",
+  "update_err_network": "Could not connect to the update service. Check your network and proxy settings, then try again.",
   "update_err_read": "Failed to read the response.",
   "update_err_oversize": "The response exceeds the size limit.",
   "update_err_download_size": "The download exceeded the expected size and was cancelled.",
