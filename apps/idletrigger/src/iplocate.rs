@@ -122,132 +122,24 @@ fn cached_location() -> Option<Location> {
 }
 
 fn fetch_ipwho() -> Option<Location> {
-    use windows::Win32::Networking::WinHttp::{
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-        WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-        WinHttpSendRequest, WinHttpSetTimeouts,
-    };
-    use windows::core::PCWSTR;
-
-    // RAII close for the three WinHTTP handles: no early-return path can
-    // leak (the manual close cascade this replaced had four copies).
-    struct Guard(*mut core::ffi::c_void);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = windows::Win32::Networking::WinHttp::WinHttpCloseHandle(self.0);
-            }
-        }
-    }
     // Failures used to vanish silently and left "IP lookup failed" without a
     // cause. They are throttled (30-minute retry), so one log line each is
     // safe and makes the settings-page status diagnosable.
     let fail = |what: String| crate::log_line(&format!("ip locate: {what}"));
-
-    unsafe {
-        let agent = wide(&format!("IdleTrigger/{}", crate::APP_VERSION));
-        let session = Guard(WinHttpOpen(
-            PCWSTR(agent.as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
-        if session.0.is_null() {
-            fail("WinHttpOpen failed".into());
-            return None;
-        }
-        if let Err(err) = WinHttpSetTimeouts(session.0, 5000, 5000, 5000, 5000) {
-            fail(format!("WinHttpSetTimeouts failed: {err}"));
-            return None;
-        }
-        // The endpoint is a compile-time constant: no URL cracking needed.
-        let connect = Guard(WinHttpConnect(
-            session.0,
-            PCWSTR(wide("ipwho.is").as_ptr()),
-            443, // HTTPS default port; the endpoint is a fixed constant
-            0,
-        ));
-        if connect.0.is_null() {
-            fail("WinHttpConnect failed".into());
-            return None;
-        }
-        let request = Guard(WinHttpOpenRequest(
-            connect.0,
-            PCWSTR(wide("GET").as_ptr()),
-            PCWSTR(wide("/").as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        ));
-        if request.0.is_null() {
-            fail("WinHttpOpenRequest failed".into());
-            return None;
-        }
-        if let Err(err) = WinHttpSendRequest(request.0, None, None, 0, 0, 0) {
-            fail(format!("request send failed: {err}"));
-            return None;
-        }
-        if let Err(err) = WinHttpReceiveResponse(request.0, std::ptr::null_mut()) {
-            fail(format!("request receive failed: {err}"));
-            return None;
-        }
-
-        let mut status: u32 = 0;
-        let mut status_size = size_of::<u32>() as u32;
-        if WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast()),
-            &mut status_size,
-            std::ptr::null_mut(),
-        )
-        .is_err()
-        {
-            fail("status query failed".into());
-            return None;
-        }
-        if status != 200 {
-            fail(format!("HTTP {status}"));
-            return None;
-        }
-        let mut body = Vec::new();
-        let mut complete = false;
-        loop {
-            let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request.0, &mut available).is_err() {
-                break;
+    let response =
+        match crate::net::http_get("https://ipwho.is/", (5000, 5000, 5000, 5000), 64 * 1024) {
+            Ok(response) => response,
+            Err(error) => {
+                fail(error.to_string());
+                return None;
             }
-            if available == 0 {
-                complete = true;
-                break;
-            }
-            if available as usize > 64 * 1024 - body.len() {
-                fail("response exceeded the 64 KiB cap".into());
-                break;
-            }
-            let mut chunk = vec![0u8; available as usize];
-            let mut read: u32 = 0;
-            if WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
-                || read == 0
-            {
-                break;
-            }
-            chunk.truncate(read as usize);
-            body.extend_from_slice(&chunk);
-        }
-        if !complete {
-            fail("response read ended early".into());
-            return None;
-        }
-        parse_ipwho(&String::from_utf8_lossy(&body))
+        };
+    if response.status != 200 {
+        fail(format!("HTTP {}", response.status));
+        return None;
     }
+    parse_ipwho(&String::from_utf8_lossy(&response.body))
 }
-
-use crate::wide;
 
 /// Keep the display label alongside the coordinates used for solar calculations.
 fn parse_ipwho(body: &str) -> Option<Location> {

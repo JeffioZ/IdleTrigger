@@ -94,8 +94,9 @@ pub fn unregister_all() {
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
@@ -296,82 +297,28 @@ pub fn autostart_disable() -> bool {
 pub fn is_windows_11() -> bool {
     static CLIENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     windows_build() >= 22000
-        && *CLIENT.get_or_init(|| unsafe {
-            use windows::Win32::System::Registry::*;
-            let mut key = HKEY::default();
-            if RegOpenKeyExW(
+        && *CLIENT.get_or_init(|| {
+            crate::reg::read_sz(
                 HKEY_LOCAL_MACHINE,
-                windows::core::w!("SYSTEM\\CurrentControlSet\\Control\\ProductOptions"),
-                None,
-                KEY_READ | KEY_WOW64_64KEY,
-                &mut key,
-            ) != ERROR_SUCCESS
-            {
-                return false;
-            }
-            let mut bytes = [0u8; 64];
-            let mut size = bytes.len() as u32;
-            let mut kind = REG_VALUE_TYPE::default();
-            let result = RegQueryValueExW(
-                key,
-                windows::core::w!("ProductType"),
-                None,
-                Some(&mut kind),
-                Some(bytes.as_mut_ptr()),
-                Some(&mut size),
-            );
-            let _ = RegCloseKey(key);
-            if result != ERROR_SUCCESS || kind != REG_SZ || size as usize > bytes.len() {
-                return false;
-            }
-            let text: Vec<u16> = bytes[..size as usize]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                .take_while(|c| *c != 0)
-                .collect();
-            String::from_utf16_lossy(&text).eq_ignore_ascii_case("WinNT")
+                "SYSTEM\\CurrentControlSet\\Control\\ProductOptions",
+                Some("ProductType"),
+                true,
+            )
+            .is_some_and(|product| product.eq_ignore_ascii_case("WinNT"))
         })
 }
 
 /// OS build from the machine registry; HKCU does not contain this version key.
 pub fn windows_build() -> u32 {
     static BUILD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *BUILD.get_or_init(|| unsafe {
-        use windows::Win32::System::Registry::*;
-        let mut key = HKEY::default();
-        if RegOpenKeyExW(
+    *BUILD.get_or_init(|| {
+        crate::reg::read_sz(
             HKEY_LOCAL_MACHINE,
-            windows::core::w!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"),
-            None,
-            KEY_READ | KEY_WOW64_64KEY,
-            &mut key,
-        ) != windows::Win32::Foundation::ERROR_SUCCESS
-        {
-            return 0;
-        }
-        let mut bytes = [0u8; 64];
-        let mut size = bytes.len() as u32;
-        let result = RegQueryValueExW(
-            key,
-            windows::core::w!("CurrentBuildNumber"),
-            None,
-            None,
-            Some(bytes.as_mut_ptr()),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(key);
-        if result != windows::Win32::Foundation::ERROR_SUCCESS {
-            return 0;
-        }
-        let text: Vec<u16> = bytes[..size as usize]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .take_while(|c| *c != 0)
-            .collect();
-        String::from_utf16_lossy(&text).parse().unwrap_or(0)
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            Some("CurrentBuildNumber"),
+            true,
+        )
+        .and_then(|build| build.parse().ok())
+        .unwrap_or(0)
     })
 }

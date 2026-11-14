@@ -11,11 +11,11 @@
 //! process exits. Startup cleanup reclaims the staging folder only after the
 //! running version proves the replacement succeeded.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value as Json;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -1018,20 +1018,31 @@ fn apply_ready_update(expected_version: &str) -> Result<(), String> {
     // A restricted folder (Program Files) would doom the script after the
     // process is gone; bail out while the app is still alive instead.
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let probe = exe.with_file_name(format!("{PROBE_PREFIX}-{}", std::process::id()));
-    if let Err(error) = std::fs::OpenOptions::new()
+    // A timestamp suffix keeps a retry in the same process from colliding with
+    // a probe whose delete was blocked (antivirus hold); only the create is
+    // required — a leftover file still proves the folder writable.
+    let millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let probe = exe.with_file_name(format!("{PROBE_PREFIX}-{}-{millis}", std::process::id()));
+    match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&probe)
-        .and_then(|file| {
-            drop(file);
-            std::fs::remove_file(&probe)
-        })
     {
-        crate::log_line(&format!(
-            "self-update: install folder not writable: {error}"
-        ));
-        return Err(crate::t_pub("update_err_not_writable"));
+        Ok(file) => {
+            drop(file);
+            if let Err(error) = std::fs::remove_file(&probe) {
+                crate::log_line(&format!("self-update: probe cleanup failed: {error}"));
+            }
+        }
+        Err(error) => {
+            crate::log_line(&format!(
+                "self-update: install folder not writable: {error}"
+            ));
+            return Err(crate::t_pub("update_err_not_writable"));
+        }
     }
 
     // Written with a BOM: Windows PowerShell 5.1 decodes BOM-less .ps1 as
@@ -1196,14 +1207,12 @@ pub(crate) fn cleanup_on_startup() {
         let _ = std::fs::remove_file(&part);
     }
     // A crash between the writability probe's write and remove — or a remove
-    // blocked by antivirus — strands the probe beside the EXE; probe names
-    // carry the writer's PID, and a later PID reuse would fail create_new
-    // with a spurious not-writable verdict. Reclaim every prefixed leftover
-    // (the pre-PID fixed name included). A hard-killed replace script equally
-    // never reaches its finally, stranding the copied candidate — after any
-    // successful swap the candidate is gone, so a leftover here is always
-    // junk (the staged original lives on in the update folder until its own
-    // cleanup).
+    // blocked by antivirus — strands the probe beside the EXE. Reclaim every
+    // prefixed leftover (the pre-PID fixed name included). A hard-killed
+    // replace script equally never reaches its finally, stranding the copied
+    // candidate — after any successful swap the candidate is gone, so a
+    // leftover here is always junk (the staged original lives on in the
+    // update folder until its own cleanup).
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
         && let Ok(entries) = std::fs::read_dir(dir)
@@ -1319,266 +1328,45 @@ fn notify_ui(force: bool) {
     }
 }
 
-// ---- WinHTTP plumbing ------------------------------------------------------
+// ---- Network (shared transport in net.rs) -----------------------------------
 
-struct HttpResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-impl HttpResponse {
-    fn header(&self, lowercase_name: &str) -> Option<String> {
-        self.headers
-            .iter()
-            .find(|(name, _)| name == lowercase_name)
-            .map(|(_, value)| value.clone())
+/// Localizes transport failures for update paths; every networked call in
+/// this module reports through it.
+fn net_error(error: crate::net::NetError) -> String {
+    match error {
+        crate::net::NetError::Network(detail) => {
+            format!("{}: {detail}", crate::t_pub("update_err_network"))
+        }
+        crate::net::NetError::Status(status) => t_http_error(status),
+        crate::net::NetError::Oversize => crate::t_pub("update_err_oversize"),
+        crate::net::NetError::Write(detail) => crate::t_args("update_err_write", &[&detail]),
     }
 }
 
-struct HandleGuard(*mut core::ffi::c_void);
-
-impl Drop for HandleGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = windows::Win32::Networking::WinHttp::WinHttpCloseHandle(self.0);
-        }
-    }
-}
-
-/// One connected GET request with its handle chain: session → URL crack →
-/// connect → open → send → receive → status query. Shared by the buffered
-/// GET and the streamed download, whose WinHTTP setup is identical; the
-/// guards keep session and connection alive for as long as the request.
-struct OpenRequest {
-    _session: HandleGuard,
-    _connect: HandleGuard,
-    request: HandleGuard,
-    status: u16,
-}
-
-fn open_get_request(
-    url: &str,
-    timeouts: (i32, i32, i32, i32),
-    network_error: &dyn Fn(String) -> String,
-) -> Result<OpenRequest, String> {
-    use windows::Win32::Networking::WinHttp::{
-        URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-        WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen,
-        WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReceiveResponse, WinHttpSendRequest,
-        WinHttpSetTimeouts,
-    };
-    use windows::core::PCWSTR;
-
-    unsafe {
-        let agent = format!("IdleTrigger/{}", crate::APP_VERSION);
-        let session = HandleGuard(WinHttpOpen(
-            PCWSTR(crate::wide(&agent).as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ));
-        if session.0.is_null() {
-            return Err(network_error("WinHttpOpen failed".into()));
-        }
-        WinHttpSetTimeouts(session.0, timeouts.0, timeouts.1, timeouts.2, timeouts.3)
-            .map_err(|error| network_error(error.to_string()))?;
-
-        let url_wide: Vec<u16> = url.encode_utf16().collect();
-        let mut parts = URL_COMPONENTS {
-            dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
-            dwHostNameLength: u32::MAX,
-            dwUrlPathLength: u32::MAX,
-            dwExtraInfoLength: u32::MAX,
-            ..Default::default()
-        };
-        WinHttpCrackUrl(&url_wide, 0, &mut parts)
-            .map_err(|error| network_error(error.to_string()))?;
-        if parts.lpszHostName.is_null() || parts.dwHostNameLength == 0 {
-            return Err(network_error("invalid URL".into()));
-        }
-        let host = String::from_utf16_lossy(std::slice::from_raw_parts(
-            parts.lpszHostName.0,
-            parts.dwHostNameLength as usize,
-        ));
-        let mut path = String::new();
-        if !parts.lpszUrlPath.is_null() && parts.dwUrlPathLength > 0 {
-            path.push_str(&String::from_utf16_lossy(std::slice::from_raw_parts(
-                parts.lpszUrlPath.0,
-                parts.dwUrlPathLength as usize,
-            )));
-        }
-        if !parts.lpszExtraInfo.is_null() && parts.dwExtraInfoLength > 0 {
-            path.push_str(&String::from_utf16_lossy(std::slice::from_raw_parts(
-                parts.lpszExtraInfo.0,
-                parts.dwExtraInfoLength as usize,
-            )));
-        }
-        if path.is_empty() {
-            path.push('/');
-        }
-        let connect = HandleGuard(WinHttpConnect(
-            session.0,
-            PCWSTR(crate::wide(&host).as_ptr()),
-            parts.nPort,
-            0,
-        ));
-        if connect.0.is_null() {
-            return Err(network_error("WinHttpConnect failed".into()));
-        }
-        let flags = if parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS {
-            WINHTTP_FLAG_SECURE
-        } else {
-            WINHTTP_OPEN_REQUEST_FLAGS(0)
-        };
-        let request = HandleGuard(WinHttpOpenRequest(
-            connect.0,
-            PCWSTR(crate::wide("GET").as_ptr()),
-            PCWSTR(crate::wide(&path).as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            flags,
-        ));
-        if request.0.is_null() {
-            return Err(network_error("WinHttpOpenRequest failed".into()));
-        }
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0)
-            .map_err(|error| network_error(error.to_string()))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut())
-            .map_err(|error| network_error(error.to_string()))?;
-
-        let mut status: u32 = 0;
-        let mut status_size = std::mem::size_of::<u32>() as u32;
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast()),
-            &mut status_size,
-            std::ptr::null_mut(),
-        )
-        .map_err(|error| network_error(error.to_string()))?;
-        Ok(OpenRequest {
-            _session: session,
-            _connect: connect,
-            request,
-            status: status as u16,
-        })
-    }
-}
-
-/// One-shot GET that buffers the body (size-capped) and captures the response
-/// headers as lowercase name/value pairs. Redirects are followed by default,
-/// which releases/download needs to reach the CDN.
+/// Buffered GET with one transport retry: the very first request on the
+/// shared session can spend its whole attempt on proxy discovery (WPAD/PAC);
+/// the immediate second attempt reuses the discovered route and usually
+/// succeeds. Only transport failures reach the retry — HTTP statuses return
+/// Ok and are judged by the caller — and the first error stays the reported
+/// one.
 fn http_get(
     url: &str,
-    timeouts: (i32, i32, i32, i32),
+    timeouts: crate::net::Timeouts,
     max_bytes: usize,
-) -> Result<HttpResponse, String> {
-    use windows::Win32::Networking::WinHttp::{WinHttpQueryDataAvailable, WinHttpReadData};
-
-    let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
-    // AUTOMATIC_PROXY can spend the whole first attempt on proxy discovery
-    // (WPAD/PAC); the immediate second attempt then uses the discovered
-    // route and usually succeeds. Only transport failures reach this
-    // branch — HTTP statuses return Ok and are judged by the caller — and
-    // the first error stays the reported one.
-    let first = open_get_request(url, timeouts, &network_error);
-    let opened = match first {
-        Ok(opened) => opened,
-        Err(first_error) => match open_get_request(url, timeouts, &network_error) {
-            Ok(opened) => opened,
-            Err(_) => return Err(first_error),
-        },
-    };
-    let request = opened.request.0;
-    unsafe {
-        let headers = query_headers_block(request, &network_error)?;
-        let mut body = Vec::new();
-        loop {
-            let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
-                return Err(network_error("WinHttpQueryDataAvailable failed".into()));
+) -> Result<crate::net::HttpResponse, String> {
+    let first = crate::net::http_get(url, timeouts, max_bytes);
+    match first {
+        Ok(response) => Ok(response),
+        // Only transport failures retry (the setup failures the original
+        // per-request code retried, plus mid-read drops); a size rejection
+        // is deterministic and refetching would only repeat it.
+        Err(first_error) if matches!(first_error, crate::net::NetError::Network(_)) => {
+            match crate::net::http_get(url, timeouts, max_bytes) {
+                Ok(response) => Ok(response),
+                Err(_) => Err(net_error(first_error)),
             }
-            if available == 0 {
-                break;
-            }
-            if body.len() + available as usize > max_bytes.saturating_add(1) {
-                return Err(crate::t_pub("update_err_oversize"));
-            }
-            let mut chunk = vec![0u8; available as usize];
-            let mut read: u32 = 0;
-            if WinHttpReadData(request, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
-                || read == 0
-            {
-                return Err(network_error("WinHttpReadData failed".into()));
-            }
-            chunk.truncate(read as usize);
-            body.extend_from_slice(&chunk);
         }
-        if body.len() > max_bytes {
-            return Err(crate::t_pub("update_err_oversize"));
-        }
-        Ok(HttpResponse {
-            status: opened.status,
-            headers,
-            body,
-        })
-    }
-}
-
-/// Reads the whole raw header block once and splits it into lowercase pairs.
-fn query_headers_block(
-    request: *mut core::ffi::c_void,
-    network_error: &dyn Fn(String) -> String,
-) -> Result<Vec<(String, String)>, String> {
-    use windows::Win32::Networking::WinHttp::{
-        WINHTTP_QUERY_RAW_HEADERS_CRLF, WinHttpQueryHeaders,
-    };
-    use windows::core::PCWSTR;
-    unsafe {
-        let mut buffer = vec![0u16; 16 * 1024];
-        let mut size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
-        if WinHttpQueryHeaders(
-            request,
-            WINHTTP_QUERY_RAW_HEADERS_CRLF,
-            PCWSTR::null(),
-            Some(buffer.as_mut_ptr().cast()),
-            &mut size,
-            std::ptr::null_mut(),
-        )
-        .is_err()
-        {
-            // Proxy chains can pad the block past the 16K default; the failed
-            // query reports the required size — retry once, memory-bounded.
-            let needed = (size as usize).div_ceil(std::mem::size_of::<u16>());
-            if needed <= buffer.len() || needed > 256 * 1024 {
-                return Err(network_error("WinHttpQueryHeaders failed".into()));
-            }
-            buffer = vec![0u16; needed];
-            size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
-            WinHttpQueryHeaders(
-                request,
-                WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                PCWSTR::null(),
-                Some(buffer.as_mut_ptr().cast()),
-                &mut size,
-                std::ptr::null_mut(),
-            )
-            .map_err(|error| network_error(error.to_string()))?;
-        }
-        let text = String::from_utf16_lossy(&buffer);
-        let mut headers = Vec::new();
-        for line in text.split("\r\n") {
-            let Some((name, value)) = line.split_once(':') else {
-                continue; // Status line and malformed lines.
-            };
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
-        }
-        Ok(headers)
+        Err(error) => Err(net_error(error)),
     }
 }
 
@@ -1598,73 +1386,13 @@ fn http_download(
     max_bytes: u64,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), String> {
-    use windows::Win32::Networking::WinHttp::{
-        WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER, WinHttpQueryDataAvailable,
-        WinHttpQueryHeaders, WinHttpReadData,
-    };
-    use windows::core::PCWSTR;
-
-    let network_error = |error: String| format!("{}: {error}", crate::t_pub("update_err_network"));
-    let opened = open_get_request(url, DOWNLOAD_TIMEOUTS, &network_error)?;
-    let request = opened.request.0;
-    if opened.status != 200 {
-        return Err(t_http_error(opened.status));
-    }
-    let result = unsafe {
-        let mut total: u64 = 0;
-        let mut total_size: u32 = 0;
-        let mut total_size_bytes = std::mem::size_of::<u32>() as u32;
-        if WinHttpQueryHeaders(
-            request,
-            WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut total_size as *mut u32).cast()),
-            &mut total_size_bytes,
-            std::ptr::null_mut(),
-        )
-        .is_ok()
-        {
-            total = u64::from(total_size);
-            if total > max_bytes {
-                return Err(crate::t_pub("update_err_download_size"));
-            }
+    crate::net::http_download(url, DOWNLOAD_TIMEOUTS, path, max_bytes, progress).map_err(|error| {
+        match error {
+            // The download cap is about the EXE size, not a document body.
+            crate::net::NetError::Oversize => crate::t_pub("update_err_download_size"),
+            other => net_error(other),
         }
-
-        let mut file = std::fs::File::create(path)
-            .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
-        let mut done: u64 = 0;
-        loop {
-            let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
-                return Err(network_error("WinHttpQueryDataAvailable failed".into()));
-            }
-            if available == 0 {
-                break;
-            }
-            if done + u64::from(available) > max_bytes {
-                return Err(crate::t_pub("update_err_download_size"));
-            }
-            let mut chunk = vec![0u8; available as usize];
-            let mut read: u32 = 0;
-            if WinHttpReadData(request, chunk.as_mut_ptr().cast(), available, &mut read).is_err()
-                || read == 0
-            {
-                return Err(network_error("WinHttpReadData failed".into()));
-            }
-            chunk.truncate(read as usize);
-            file.write_all(&chunk)
-                .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
-            done += read as u64;
-            progress(done, total);
-        }
-        file.flush()
-            .map_err(|error| crate::t_args("update_err_write", &[&error.to_string()]))?;
-        Ok(())
-    };
-    if result.is_err() {
-        let _ = std::fs::remove_file(path);
-    }
-    result
+    })
 }
 
 // BCrypt SHA-256 (bcrypt.dll) keeps the runtime dependency set at "Windows

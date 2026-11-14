@@ -191,7 +191,7 @@ const WM_IPC_REQUEST: u32 = 0x8008;
 const WM_REFRESH_THEME: u32 = 0x8009;
 /// Queued focus-tip dismissal (see tooltips::dismiss_focus_tip).
 const WM_FOCUSTIP_DISMISS: u32 = 0x800A;
-static THEME_REFRESH: theme::Requests = theme::Requests::new();
+static THEME_REFRESH: theme_refresh::Requests = theme_refresh::Requests::new();
 
 pub(crate) fn request_theme_repair_refresh() {
     enqueue_theme_refresh(true);
@@ -240,6 +240,7 @@ mod ctxmenu;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod display;
+mod display_recovery;
 mod dpi;
 mod gpu_activity;
 mod idle_monitor;
@@ -248,9 +249,11 @@ mod iplocate;
 mod kit;
 mod list_style;
 mod nativeform;
+mod net;
 mod paint;
 mod panel_controls;
 mod popups;
+mod reg;
 #[cfg(test)]
 mod render_tests;
 mod runtime;
@@ -264,7 +267,7 @@ mod theme;
 mod theme_com;
 mod theme_contrast;
 mod theme_engine;
-mod theme_recovery;
+mod theme_refresh;
 mod theme_repair;
 mod tooltips;
 mod tray;
@@ -1049,7 +1052,7 @@ unsafe extern "system" fn hidden_proc(
                     }
                     refresh_battery();
                     apply_stay_awake();
-                    theme_recovery::environment_changed(false, true);
+                    display_recovery::environment_changed(false, true);
                     crate::theme::refresh_from_registry();
                     crate::theme::apply_to_all();
                 }
@@ -1082,7 +1085,7 @@ unsafe extern "system" fn hidden_proc(
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE => {
-                theme_recovery::environment_changed(true, false);
+                display_recovery::environment_changed(true, false);
                 LRESULT(0)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_TIMECHANGE => {

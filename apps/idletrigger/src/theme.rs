@@ -4,12 +4,10 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS, HWND, LPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH, InvalidateRect};
-use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-};
+use windows::Win32::System::Registry::HKEY_CURRENT_USER;
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 use windows::core::{BOOL, PCWSTR};
 
@@ -247,35 +245,7 @@ pub(crate) const PERSONALIZE_KEY: &str =
 
 /// Reads a REG_DWORD under HKCU; only a well-formed 4-byte DWORD counts.
 pub(crate) fn read_registry_dword(subkey: &str, value: &str) -> Option<u32> {
-    let subkey = crate::wide(subkey);
-    let value = crate::wide(value);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(subkey.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        ) != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let mut data = [0u8; 4];
-        let mut size = 4u32;
-        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-        let ok = RegQueryValueExW(
-            hkey,
-            PCWSTR(value.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        ) == ERROR_SUCCESS;
-        let _ = RegCloseKey(hkey);
-        (ok && size == 4 && kind == windows::Win32::System::Registry::REG_DWORD)
-            .then(|| u32::from_le_bytes(data))
-    }
+    crate::reg::read_dword(HKEY_CURRENT_USER, subkey, value, false)
 }
 
 pub fn read_light_preference(name: &str) -> Option<bool> {
@@ -731,96 +701,5 @@ mod visual_tests {
             assert!(contrast(p.muted, p.surface) >= 4.5);
             assert!(contrast(p.switch_track, p.surface) >= 3.0);
         }
-    }
-}
-
-// ===== Refresh coalescing queue (theme_refresh) ===========================
-use std::sync::atomic::AtomicU32;
-
-const QUEUED: u32 = 1;
-const DIRTY: u32 = 2;
-const FORCE: u32 = 4;
-
-pub struct Requests(AtomicU32);
-
-impl Requests {
-    pub const fn new() -> Self {
-        Self(AtomicU32::new(0))
-    }
-
-    /// Returns whether the caller owns posting the next window message.
-    pub fn request(&self, force: bool) -> bool {
-        self.0.fetch_or(
-            QUEUED | DIRTY | if force { FORCE } else { 0 },
-            Ordering::SeqCst,
-        ) & QUEUED
-            == 0
-    }
-
-    /// Snapshot this batch, keeping ownership until its painting finishes.
-    pub fn begin(&self) -> bool {
-        self.0.fetch_and(QUEUED, Ordering::SeqCst) & FORCE != 0
-    }
-
-    pub fn finish(&self) -> bool {
-        // A racing request either leaves DIRTY for us or observes an idle
-        // queue and posts its own message. It cannot fall between both paths.
-        loop {
-            let state = self.0.load(Ordering::SeqCst);
-            if state & DIRTY != 0 {
-                return true;
-            }
-            if self
-                .0
-                .compare_exchange(state, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return false;
-            }
-        }
-    }
-
-    pub fn post_failed(&self) {
-        self.0.fetch_and(!QUEUED, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub fn is_idle(&self) -> bool {
-        self.0.load(Ordering::SeqCst) == 0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changes_during_paint_and_after_completion_both_get_a_message() {
-        let queue = Requests::new();
-        assert!(queue.request(false));
-        assert!(!queue.request(false));
-        assert!(!queue.begin());
-        assert!(!queue.request(false)); // An external change during painting.
-        assert!(queue.finish());
-        assert!(!queue.begin());
-        assert!(!queue.finish());
-        assert!(queue.is_idle());
-        assert!(queue.request(false)); // Or after completion, before returning.
-        assert!(!queue.begin());
-        assert!(!queue.finish());
-    }
-
-    #[test]
-    fn repair_and_failed_posts_preserve_unprocessed_work() {
-        let queue = Requests::new();
-        assert!(queue.request(false));
-        assert!(!queue.begin());
-        assert!(!queue.request(true));
-        assert!(queue.finish());
-        queue.post_failed();
-        assert!(queue.request(false));
-        assert!(queue.begin());
-        assert!(!queue.finish());
-        assert!(queue.is_idle());
     }
 }

@@ -8,8 +8,7 @@ use windows::Win32::Foundation::{
     ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, LPARAM, WPARAM,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RegCloseKey, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_DWORD, RegCloseKey, RegOpenKeyExW, RegSetValueExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
@@ -227,41 +226,7 @@ fn has_section(text: &str, section: &str) -> bool {
 }
 
 fn read_registry_string(subkey: &str, value: &str) -> Option<String> {
-    let key = wide(subkey);
-    let val = wide(value);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        ) != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let mut buf = [0u8; 1024];
-        let mut size = buf.len() as u32;
-        let ok = RegQueryValueExW(
-            hkey,
-            PCWSTR(val.as_ptr()),
-            None,
-            None,
-            Some(buf.as_mut_ptr()),
-            Some(&mut size),
-        ) == ERROR_SUCCESS;
-        let _ = RegCloseKey(hkey);
-        if !ok || size < 2 {
-            return None;
-        }
-        let len = (size / 2).saturating_sub(1) as usize;
-        let mut wide_str = Vec::with_capacity(len);
-        for i in 0..len {
-            wide_str.push(u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]));
-        }
-        Some(String::from_utf16_lossy(&wide_str))
-    }
+    crate::reg::read_sz(HKEY_CURRENT_USER, subkey, Some(value), false)
 }
 
 fn current_accent_color() -> Option<u32> {
@@ -283,38 +248,7 @@ fn current_accent_color() -> Option<u32> {
 }
 
 fn read_registry_binary(subkey: &str, value: &str) -> Option<Vec<u8>> {
-    let key = wide(subkey);
-    let val = wide(value);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        ) != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let mut buf = vec![0u8; 1024];
-        let mut size = buf.len() as u32;
-        let ok = RegQueryValueExW(
-            hkey,
-            PCWSTR(val.as_ptr()),
-            None,
-            None,
-            Some(buf.as_mut_ptr()),
-            Some(&mut size),
-        ) == ERROR_SUCCESS;
-        let _ = RegCloseKey(hkey);
-        if ok {
-            buf.truncate(size as usize);
-            Some(buf)
-        } else {
-            None
-        }
-    }
+    crate::reg::read_binary(HKEY_CURRENT_USER, subkey, value, false)
 }
 
 fn nudged_colorization(color: u32) -> u32 {

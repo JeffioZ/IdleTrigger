@@ -11,9 +11,8 @@ use std::collections::BTreeMap;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY,
-    KEY_WRITE, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW,
-    RegQueryValueExW, RegSetValueExW,
+    KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+    RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
@@ -100,52 +99,7 @@ fn read_sz(path: &str, name: Option<&str>) -> Option<String> {
 }
 
 fn read_sz_at(root: HKEY, path: &str, name: Option<&str>, wow64: bool) -> Option<String> {
-    let hkey = open_read(path, root, wow64)?;
-    let result = (|| {
-        let value_name = wide(name.unwrap_or(""));
-        let name_ptr = if name.is_some() {
-            PCWSTR(value_name.as_ptr())
-        } else {
-            PCWSTR::null()
-        };
-        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-        let mut size = 0u32;
-        let status = unsafe {
-            RegQueryValueExW(hkey, name_ptr, None, Some(&mut kind), None, Some(&mut size))
-        };
-        if status != ERROR_SUCCESS || size > 1 << 20 || !size.is_multiple_of(2) {
-            return None;
-        }
-        if kind != REG_SZ && kind != REG_EXPAND_SZ {
-            return None;
-        }
-        let mut data = vec![0u8; size as usize];
-        let status = unsafe {
-            RegQueryValueExW(
-                hkey,
-                name_ptr,
-                None,
-                None,
-                Some(data.as_mut_ptr()),
-                Some(&mut size),
-            )
-        };
-        if status != ERROR_SUCCESS {
-            return None;
-        }
-        let text: Vec<u16> = data[..size as usize]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .take_while(|ch| *ch != 0)
-            .collect();
-        Some(String::from_utf16_lossy(&text))
-    })();
-    unsafe {
-        let _ = RegCloseKey(hkey);
-    }
-    result
+    crate::reg::read_sz(root, path, name, wow64)
 }
 
 fn subkeys(path: &str) -> Vec<String> {
@@ -350,25 +304,7 @@ fn key_exists(path: &str) -> bool {
 }
 
 fn read_dword(path: &str, name: &str) -> Option<u32> {
-    let key = open_read(path, HKEY_CURRENT_USER, true)?;
-    let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-    let mut value = 0u32;
-    let mut size = 4u32;
-    let status = unsafe {
-        RegQueryValueExW(
-            key,
-            PCWSTR(wide(name).as_ptr()),
-            None,
-            Some(&mut kind),
-            Some((&mut value as *mut u32).cast()),
-            Some(&mut size),
-        )
-    };
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    (status == ERROR_SUCCESS && size == 4 && kind == windows::Win32::System::Registry::REG_DWORD)
-        .then_some(value)
+    crate::reg::read_dword(HKEY_CURRENT_USER, path, name, true)
 }
 
 // ---- Desired-key computation ---------------------------------------------

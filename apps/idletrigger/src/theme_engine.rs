@@ -148,7 +148,7 @@ impl Drop for RepairBaseline {
 
 /// Coalesces configuration, power, and location changes without doing work on the UI thread.
 pub fn wake() {
-    crate::theme_recovery::changed();
+    crate::display_recovery::changed();
     *crate::runtime::lock(&WAKE.0) = true;
     WAKE.1.notify_one();
 }
@@ -620,7 +620,7 @@ fn matches_theme(target: bool) -> bool {
 
 /// Poll target: applies the theme and updates our own follow layer.
 fn tick() {
-    let generation = crate::theme_recovery::generation();
+    let generation = crate::display_recovery::generation();
     if !crate::runtime::lock(&REQUESTS).pending.is_empty() {
         return;
     }
@@ -639,7 +639,7 @@ fn tick() {
     // recovery there is nothing to switch, and the pause probes below must
     // not run as an idle poll — the GPU probe costs a 2×500ms sampling
     // baseline plus a PDH enumeration.
-    if matches_theme(target) && !crate::theme_recovery::pending() {
+    if matches_theme(target) && !crate::display_recovery::pending() {
         GPU_PAUSE_LOGGED.store(false, Ordering::SeqCst);
         return;
     }
@@ -659,7 +659,7 @@ fn tick() {
     }
     GPU_PAUSE_LOGGED.store(false, Ordering::SeqCst);
     drop(operation);
-    let Some(prepared) = crate::theme_recovery::prepare(generation) else {
+    let Some(prepared) = crate::display_recovery::prepare(generation) else {
         return;
     };
     let operation = crate::runtime::lock(&THEME_OPERATION);
@@ -684,7 +684,7 @@ fn tick() {
             return;
         }
         let _ = appearance::apply(target, AppearanceChanges::ALL);
-        crate::theme_recovery::transition_applied();
+        crate::display_recovery::transition_applied();
     }
     drop(operation);
     // Let the theme-change broadcast settle before recovery finishes, but
@@ -699,7 +699,7 @@ fn tick() {
     let operation = crate::runtime::lock(&THEME_OPERATION);
     if prepared.current() && crate::cfg_map(|c| c.theme_switch_enabled) {
         let _baseline = RepairBaseline::begin();
-        crate::theme_recovery::finish(prepared, !matches_target);
+        crate::display_recovery::finish(prepared, !matches_target);
     }
     drop(operation);
     crate::theme_repair::notify_theme_changed();
@@ -793,7 +793,7 @@ fn run_request(request: Request) -> Completion {
             } else {
                 Ok(())
             };
-            crate::theme_recovery::manual_repair_completed();
+            crate::display_recovery::manual_repair_completed();
             drop(operation);
             crate::theme_repair::notify_theme_changed();
             Completion::Repair(result)
@@ -803,7 +803,7 @@ fn run_request(request: Request) -> Completion {
 
 /// Sets a manual dark/light override until the next scheduled transition.
 fn set_manual_override(dark: bool) -> Result<(), String> {
-    crate::theme_recovery::changed();
+    crate::display_recovery::changed();
     let operation = crate::runtime::lock(&THEME_OPERATION);
     let now = local_time();
     let expiry = next_transition(now.absolute_minutes, now.minutes, light_window());
