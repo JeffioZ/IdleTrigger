@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
 };
@@ -560,14 +560,50 @@ unsafe extern "system" fn window_proc(
                 crate::DPI_SCALE.store(new as i32, Ordering::SeqCst);
                 crate::request_update_refresh();
             }
-            let rect = &*(lp.0 as *const RECT);
+            // Size the frame from OUR retained old scale, not from the
+            // system-suggested rect. Around a monitor hot-plug the OS can
+            // deliver this message for a window whose per-window DPI it
+            // silently updated while the window was hidden (or deliver the
+            // deferred change twice), so the suggestion is scaled from an
+            // "old" DPI that no longer matches the scale the children were
+            // laid out at. Applying it verbatim then resizes the frame by a
+            // different ratio than resize_children scales the controls —
+            // after unplugging a monitor the panel reopened with its content
+            // in the old scale and a blank strip down the right. Deriving
+            // the outer bounds from the live client rect keeps frame and
+            // children on one ratio and makes duplicate notifications
+            // idempotent; the suggestion still supplies the position.
+            let suggested = &*(lp.0 as *const RECT);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let old_factor = old * text_percent();
+            let new_factor = new * text_percent();
+            let mut size = state.client.get();
+            let width = size[0].rescale(client.right, old_factor, new_factor);
+            let height = size[1].rescale(client.bottom, old_factor, new_factor);
+            state.client.set([
+                ScaledValue::new(width, new_factor),
+                ScaledValue::new(height, new_factor),
+            ]);
+            let mut frame = RECT {
+                right: width,
+                bottom: height,
+                ..Default::default()
+            };
+            let _ = AdjustWindowRectExForDpi(
+                &mut frame,
+                WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32),
+                false,
+                WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32),
+                new,
+            );
             let _ = SetWindowPos(
                 hwnd,
                 None,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
+                suggested.left,
+                suggested.top,
+                frame.right - frame.left,
+                frame.bottom - frame.top,
                 SWP_NOACTIVATE | SWP_NOZORDER,
             );
             finish_rescale(hwnd);
@@ -684,6 +720,77 @@ mod tests {
             );
             DestroyWindow(form).unwrap();
             DestroyWindow(owner).unwrap();
+        }
+    }
+
+    #[test]
+    fn dpi_change_ignores_stale_suggested_rect_and_duplicate_notifications() {
+        unsafe {
+            let form = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("STATIC"),
+                windows::core::w!(""),
+                WS_POPUP,
+                0,
+                0,
+                400,
+                300,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            install(form);
+            let edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("EDIT"),
+                windows::core::w!("draft"),
+                WS_CHILD | WS_VISIBLE,
+                10,
+                10,
+                100,
+                20,
+                Some(form),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let next = GetDpiForWindow(form).max(96) * 2;
+            let notify = |rect: RECT| {
+                SendMessageW(
+                    form,
+                    WM_DPICHANGED,
+                    Some(WPARAM((next | (next << 16)) as usize)),
+                    Some(LPARAM(&rect as *const RECT as isize)),
+                );
+            };
+            // A deferred/re-delivered change can carry a suggestion scaled
+            // from a DPI the controls were never laid out at; the frame must
+            // track the children's own ×2 instead.
+            let inflated = RECT {
+                left: 0,
+                top: 0,
+                right: 4000,
+                bottom: 3000,
+            };
+            notify(inflated);
+            let client = |form: HWND| {
+                let mut client = RECT::default();
+                GetClientRect(form, &mut client).unwrap();
+                (client.right, client.bottom)
+            };
+            assert_eq!(client(form), (800, 600));
+            let mut bounds = RECT::default();
+            GetWindowRect(edit, &mut bounds).unwrap();
+            assert_eq!(bounds.right - bounds.left, 200);
+            // Re-delivery of the same transition must not grow anything.
+            notify(inflated);
+            assert_eq!(client(form), (800, 600));
+            GetWindowRect(edit, &mut bounds).unwrap();
+            assert_eq!(bounds.right - bounds.left, 200);
+            DestroyWindow(form).unwrap();
         }
     }
 }
