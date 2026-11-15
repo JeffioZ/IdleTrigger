@@ -21,16 +21,56 @@ use serde_json::Value as Json;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-pub(crate) const APP_REPO: &str = "JeffioZ/IdleTrigger";
+/// One update channel: a repository paired with its era's asset naming.
+/// Discovery tries the primary (the renamed home) first and falls back to
+/// the legacy channel only when the primary feed cannot be reached — before
+/// the rename that keeps the current release line answering; after it both
+/// URLs serve the same content, so a successful primary round never falls
+/// back. Every step of a round (feed, metadata, sums, URL validation, the
+/// notes link) stays on the channel that won discovery.
+pub(crate) struct Channel {
+    pub(crate) repo: &'static str,
+    pub(crate) asset: &'static str,
+}
 
-// Release asset for the running architecture; release.yml uploads both plus
-// SHA256SUMS.txt ("<hex> *<name>", x86 first).
 #[cfg(target_arch = "x86_64")]
-pub(crate) const ASSET_NAME: &str = "IdleTrigger-x64.exe";
+const PRIMARY_ASSET: &str = "CandyKit-x64.exe";
 #[cfg(target_arch = "x86")]
-pub(crate) const ASSET_NAME: &str = "IdleTrigger-x86.exe";
+const PRIMARY_ASSET: &str = "CandyKit-x86.exe";
 #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-pub(crate) const ASSET_NAME: &str = "IdleTrigger.exe";
+const PRIMARY_ASSET: &str = "CandyKit.exe";
+
+#[cfg(target_arch = "x86_64")]
+const LEGACY_ASSET: &str = "IdleTrigger-x64.exe";
+#[cfg(target_arch = "x86")]
+const LEGACY_ASSET: &str = "IdleTrigger-x86.exe";
+#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+const LEGACY_ASSET: &str = "IdleTrigger.exe";
+
+pub(crate) const PRIMARY: Channel = Channel {
+    repo: "JeffioZ/CandyKit",
+    asset: PRIMARY_ASSET,
+};
+pub(crate) const LEGACY: Channel = Channel {
+    repo: "JeffioZ/IdleTrigger",
+    asset: LEGACY_ASSET,
+};
+
+/// The channel of the latest successful discovery; the download tail and the
+/// release-notes link read it so they address the same repository the offer
+/// came from. Defaults to the legacy channel (the release line this build
+/// ships into).
+static SOURCE_CHANNEL: Mutex<&'static Channel> = Mutex::new(&LEGACY);
+
+/// Repository that served the current update state (for the notes link).
+pub(crate) fn source_repo() -> &'static str {
+    lock(&SOURCE_CHANNEL).repo
+}
+
+/// The staged download's local file name. Deliberately channel-independent:
+/// the asset name differs per channel, and a fixed staging name keeps the
+/// apply/rollback machinery agnostic of where a package came from.
+const STAGED_NAME: &str = "staged.exe";
 
 const DOWNLOAD_TIMEOUTS: (i32, i32, i32, i32) = (10000, 10000, 10000, 30000);
 // The release EXE is a few MB; the cap only guards against pathological or
@@ -409,7 +449,11 @@ fn apply_flow(version: String) -> bool {
                 percent: 0,
             };
             notify_ui(true);
-            let meta = fetch_release_meta(&version)?;
+            // Copy the &'static reference out first: holding the guard
+            // across fetch_release_meta would keep the lock over network
+            // round trips.
+            let channel = *lock(&SOURCE_CHANNEL);
+            let meta = fetch_release_meta(&version, channel)?;
             download_staged(&meta, &version)?;
         }
         // Re-verifies the staged file before writing the replace script.
@@ -437,6 +481,7 @@ fn apply_flow(version: String) -> bool {
 fn preview_inject() {
     const PREVIEW_VERSION: &str = "9.9.9";
     *lock(&KNOWN_UPDATE) = Some(PREVIEW_VERSION.to_string());
+    *lock(&SOURCE_CHANNEL) = &PRIMARY;
     if !matches!(&*lock(&PHASE), Phase::Ready(_)) {
         *lock(&PHASE) = Phase::Available(PREVIEW_VERSION.to_string());
     }
@@ -529,30 +574,34 @@ struct ReleaseMeta {
 
 /// Digest lookup: SHA256SUMS.txt first (github.com host, no API quota), API
 /// metadata as the fallback for releases published before the sums file.
-fn fetch_release_meta(version: &str) -> Result<ReleaseMeta, String> {
-    match fetch_sums_meta(version) {
+/// Every URL and name stays on the channel that won discovery.
+fn fetch_release_meta(version: &str, channel: &Channel) -> Result<ReleaseMeta, String> {
+    match fetch_sums_meta(version, channel) {
         Ok(meta) => Ok(meta),
         Err(sidecar_error) => {
             crate::log_line(&format!(
                 "self-update: SHA256SUMS unavailable, falling back to the GitHub API ({sidecar_error})"
             ));
-            fetch_api_meta(version)
+            fetch_api_meta(version, channel)
         }
     }
 }
 
-fn fetch_sums_meta(version: &str) -> Result<ReleaseMeta, String> {
-    let base = format!("https://github.com/{APP_REPO}/releases/download/v{version}");
+fn fetch_sums_meta(version: &str, channel: &Channel) -> Result<ReleaseMeta, String> {
+    let base = format!(
+        "https://github.com/{}/releases/download/v{version}",
+        channel.repo
+    );
     let sums_url = format!("{base}/SHA256SUMS.txt");
     let response = http_get(&sums_url, CHECK_TIMEOUTS, 64 * 1024)?;
     if response.status != 200 {
         return Err(t_http_error(response.status));
     }
     let text = String::from_utf8_lossy(&response.body).into_owned();
-    let sha256 = parse_sha256sums(&text, ASSET_NAME)
+    let sha256 = parse_sha256sums(&text, channel.asset)
         .ok_or_else(|| crate::t_pub("update_err_digest_mismatch"))?;
     Ok(ReleaseMeta {
-        url: format!("{base}/{ASSET_NAME}"),
+        url: format!("{base}/{}", channel.asset),
         sha256,
     })
 }
@@ -637,8 +686,11 @@ fn t_http_error(status: u16) -> String {
     crate::t_args("update_err_http", &[&status.to_string()])
 }
 
-fn fetch_api_meta(version: &str) -> Result<ReleaseMeta, String> {
-    let url = format!("https://api.github.com/repos/{APP_REPO}/releases/tags/v{version}");
+fn fetch_api_meta(version: &str, channel: &Channel) -> Result<ReleaseMeta, String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/v{version}",
+        channel.repo
+    );
     let response = http_get(&url, CHECK_TIMEOUTS, 1024 * 1024)?;
     if response.status != 200 {
         let now = std::time::SystemTime::now()
@@ -659,7 +711,7 @@ fn fetch_api_meta(version: &str) -> Result<ReleaseMeta, String> {
     // another monomorphized JSON parser. Invalid UTF-8 is still rejected.
     let text = std::str::from_utf8(&response.body).map_err(|_| crate::t_pub("update_err_read"))?;
     let json: Json = serde_json::from_str(text).map_err(|_| crate::t_pub("update_err_read"))?;
-    let (asset_url, sha256) = parse_api_asset(&json, version)?;
+    let (asset_url, sha256) = parse_api_asset(&json, version, channel)?;
     Ok(ReleaseMeta {
         url: asset_url,
         sha256,
@@ -668,8 +720,14 @@ fn fetch_api_meta(version: &str) -> Result<ReleaseMeta, String> {
 
 /// Validates the API release payload against the check result: exact tag,
 /// published state, exactly one uploaded Windows asset, a deterministic
-/// github.com download URL, and a GitHub-computed SHA-256 digest.
-fn parse_api_asset(json: &Json, expected_version: &str) -> Result<(String, String), String> {
+/// github.com download URL, and a GitHub-computed SHA-256 digest. The
+/// expected asset and URL path come from the channel that won discovery —
+/// the anti-hijack exact-match stays as strict as the single-channel era.
+fn parse_api_asset(
+    json: &Json,
+    expected_version: &str,
+    channel: &Channel,
+) -> Result<(String, String), String> {
     let expected_tag = format!("v{expected_version}");
     let matches_str =
         |value: Option<&Json>, expected: &str| value.and_then(Json::as_str) == Some(expected);
@@ -689,7 +747,7 @@ fn parse_api_asset(json: &Json, expected_version: &str) -> Result<(String, Strin
             assets
                 .iter()
                 .filter(|asset| {
-                    asset.get("name").and_then(Json::as_str) == Some(ASSET_NAME)
+                    asset.get("name").and_then(Json::as_str) == Some(channel.asset)
                         && asset.get("state").and_then(Json::as_str) == Some("uploaded")
                 })
                 .collect()
@@ -705,7 +763,10 @@ fn parse_api_asset(json: &Json, expected_version: &str) -> Result<(String, Strin
         .ok_or_else(|| crate::t_pub("update_err_unexpected_url"))?;
     // Stripping the scheme+host also removes the leading path slash, so the
     // expected tail starts at the repository segment.
-    let expected_path = format!("{APP_REPO}/releases/download/{expected_tag}/{ASSET_NAME}");
+    let expected_path = format!(
+        "{}/releases/download/{expected_tag}/{}",
+        channel.repo, channel.asset
+    );
     let valid_url = asset_url
         .strip_prefix("https://github.com/")
         .is_some_and(|rest| {
@@ -869,9 +930,11 @@ fn parse_releases_atom(xml: &str) -> Vec<String> {
 }
 
 /// Atom discovery + compare: `Some(version)` for a newer stable release,
-/// `Ok(None)` when current, errors for feed/transport problems.
-fn fetch_latest() -> Result<Option<String>, String> {
-    let url = format!("https://github.com/{APP_REPO}/releases.atom");
+/// `Ok(None)` when current, errors for feed/transport problems. An unusable
+/// feed (transport error, non-200, or no stable tags at all) counts as a
+/// failure so channel fallback stays possible.
+fn discover(channel: &Channel) -> Result<Option<String>, String> {
+    let url = format!("https://github.com/{}/releases.atom", channel.repo);
     let text = http_get_text(&url, 256 * 1024)?;
     let tags = parse_releases_atom(&text);
     let Some(latest) = latest_stable_tag(&tags) else {
@@ -880,6 +943,42 @@ fn fetch_latest() -> Result<Option<String>, String> {
     let update_available =
         compare_versions(&latest, crate::APP_VERSION) == std::cmp::Ordering::Greater;
     Ok(update_available.then_some(latest))
+}
+
+/// Channel selection (pure, for tests): the primary result wins whenever it
+/// answered at all — an "up to date" primary is final (after the rename both
+/// URLs serve the same content, so the legacy feed cannot know better) — and
+/// only a primary failure tries the legacy feed. When both fail, the primary
+/// error is reported: it names the channel this build actually targets.
+fn resolve_channel_result(
+    primary: Result<Option<String>, String>,
+    legacy: Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    match primary {
+        Ok(latest) => Ok(latest),
+        Err(primary_error) => legacy.map_err(|_| primary_error),
+    }
+}
+
+fn fetch_latest() -> Result<Option<String>, String> {
+    match discover(&PRIMARY) {
+        Ok(latest) => {
+            *lock(&SOURCE_CHANNEL) = &PRIMARY;
+            Ok(latest)
+        }
+        Err(primary_error) => {
+            // Only a failed primary pays for the second request; a healthy
+            // primary answers alone.
+            let result = resolve_channel_result(Err(primary_error), discover(&LEGACY));
+            if result.is_ok() {
+                *lock(&SOURCE_CHANNEL) = &LEGACY;
+                crate::log_line(
+                    "self-update: primary channel unavailable; answered from the legacy feed",
+                );
+            }
+            result
+        }
+    }
 }
 
 // ---- Download and verification ---------------------------------------------
@@ -893,11 +992,11 @@ fn update_dir() -> PathBuf {
 }
 
 fn staged_path() -> PathBuf {
-    update_dir().join(ASSET_NAME)
+    update_dir().join(STAGED_NAME)
 }
 
 fn part_path() -> PathBuf {
-    update_dir().join(format!("{ASSET_NAME}.part"))
+    update_dir().join(format!("{STAGED_NAME}.part"))
 }
 
 /// ready.json: the staged version + digest, persisted so a staged update
@@ -985,7 +1084,7 @@ fn download_staged(meta: &ReleaseMeta, version: &str) -> Result<(), String> {
     // rename replaces an existing target on Windows, so no pre-delete:
     // deleting first would open a staged-file-less window a crash could
     // turn into a lost update.
-    let staged = dir.join(ASSET_NAME);
+    let staged = dir.join(STAGED_NAME);
     if let Err(error) = std::fs::rename(&part, &staged) {
         let _ = std::fs::remove_file(&part);
         return Err(error.to_string());
@@ -1010,7 +1109,7 @@ fn apply_ready_update(expected_version: &str) -> Result<(), String> {
         return Err(crate::t_pub("update_err_version_mismatch"));
     }
     let dir = update_dir();
-    let staged = dir.join(ASSET_NAME);
+    let staged = dir.join(STAGED_NAME);
     // Second verification right before the swap covers "file replaced after
     // download completed".
     verify_staged(&staged, &sha256)?;
@@ -1274,8 +1373,10 @@ fn cleanup_applied_update_in(dir: &Path, running_version: &str, exe_old: Option<
     // folder beside the EXE keeps every unrelated file — std::fs::remove_dir
     // refuses non-empty directories, which is exactly the guard we want.
     for name in [
-        ASSET_NAME,
-        &format!("{ASSET_NAME}.part"),
+        STAGED_NAME,
+        &format!("{STAGED_NAME}.part"),
+        LEGACY_ASSET,
+        &format!("{LEGACY_ASSET}.part"),
         READY_FILE,
         &format!("{READY_FILE}.new"),
         REPLACE_SCRIPT,
@@ -1578,9 +1679,9 @@ mod tests {
         ));
     }
 
-    fn api_asset_json(digest: Option<String>, url: &str) -> Json {
+    fn api_asset_json(digest: Option<String>, url: &str, channel: &Channel) -> Json {
         let mut asset = serde_json::json!({
-            "name": ASSET_NAME,
+            "name": channel.asset,
             "state": "uploaded",
             "browser_download_url": url,
         });
@@ -1595,60 +1696,111 @@ mod tests {
         })
     }
 
+    fn channel_asset_url(channel: &Channel) -> String {
+        format!(
+            "https://github.com/{}/releases/download/v0.2.0/{}",
+            channel.repo, channel.asset
+        )
+    }
+
     #[test]
     fn api_asset_requires_exact_tag_url_and_digest() {
-        let url = format!("https://github.com/{APP_REPO}/releases/download/v0.2.0/{ASSET_NAME}");
-        let (asset_url, digest) = parse_api_asset(
-            &api_asset_json(Some(format!("sha256:{}", "ab".repeat(32))), &url),
+        let url = channel_asset_url(&LEGACY);
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let (asset_url, returned) = parse_api_asset(
+            &api_asset_json(Some(digest.clone()), &url, &LEGACY),
             "0.2.0",
+            &LEGACY,
         )
         .unwrap();
         assert_eq!(asset_url, url);
-        assert_eq!(digest, "ab".repeat(32));
+        assert_eq!(returned, "ab".repeat(32));
         // Missing digest, version drift, draft state: rejected.
-        assert!(parse_api_asset(&api_asset_json(None, &url), "0.2.0").is_err());
+        assert!(parse_api_asset(&api_asset_json(None, &url, &LEGACY), "0.2.0", &LEGACY).is_err());
         assert!(
             parse_api_asset(
-                &api_asset_json(Some(format!("sha256:{}", "ab".repeat(32))), &url),
-                "0.3.0"
+                &api_asset_json(Some(digest.clone()), &url, &LEGACY),
+                "0.3.0",
+                &LEGACY
             )
             .is_err()
         );
-        let mut draft = api_asset_json(Some(format!("sha256:{}", "ab".repeat(32))), &url);
+        let mut draft = api_asset_json(Some(digest.clone()), &url, &LEGACY);
         draft["draft"] = serde_json::json!(true);
-        assert!(parse_api_asset(&draft, "0.2.0").is_err());
+        assert!(parse_api_asset(&draft, "0.2.0", &LEGACY).is_err());
         // Unexpected host/path/query: rejected.
         assert!(
             parse_api_asset(
                 &api_asset_json(
-                    Some(format!("sha256:{}", "ab".repeat(32))),
-                    &format!("https://objects.githubusercontent.com/x/{ASSET_NAME}")
+                    Some(digest.clone()),
+                    &format!("https://objects.githubusercontent.com/x/{}", LEGACY.asset),
+                    &LEGACY
                 ),
-                "0.2.0"
+                "0.2.0",
+                &LEGACY
             )
             .is_err()
         );
         assert!(
             parse_api_asset(
                 &api_asset_json(
-                    Some(format!("sha256:{}", "ab".repeat(32))),
-                    &format!(
-                        "https://github.com/{APP_REPO}/releases/download/v0.2.0/{ASSET_NAME}?x=1"
-                    )
+                    Some(digest),
+                    &format!("{}?x=1", channel_asset_url(&LEGACY)),
+                    &LEGACY
                 ),
-                "0.2.0"
+                "0.2.0",
+                &LEGACY
             )
             .is_err()
         );
     }
 
     #[test]
+    fn api_asset_rejects_the_other_channels_release() {
+        // The two channels name assets differently, so a legacy release must
+        // not validate against the primary channel and vice versa — each
+        // channel stays exactly as strict as the single-channel era.
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let legacy_release =
+            api_asset_json(Some(digest.clone()), &channel_asset_url(&LEGACY), &LEGACY);
+        assert!(parse_api_asset(&legacy_release, "0.2.0", &PRIMARY).is_err());
+        let primary_release = api_asset_json(Some(digest), &channel_asset_url(&PRIMARY), &PRIMARY);
+        assert!(parse_api_asset(&primary_release, "0.2.0", &LEGACY).is_err());
+        assert!(parse_api_asset(&primary_release, "0.2.0", &PRIMARY).is_ok());
+    }
+
+    #[test]
+    fn channel_fallback_prefers_primary_and_reports_its_error() {
+        let offered = Some("3.0.0".to_string());
+        // A primary that answered — offer or "up to date" — is final.
+        assert_eq!(
+            resolve_channel_result(Ok(offered.clone()), Err("e".into())),
+            Ok(offered.clone())
+        );
+        assert_eq!(
+            resolve_channel_result(Ok(None), Ok(offered.clone())),
+            Ok(None)
+        );
+        // Primary failure falls back to the legacy answer.
+        assert_eq!(resolve_channel_result(Err("e".into()), Ok(None)), Ok(None));
+        assert_eq!(
+            resolve_channel_result(Err("e".into()), Ok(offered.clone())),
+            Ok(offered)
+        );
+        // Both failed: the primary error names the channel we target.
+        assert_eq!(
+            resolve_channel_result(Err("primary".into()), Err("legacy".into())),
+            Err("primary".into())
+        );
+    }
+
+    #[test]
     fn api_asset_rejects_duplicate_windows_assets() {
-        let url = format!("https://github.com/{APP_REPO}/releases/download/v0.2.0/{ASSET_NAME}");
-        let mut json = api_asset_json(Some(format!("sha256:{}", "ab".repeat(32))), &url);
+        let url = channel_asset_url(&LEGACY);
+        let mut json = api_asset_json(Some(format!("sha256:{}", "ab".repeat(32))), &url, &LEGACY);
         let asset = json["assets"][0].clone();
         json["assets"].as_array_mut().unwrap().push(asset);
-        assert!(parse_api_asset(&json, "0.2.0").is_err());
+        assert!(parse_api_asset(&json, "0.2.0", &LEGACY).is_err());
     }
 
     #[test]
@@ -1688,7 +1840,7 @@ mod tests {
 
         // No marker: the previous round never started, nothing is touched.
         let dir = temp("nomarker");
-        let staged = dir.join(ASSET_NAME);
+        let staged = dir.join(STAGED_NAME);
         std::fs::write(&staged, b"new").unwrap();
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", None));
         assert!(staged.exists());
@@ -1698,13 +1850,13 @@ mod tests {
         // Marker mismatch (replacement failed or rolled back): keep staging,
         // backup and marker for the retry window.
         let dir = temp("mismatch");
-        std::fs::write(dir.join(ASSET_NAME), b"new").unwrap();
+        std::fs::write(dir.join(STAGED_NAME), b"new").unwrap();
         std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.9.9").unwrap();
         let old = temp("mismatch-old").join("IdleTrigger.exe.old");
         std::fs::write(&old, b"old").unwrap();
         assert!(!replace_error_is_stale(&dir, "1.2.3"));
         assert!(!cleanup_applied_update_in(&dir, "1.2.3", Some(&old)));
-        assert!(dir.join(ASSET_NAME).exists());
+        assert!(dir.join(STAGED_NAME).exists());
         assert!(dir.join(PENDING_APPLY_MARKER).exists());
         assert!(old.exists());
         let mismatch_dir = dir;
@@ -1714,7 +1866,7 @@ mod tests {
         // A replace-error trail alongside it is stale (confirmation timeout
         // while the updated build was already up).
         let dir = temp("match");
-        std::fs::write(dir.join(ASSET_NAME), b"new").unwrap();
+        std::fs::write(dir.join(STAGED_NAME), b"new").unwrap();
         std::fs::write(dir.join(REPLACE_SCRIPT), b"script").unwrap();
         std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.2.3").unwrap();
         let old = temp("match-old").join("IdleTrigger.exe.old");
@@ -1730,12 +1882,12 @@ mod tests {
         // cleanup: only updater-written files are removed, and the folder is
         // dropped solely when that leaves it empty.
         let dir = temp("userfile");
-        std::fs::write(dir.join(ASSET_NAME), b"new").unwrap();
+        std::fs::write(dir.join(STAGED_NAME), b"new").unwrap();
         std::fs::write(dir.join(PENDING_APPLY_MARKER), "1.2.3").unwrap();
         let user_file = dir.join("my-notes.txt");
         std::fs::write(&user_file, b"keep me").unwrap();
         assert!(cleanup_applied_update_in(&dir, "1.2.3", None));
-        assert!(!dir.join(ASSET_NAME).exists());
+        assert!(!dir.join(STAGED_NAME).exists());
         assert!(!dir.join(PENDING_APPLY_MARKER).exists());
         assert!(user_file.exists());
         assert!(dir.exists());

@@ -1,6 +1,12 @@
 //! Developer diagnostics, compiled only with `--features devtools` and
 //! enabled at runtime by IDLETRIGGER_DEVTOOLS=1. Diagnostic overrides are
 //! runtime-only and do not rewrite the user's configuration.
+//!
+//! Data location under devtools: without IDLETRIGGER_DEVTOOLS_APPDATA the
+//! session keeps legacy EXE-adjacent data files (unchanged dev workflow);
+//! with IDLETRIGGER_DEVTOOLS_APPDATA=<dir> the session uses that folder
+//! under the AppData naming scheme, including the one-time relocation
+//! rehearsal from the EXE directory.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 

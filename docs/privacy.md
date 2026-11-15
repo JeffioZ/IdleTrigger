@@ -24,8 +24,8 @@ Those services see what any HTTPS request from your PC reveals — your IP addre
 
 ## Local data and system changes / 本地数据与系统改动
 
-- The configuration lives in `IdleTrigger.toml` beside the EXE; the optional `IdleTrigger.log` is written beside the EXE only while logging is enabled. Deleting the folder removes the app together with its data.
-- 配置保存在 EXE 旁的 `IdleTrigger.toml`；可选的 `IdleTrigger.log` 仅在启用日志时写入 EXE 所在目录。删除目录即可同时移除程序与数据。
+- The configuration lives in `config.toml` inside the per-user data folder `%LOCALAPPDATA%\IdleTrigger`; the optional `app.log` is written there only while logging is enabled. The first launch moves any legacy EXE-adjacent data files into this folder and removes the originals. Deleting the EXE folder plus the data folder removes the app together with its data.
+- 配置保存在用户数据目录 `%LOCALAPPDATA%\IdleTrigger` 的 `config.toml`；可选的 `app.log` 仅在启用日志时写入该目录。首次启动会把 EXE 旁的历史数据文件自动迁入该目录并删除原件。删除 EXE 目录与数据目录即可同时移除程序与数据。
 - Enabling **Start with Windows** adds a per-user Run entry to the registry, and the Explorer context-menu enhancement registers its entries in the registry as well.
 - 启用「开机自启」会在注册表写入当前用户的 Run 项；资源管理器右键增强同样通过注册表注册条目。
 

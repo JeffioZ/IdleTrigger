@@ -122,16 +122,16 @@ Checking again does not require downloading the same verified update twice, and 
 
 | File / 文件 | Purpose / 用途 |
 | --- | --- |
-| `IdleTrigger.toml` | Settings and rules / 设置与规则 |
-| `IdleTrigger.state.json` | Occurrence checkpoints / 任务触发记录 |
-| `IdleTrigger.state.json.corrupt-*` | Backup kept when the state file could not be parsed / 状态文件无法解析时保留的备份 |
-| `update/` | Self-update staging (downloaded EXE, checksums, replace script); reclaimed automatically after a successful upgrade / 自更新暂存（下载的程序、校验与替换脚本），升级成功后自动回收 |
-| `IdleTrigger.log`, `IdleTrigger.log.1` | Optional rotating diagnostics / 可选轮转日志 |
-| `IdleTrigger-panic.txt` | Fatal-error details when available / 严重错误详情 |
+| `config.toml` | Settings and rules / 设置与规则 |
+| `state.json` | Occurrence checkpoints / 任务触发记录 |
+| `state.json.corrupt-*` | Backup kept when the state file could not be parsed / 状态文件无法解析时保留的备份 |
+| `app.log`, `app.log.1` | Optional rotating diagnostics / 可选轮转日志 |
+| `panic.txt` | Fatal-error details when available / 严重错误详情 |
+| `update/` (beside the EXE / 位于 EXE 旁) | Self-update staging (downloaded EXE, checksums, replace script); reclaimed automatically after a successful upgrade / 自更新暂存（下载的程序、校验与替换脚本），升级成功后自动回收 |
 
-Files live beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. External edits with syntax errors, mistyped settings, or malformed rule containers retain the last valid runtime configuration and menu registrations: repair the file and save again. Individual invalid rules remain disabled and retained. A field with the wrong type (for example, a number written as text) falls back to its default with a startup notice, and saving once rewrites it correctly. Back up both TOML and state files before restoring a setup.
+Files live in the per-user data folder `%LOCALAPPDATA%\IdleTrigger`; the first launch moves any legacy files from beside the EXE there and removes the originals. Only `update/` staging stays beside the EXE. Loading does not rewrite configuration. App saves preserve comments, unrelated keys, and unchanged rule text; failures or conflicts keep the editor open. Valid external edits reload automatically. External edits with syntax errors, mistyped settings, or malformed rule containers retain the last valid runtime configuration and menu registrations: repair the file and save again. Individual invalid rules remain disabled and retained. A field with the wrong type (for example, a number written as text) falls back to its default with a startup notice, and saving once rewrites it correctly. Back up both TOML and state files before restoring a setup.
 
-文件均位于 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，外部修改存在语法错误、设置字段类型错误或规则列表结构损坏时，保留最近的有效运行配置与菜单注册，修正文件后重新保存即可；单条规则错误仍按禁用并保留处理。字段类型写错（如数字写成文本）时回退默认值并在启动时提示，保存一次即可改正。恢复配置前建议备份 TOML 和 state 文件。
+文件均位于用户数据目录 `%LOCALAPPDATA%\IdleTrigger`；首次启动会把 EXE 旁的旧文件自动迁移过去并删除原件，仅 `update/` 自更新暂存目录保留在 EXE 旁。读取配置不改写文件，保存保留注释、无关字段及未修改规则原文；失败或冲突时保留编辑窗口。有效外部修改会自动加载，外部修改存在语法错误、设置字段类型错误或规则列表结构损坏时，保留最近的有效运行配置与菜单注册，修正文件后重新保存即可；单条规则错误仍按禁用并保留处理。字段类型写错（如数字写成文本）时回退默认值并在启动时提示，保存一次即可改正。恢复配置前建议备份 TOML 和 state 文件。
 
 Settings save only your edits over the latest configuration. Unrelated changes do not require reopening the window. If the same setting changed elsewhere, Save lists the conflicting items: Yes uses your edited values; No keeps the draft open without saving. Related schedule, wallpaper, and notification options are handled together. If a file edit is still being loaded, wait briefly and save again. Autostart is changed only when you edit its checkbox.
 

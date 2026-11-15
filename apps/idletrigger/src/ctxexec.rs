@@ -242,17 +242,16 @@ fn resolve_lnk(path: &str) -> Option<String> {
     }
 }
 
-/// Loads copy-path preferences from the config beside the EXE — the local
-/// fallback path runs before (or without) the tray instance.
+/// Loads copy-path preferences from the resolved config location — the
+/// local fallback path runs before (or without) the tray instance, so it
+/// only reads and never migrates.
 fn local_copy_settings() -> (String, String) {
-    let config = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("IdleTrigger.toml")))
-        .and_then(|path| {
-            let loaded = idletrigger_core::config::load(&path);
-            loaded.load_error.is_none().then_some(loaded.config)
-        })
-        .unwrap_or_default();
+    let loaded = idletrigger_core::config::load(&crate::paths::read_config_path());
+    let config = if loaded.load_error.is_none() {
+        loaded.config
+    } else {
+        idletrigger_core::config::Config::default()
+    };
     (config.ctx_copy_quote, config.ctx_copy_separator)
 }
 
@@ -298,16 +297,9 @@ pub(crate) fn copy_selection(format: &str, paths: &[String]) -> bool {
 /// Registry entry point. Failure is visible and returns nonzero; an
 /// ambiguous IPC reply is never replayed locally.
 pub fn run_ctx(args: &[OsString]) -> i32 {
-    let language = std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent().map(|dir| {
-                idletrigger_core::config::load(&dir.join("IdleTrigger.toml"))
-                    .config
-                    .language
-            })
-        })
-        .unwrap_or_else(|| "auto".into());
+    let language = idletrigger_core::config::load(&crate::paths::read_config_path())
+        .config
+        .language;
     crate::apply_language(&language);
     let Some(kind) = args.first().and_then(|value| value.to_str()) else {
         return 1;
@@ -362,16 +354,11 @@ fn valid_copy_format(format: &str) -> bool {
 }
 
 fn local_rule(id: &str) -> Option<core_ctx::CtxRule> {
-    let document = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("IdleTrigger.toml")))
-        .and_then(|path| {
-            let loaded = idletrigger_core::config::load(&path);
-            (loaded.load_error.is_none()
-                && loaded.field_errors.is_none()
-                && loaded.config.ctx_menu_enabled)
-                .then_some(loaded.document)
-        })?;
+    let loaded = idletrigger_core::config::load(&crate::paths::read_config_path());
+    let document = (loaded.load_error.is_none()
+        && loaded.field_errors.is_none()
+        && loaded.config.ctx_menu_enabled)
+        .then_some(loaded.document)?;
     let (rules, issues) = core_ctx::read_rules(&document).ok()?;
     rules
         .into_iter()

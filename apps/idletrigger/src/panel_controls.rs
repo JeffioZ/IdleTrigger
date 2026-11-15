@@ -55,7 +55,9 @@ pub(crate) unsafe fn mk_footer_version(panel: HWND, text: &str, font: HFONT, y: 
     {
         let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
         let row_right = PAD + CARD_PAD_X + (card_w - 2 * CARD_PAD_X);
-        let width = scale(measured_text_width(panel, font, text).max(8));
+        // Two logical pixels of slack over the measured width: an exact
+        // fit lets GDI's draw-vs-measure rounding trip DT_END_ELLIPSIS.
+        let width = scale(measured_text_width(panel, font, text).max(8) + 2);
         owner_static(
             &ControlSpec {
                 parent: panel,

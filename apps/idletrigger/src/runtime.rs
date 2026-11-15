@@ -129,8 +129,7 @@ pub(crate) fn log_line(msg: &str) {
         .is_some_and(|meta| meta.len() >= 5 * 1024 * 1024)
     {
         guard.take();
-        if let Some(path) = lock(&CONFIG_PATH).as_ref().and_then(|path| path.parent()) {
-            let log_path = path.join("IdleTrigger.log");
+        if let Some(log_path) = log_file_path() {
             // Rotation renames the live file; when another program holds it
             // (AV scan, a viewer) the rename fails — keep appending to the
             // original instead of silently dropping the session's logs.
@@ -165,9 +164,32 @@ fn local_timestamp() -> String {
     )
 }
 
-pub(crate) fn init_log(exe_dir: &std::path::Path) {
+/// Log location follows the configuration: `app.log` beside the AppData
+/// `config.toml`, or the legacy `IdleTrigger.log` beside an EXE-adjacent
+/// `IdleTrigger.toml` (fallback and devtools sessions).
+fn log_file_path() -> Option<PathBuf> {
+    let config = lock(&CONFIG_PATH).as_ref()?.clone();
+    let name = if config
+        .file_name()
+        .is_some_and(|name| name == "IdleTrigger.toml")
+    {
+        "IdleTrigger.log"
+    } else {
+        "app.log"
+    };
+    Some(
+        config
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(name),
+    )
+}
+
+pub(crate) fn init_log() {
     use std::io::Write;
-    let path = exe_dir.join("IdleTrigger.log");
+    let Some(path) = log_file_path() else {
+        return;
+    };
     let mut current = lock(&LOG_FILE);
     if current.is_some() {
         return;
@@ -190,10 +212,7 @@ pub(crate) fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File>
 
 pub(crate) fn sync_logging() {
     if cfg_map(|c| c.logging_enabled) {
-        let path = lock(&CONFIG_PATH).clone();
-        if let Some(dir) = path.as_ref().and_then(|path| path.parent()) {
-            init_log(dir);
-        }
+        init_log();
     } else {
         lock(&LOG_FILE).take();
     }

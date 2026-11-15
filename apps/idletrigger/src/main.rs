@@ -3,7 +3,9 @@
 //! Single-instance tray app with a control panel for Stay
 //! Awake and Idle Monitoring (lock/sleep/hibernate/shutdown/restart actions
 //! with a cancellable non-activating countdown), config persisted to
-//! `IdleTrigger.toml` next to the EXE using stable configuration fields.
+//! `config.toml` under `%LOCALAPPDATA%\IdleTrigger` using stable
+//! configuration fields (one-time migration from `IdleTrigger.toml` beside
+//! the EXE).
 
 #![windows_subsystem = "windows"]
 
@@ -62,7 +64,8 @@ const APP_VERSION: &str = match option_env!("IDLETRIGGER_VERSION") {
 };
 
 // Release asset suffix of the running architecture (see selfupdate's
-// ASSET_NAME); the compiler target is authoritative for a running binary.
+// PRIMARY_ASSET/LEGACY_ASSET); the compiler target is authoritative for a
+// running binary.
 #[cfg(target_arch = "x86_64")]
 const APP_ARCH: &str = "x64";
 #[cfg(target_arch = "x86")]
@@ -252,6 +255,7 @@ mod nativeform;
 mod net;
 mod paint;
 mod panel_controls;
+mod paths;
 mod popups;
 mod reg;
 #[cfg(test)]
@@ -533,23 +537,35 @@ fn scale(v: i32) -> i32 {
 
 fn main() {
     // GUI-process panics are otherwise invisible; keep them diagnosable by
-    // writing next to the EXE (a CWD-relative path can point at system32).
+    // writing into the data folder, falling back to the EXE directory (a
+    // CWD-relative path can point at system32, and a panic must not depend
+    // on the AppData resolver succeeding).
     std::panic::set_hook(Box::new(|info| {
-        let path = std::env::current_exe()
+        let mut targets = Vec::new();
+        if let Some(dir) = crate::paths::panic_file_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            targets.push(dir.join("panic.txt"));
+        }
+        if let Some(exe_dir) = std::env::current_exe()
             .ok()
-            .and_then(|p| {
-                p.parent()
-                    .map(|d| d.join("IdleTrigger-panic.txt").to_path_buf())
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from("IdleTrigger-panic.txt"));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         {
-            use std::io::Write;
-            let _ = writeln!(f, "{info:?}");
-            let _ = f.flush();
+            targets.push(exe_dir.join("IdleTrigger-panic.txt"));
+        }
+        if targets.is_empty() {
+            targets.push(std::path::PathBuf::from("IdleTrigger-panic.txt"));
+        }
+        for path in targets {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{info:?}");
+                let _ = f.flush();
+                break;
+            }
         }
     }));
     let mut start_minimized = false;
@@ -597,13 +613,7 @@ fn main() {
         std::process::exit(ctxexec::run_ctx(&ctx_args[1..]));
     }
     if !cli_args.is_empty() {
-        let language = std::env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.parent()
-                    .map(|dir| config::load(&dir.join("IdleTrigger.toml")).config.language)
-            })
-            .unwrap_or_else(|| "auto".into());
+        let language = config::load(&paths::read_config_path()).config.language;
         apply_language(&language);
         #[cfg(feature = "devtools")]
         let _ = devtools::load();
@@ -616,16 +626,12 @@ fn main() {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    let config_path = exe_dir.join("IdleTrigger.toml");
-    let loaded = config::load(&config_path);
-
-    let effective_config = loaded.config.clone();
-    #[cfg(feature = "devtools")]
-    let _ = devtools::load();
-
-    runtime::initialize_config(config_path.clone(), &loaded);
-    apply_language(&effective_config.language);
-
+    // Dialogs on this stretch (single-instance failures) precede the real
+    // configuration; the read-only probe keeps them in the user's language.
+    apply_language(&config::load(&paths::read_config_path()).config.language);
+    // The single-instance guard must precede the data relocation and the
+    // first configuration read: only the winning instance may move the
+    // EXE-adjacent files, and losing instances exit without touching them.
     let _instance_guard = match single_instance::acquire() {
         Ok(Some(guard)) => guard,
         Ok(None) => {
@@ -639,10 +645,27 @@ fn main() {
         }
     };
 
+    let (data_location, relocate_notes) = paths::establish(&exe_dir);
+    let config_path = data_location.config_file();
+    let loaded = config::load(&config_path);
+
+    let effective_config = loaded.config.clone();
+    #[cfg(feature = "devtools")]
+    let _ = devtools::load();
+
+    runtime::initialize_config(config_path.clone(), &loaded);
+    apply_language(&effective_config.language);
+
     // Runtime diagnostic reads never mutate the persisted configuration.
     if cfg_map(|c| c.logging_enabled) {
-        init_log(&exe_dir);
+        init_log();
     }
+    for note in &relocate_notes {
+        log_line(note);
+    }
+    // The one-line answer to "where do my files live this session" — the
+    // first thing to check when verifying the relocation on a real machine.
+    log_line(&format!("data location: {}", config_path.display()));
     log_line("IdleTrigger starting");
     // Publish the context-menu rules and self-heal their registry verbs
     // (stale EXE paths after a move, entries lost to external tools).
@@ -733,7 +756,7 @@ fn main() {
     }
 
     automation::reload_rules();
-    automation::spawn(exe_dir.clone());
+    automation::spawn(data_location.state_file());
     theme::apply_to_all();
     let theme_worker = theme_engine::spawn();
     spawn_config_watcher();
@@ -2801,7 +2824,10 @@ fn layout_footer_links(panel: HWND) {
     let mut vw = if version_text.is_empty() {
         0
     } else {
-        scale(measured_text_width(panel, panel_font_meta(), &version_text).max(8))
+        // Two logical pixels of slack: GetTextExtentPoint32 and DrawTextW
+        // can disagree by a pixel at an exact fit, and DT_END_ELLIPSIS then
+        // eats the tail ("(x64)" → "(x6…").
+        scale(measured_text_width(panel, panel_font_meta(), &version_text).max(8) + 2)
     };
     let row_w = scale(card_w - 2 * CARD_PAD_X);
     let count = widths.len() as i32;
@@ -3460,11 +3486,10 @@ fn refresh_update_button() {
         let link_h = scale(LINK_BOX_H);
         let link_y = client.bottom - scale(PAD) - link_h;
         let card_w = PANEL_CLIENT_WIDTH - 2 * PAD;
-        // Grid continuation of the footer's 4-slot row, in link grammar: the
-        // action + notes pair centers as one group across the two middle
-        // slots; the outer slots stay empty.
-        let (action_x, action_w_slot) = row_slot(card_w, 4, 1);
-        let (notes_x, notes_w_slot) = row_slot(card_w, 4, 2);
+        // The links lay out as one centered group, not per-slot: an English
+        // caption can run wider than a quarter slot, and a slot-centered
+        // link would bleed past its slot. Sequential layout with a gap keeps
+        // any language inside the row.
         let notes_text = window_text(notes);
         let action_w = scale(measured_text_width(panel, panel_font_subtitle(), &text).max(16));
         let notes_w = scale(measured_text_width(panel, panel_font_subtitle(), &notes_text).max(16));
@@ -3474,19 +3499,41 @@ fn refresh_update_button() {
         // verified by bisection — show-at-stub crashed 5/5, position-first
         // runs clean).
         set_control_text(control, &text);
-        for (link, slot_x, slot_w, width) in [
-            (control, action_x, action_w_slot, action_w),
-            (notes, notes_x, notes_w_slot, notes_w),
-        ] {
+        let mut links = vec![(control, action_w), (notes, notes_w)];
+        let mut gap = scale(16);
+        let mut total: i32 = links.iter().map(|link| link.1).sum();
+        // English worst case still fits the row; squeeze the gap first if a
+        // localization ever runs wider than the card.
+        if total + gap * (links.len() as i32 - 1) > scale(card_w) {
+            gap = scale(8);
+            if total + gap * (links.len() as i32 - 1) > scale(card_w) {
+                let shrink = scale(card_w) - gap * (links.len() as i32 - 1);
+                let width_sum = total;
+                links = links
+                    .into_iter()
+                    .map(|(hwnd, width)| {
+                        let scaled = (i64::from(width) * i64::from(shrink)
+                            / i64::from(width_sum.max(1)))
+                            as i32;
+                        (hwnd, scaled.max(scale(24)))
+                    })
+                    .collect();
+                total = links.iter().map(|link| link.1).sum();
+            }
+        }
+        let mut x =
+            scale(PAD) + (scale(card_w) - total - gap * (links.len() as i32 - 1)).max(0) / 2;
+        for (link, width) in links {
             let _ = SetWindowPos(
                 link,
                 None,
-                scale(PAD + slot_x) + (scale(slot_w) - width) / 2,
+                x,
                 link_y,
                 width,
                 link_h,
                 SWP_NOZORDER | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             );
+            x += width + gap;
         }
         let _ = ShowWindow(control, SW_SHOW);
         let _ = ShowWindow(notes, SW_SHOW);
@@ -3503,7 +3550,7 @@ fn open_update_notes() {
     };
     let url = format!(
         "https://github.com/{}/releases/tag/v{}",
-        selfupdate::APP_REPO,
+        selfupdate::source_repo(),
         version
     );
     unsafe {

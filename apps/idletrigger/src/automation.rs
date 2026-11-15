@@ -3,8 +3,9 @@
 //! State actions (stay awake / idle monitor overrides) are runtime overrides
 //! that never rewrite the user's manual toggles. Event actions go through
 //! the cancellable countdown window. Rules come from the normalized
-//! `idletrigger-core` model; occurrence bookkeeping lives in
-//! `IdleTrigger.state.json`.
+//! `idletrigger-core` model; occurrence bookkeeping lives in the data
+//! folder's `state.json` (`IdleTrigger.state.json` in legacy EXE-adjacent
+//! mode).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -347,8 +348,7 @@ pub fn reload_rules() {
     INCOMING_EVENTS.1.notify_one();
 }
 
-pub fn spawn(config_dir: PathBuf) {
-    let state_path = config_dir.join("IdleTrigger.state.json");
+pub fn spawn(state_path: PathBuf) {
     let (state, err) = auto::load_runtime_state(&state_path);
     if let Some(err) = err {
         crate::log_line(&format!("automation state: {err}"));
