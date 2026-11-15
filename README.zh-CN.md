@@ -73,6 +73,7 @@
 | --- | --- |
 | 📝 | [配置参考](IdleTrigger.example.toml)——所有 TOML 字段的中英文说明 |
 | 🗂️ | [文档索引](docs/README.md)——使用、开发与发布说明 |
+| 🔒 | [隐私说明](docs/privacy.md)——仅有的两项联网行为，以及留在本机的数据 |
 
 自动任务、配置和命令行用法见[使用指南](docs/user-guide.md)；构建与验证见[开发指南](docs/development.md)。本地统一执行 `pwsh -NoProfile -File build/build.ps1`，运行产物为 `dist/IdleTrigger-x64.exe`；双架构加 `-Architecture all`。`target/` 仅为构建缓存，不作为日常运行目录。
 

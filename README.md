@@ -73,6 +73,7 @@ See the [screenshot gallery](docs/screenshots.md) for the panel and context-menu
 | --- | --- |
 | 📝 | [Configuration reference](IdleTrigger.example.toml) — every TOML field in English and Chinese |
 | 🗂️ | [Documentation index](docs/README.md) — usage, development, and releases |
+| 🔒 | [Privacy statement](docs/privacy.md) — the only two network features and what stays on your PC |
 
 See the [user guide](docs/user-guide.md) for features and command-line usage,
 or the [development guide](docs/development.md) to build and verify the app.
