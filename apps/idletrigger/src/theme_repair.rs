@@ -152,12 +152,16 @@ fn current_theme_snapshot() -> io::Result<(String, ThemeEncoding)> {
     ))
 }
 
-/// The .theme encodings we round-trip. Windows writes UTF-16LE; UTF-8/ANSI
-/// sources stay byte-compatible with the ASCII-only lines we patch in.
+/// The .theme encodings we round-trip. Windows writes UTF-16LE; UTF-8 and
+/// ANSI (code-page) sources keep a byte-compatible image, which works because
+/// every line we patch is ASCII-only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ThemeEncoding {
     Utf16,
     Utf8,
+    /// themeui writes code-page (e.g. GBK) files when the theme carries local
+    /// text; those bytes are never valid UTF-8 as a whole.
+    Ansi,
 }
 
 /// Sharing (32) and lock (33) violations are the transient theme-file locks
@@ -213,11 +217,20 @@ fn decode_theme_bytes(bytes: &[u8]) -> Option<(String, ThemeEncoding)> {
             .collect();
         return Some((String::from_utf16(&units).ok()?, ThemeEncoding::Utf16));
     }
-    let text = String::from_utf8(bytes.to_vec())
-        .ok()?
-        .trim_start_matches('\u{feff}')
-        .to_string();
-    Some((text, ThemeEncoding::Utf8))
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return Some((
+            text.trim_start_matches('\u{feff}').to_string(),
+            ThemeEncoding::Utf8,
+        ));
+    }
+    // Code-page file: map each byte onto U+0000..U+00FF so unpatched lines
+    // survive verbatim when written back. GBK lead/trail bytes never collide
+    // with '=', '\r' or '\n' and can never start a line, so the ASCII-only
+    // line parsing below stays sound inside this image.
+    Some((
+        bytes.iter().map(|&byte| byte as char).collect(),
+        ThemeEncoding::Ansi,
+    ))
 }
 
 fn has_section(text: &str, section: &str) -> bool {
@@ -350,6 +363,12 @@ fn theme_bytes_for(content: &str, encoding: ThemeEncoding) -> Vec<u8> {
             bytes
         }
         ThemeEncoding::Utf8 => content.as_bytes().to_vec(),
+        // Every character came in as one byte (or is an ASCII patch value);
+        // anything wider would mean the caller mixed encodings.
+        ThemeEncoding::Ansi => content
+            .chars()
+            .map(|c| u8::try_from(c).unwrap_or(b'?'))
+            .collect(),
     }
 }
 
@@ -475,5 +494,26 @@ mod tests {
         );
         // A UTF-16 body with an odd trailing byte is rejected, not guessed.
         assert!(decode_theme_bytes(&[0xff, 0xfe, 0x41]).is_none());
+    }
+    #[test]
+    fn ansi_theme_files_round_trip_byte_for_byte() {
+        // GBK for "中文": a CJK Windows writes Custom.theme in the ANSI code
+        // page, which is not valid UTF-8 — the reader used to reject it and
+        // every repair silently degraded to the broadcast-only no-op.
+        let gbk: &[u8] = b"[Theme]\r\nDisplayName=x\r\n[Control Panel\\Desktop]\r\n\
+Wallpaper=C:\\\xD6\xD0\xCE\xC4.bmp\r\n[VisualStyles]\r\nAppMode=Light\r\n";
+        let (text, encoding) = decode_theme_bytes(gbk).unwrap();
+        assert_eq!(encoding, ThemeEncoding::Ansi);
+        assert_eq!(theme_bytes_for(&text, ThemeEncoding::Ansi), gbk.to_vec());
+        // Patched lines become ASCII; untouched GBK bytes survive verbatim.
+        let patched = patch_theme_file(&text, false, true, 0xff123456);
+        assert!(patched.contains("DisplayName=IdleTrigger DWM Refresh"));
+        let bytes = theme_bytes_for(&patched, ThemeEncoding::Ansi);
+        assert!(bytes.starts_with(b"[Theme]\r\n"));
+        let wallpaper = bytes
+            .split(|&b| b == b'\n')
+            .find(|line| line.starts_with(b"Wallpaper="))
+            .unwrap();
+        assert_eq!(wallpaper, b"Wallpaper=C:\\\xD6\xD0\xCE\xC4.bmp\r");
     }
 }
