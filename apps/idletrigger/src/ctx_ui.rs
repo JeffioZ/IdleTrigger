@@ -2502,6 +2502,10 @@ fn apply_form() -> bool {
     if let Err(err) = crate::save_ctx_rules(&base, &prepared) {
         set_valid(&err);
         crate::warn_dialog("", &err);
+        // The config is already saved here (only the registry sync failed):
+        // refresh the displayed baseline so the next save compares against
+        // it instead of reporting a false external conflict.
+        refresh_list();
         return false;
     }
     *crate::runtime::lock(&DRAFT) = Some(prepared[position].clone());
@@ -2573,6 +2577,8 @@ fn begin_new_separator() {
     if let Err(err) = crate::save_ctx_rules(&base, &prepared) {
         set_valid(&err);
         crate::warn_dialog("", &err);
+        // Saved; only the registry sync failed — refresh the baseline.
+        refresh_list();
         return;
     }
     let position = prepared.len() - 1;
@@ -2607,6 +2613,8 @@ fn toggle_selected() {
     }
     if let Err(error) = crate::save_ctx_rules(&base, &next) {
         crate::warn_dialog("", &error);
+        // Saved; only the registry sync failed — refresh the baseline.
+        refresh_list();
         return;
     }
     refresh_list();
@@ -2643,6 +2651,8 @@ fn delete_selected() {
     if let Err(err) = crate::save_ctx_rules(&base, &rules) {
         set_valid(&err);
         crate::warn_dialog("", &err);
+        // Saved; only the registry sync failed — refresh the baseline.
+        refresh_list();
         return;
     }
     *crate::runtime::lock(&DRAFT) = None;
@@ -2673,6 +2683,8 @@ fn move_selected(delta: i32) {
     if let Err(err) = crate::save_ctx_rules(&base, &rules) {
         set_valid(&err);
         crate::warn_dialog("", &err);
+        // Saved; only the registry sync failed — refresh the baseline.
+        refresh_list();
         return;
     }
     *crate::runtime::lock(&DRAFT) = None;

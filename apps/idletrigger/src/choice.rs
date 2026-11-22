@@ -1244,18 +1244,28 @@ unsafe extern "system" fn popup_proc(
                     LRESULT(0)
                 }
                 0x0D | 0x20 => {
-                    // Enter/Space commits the hovered row.
-                    let hover = choices()
-                        .as_ref()
-                        .and_then(|m| m.get(&OPEN_BUTTON.load(Ordering::SeqCst)))
-                        .map(|d| d.hover)
-                        .unwrap_or(-1);
-                    if hover >= 0 {
-                        let button = OPEN_BUTTON.load(Ordering::SeqCst);
-                        select_index(HWND(button as *mut _), hover);
-                        close(true);
-                    } else {
-                        close(false);
+                    // Enter/Space commits the hovered row. A header row
+                    // (reachable when ↑ starts from no hover and the first
+                    // item is a header) carries no value and must not be
+                    // committed — it would silently clear the owner's
+                    // selection. Resolve the header check to a bool inside
+                    // a scope so the store guard is released before
+                    // select_index/close re-lock it.
+                    let commit = {
+                        let store = choices();
+                        store
+                            .as_ref()
+                            .and_then(|m| m.get(&OPEN_BUTTON.load(Ordering::SeqCst)))
+                            .filter(|d| d.hover >= 0 && !d.items[d.hover as usize].header)
+                            .map(|d| d.hover)
+                    };
+                    match commit {
+                        Some(hover) => {
+                            let button = OPEN_BUTTON.load(Ordering::SeqCst);
+                            select_index(HWND(button as *mut _), hover);
+                            close(true);
+                        }
+                        None => close(false),
                     }
                     LRESULT(0)
                 }

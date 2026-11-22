@@ -1,8 +1,8 @@
 # Privacy / 隐私
 
-IdleTrigger runs entirely on your PC and makes no telemetry, crash-reporting, or analytics requests. There is no account, no machine identifier, and no usage statistics. Everything the app stores — the TOML configuration and the optional log file — stays in files beside the EXE.
+IdleTrigger runs entirely on your PC and makes no telemetry, crash-reporting, or analytics requests. There is no account, no machine identifier, and no usage statistics. Everything the app stores — the TOML configuration and the optional log file — stays in the per-user data folder.
 
-IdleTrigger 完全运行在本机，不含遥测、崩溃上报或分析统计；没有账号、机器标识或使用统计。程序保存的所有内容（TOML 配置与可选日志）都留在 EXE 旁边的文件里。
+IdleTrigger 完全运行在本机，不含遥测、崩溃上报或分析统计；没有账号、机器标识或使用统计。程序保存的所有内容（TOML 配置与可选日志）都留在用户数据文件夹内。
 
 ## Network use / 联网行为
 

@@ -238,7 +238,10 @@ pub(crate) fn commit_config(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.to_string()),
     };
-    if source != *lock(&CONFIG_SOURCE) {
+    // A deleted file is not a conflict: let the save rebuild it instead of
+    // wedging every future save on a mismatch against the remembered
+    // source text (only a restart could clear that state before).
+    if source.is_some() && source != *lock(&CONFIG_SOURCE) {
         // Most conflicts trace back to a hand edit that failed validation
         // and left the watcher's view of the file stale; name that reason
         // when we have one instead of a bare "retry later".
@@ -323,6 +326,13 @@ pub(crate) fn save_ctx_rules(
         })
     })?;
     crate::ctxmenu::sync("rules");
+    // The config is saved; verify the registry actually caught up. A
+    // silent drift here would leave the UI claiming success while the
+    // menu still runs the previous rules. Skipped while the menu is
+    // disabled — then nothing needs to be registered.
+    if crate::cfg_map(|c| c.ctx_menu_enabled) && !crate::ctxmenu::registration_healthy() {
+        return Err(crate::t_pub("ctx_save_sync_failed"));
+    }
     Ok(())
 }
 

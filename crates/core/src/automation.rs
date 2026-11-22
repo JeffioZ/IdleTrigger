@@ -472,11 +472,17 @@ fn validate_prepared_rule(raw: &Rule, normalized: &Rule) -> Result<(), String> {
     }
     if raw.warning_seconds < 0
         || raw.warning_seconds > 3600
-        || (is_event_action(&raw.action) && raw.warning_seconds < MIN_WARNING_SECONDS)
+        || (raw.warning_seconds != 0
+            && is_event_action(&raw.action)
+            && raw.warning_seconds < MIN_WARNING_SECONDS)
     {
         // State actions may disable the warning entirely (0); only event
         // actions carry the 10-second minimum, so the message matches the
-        // domain of the action that failed.
+        // domain of the action that failed. An omitted field also reads as
+        // 0 (serde default): for event actions that means "use the
+        // default", which normalize_rules fills in afterwards — a hand
+        // written rule that omits warning_seconds must not be rejected
+        // (and disabled) wholesale.
         return Err(if is_event_action(&raw.action) {
             format!("warning_seconds must be between {MIN_WARNING_SECONDS} and 3600")
         } else {
@@ -852,6 +858,24 @@ mod tests {
         assert_eq!(normalized[0].id, "rule-1");
         assert_eq!(normalized[0].name, "");
         assert_eq!(normalized[0].warning_seconds, 3600); // upper bound is legal
+    }
+
+    #[test]
+    fn omitted_warning_on_event_actions_takes_the_default() {
+        // serde reads an omitted warning_seconds as 0; for event actions
+        // that must mean "use the default", not a validation failure that
+        // disables the whole rule — hand-written configs omit the field
+        // legitimately.
+        let mut r = rule("a", ACTION_LOCK, TRIGGER_PROCESS_STARTED);
+        r.processes.push(ProcessTarget {
+            kind: MATCH_PATH.into(),
+            executable: "app.exe".into(),
+            path: "C:\\Apps\\app.exe".into(),
+        });
+        r.warning_seconds = 0;
+        let (normalized, issues) = prepare_rules(&[r]);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(normalized[0].warning_seconds, DEFAULT_WARNING_SECONDS);
     }
 
     #[test]

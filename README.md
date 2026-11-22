@@ -55,7 +55,7 @@ See the [screenshot gallery](docs/screenshots.md) for the panel and context-menu
 | 🌗 | **Day / Night** | Switch Windows themes by time or sunrise and sunset, optionally link wallpaper and cursor schemes, snooze a pending switch, and adapt to battery and fullscreen. |
 | 🔄 | **Self-Update** | Optional check whenever the control panel is shown, plus on-demand checks from the tray menu and Settings that open the update prompt directly; one confirm downloads, SHA-256-verifies, installs, and restarts for you, with a link to the release notes. |
 
-**Small by design:** IdleTrigger is a portable native Win32 app for Windows 10 / Windows Server 2016 or later. It needs no installer, service, WebView, simulated input, or extra runtime. Settings stay in a readable TOML file beside the EXE.
+**Small by design:** IdleTrigger is a portable native Win32 app for Windows 10 / Windows Server 2016 or later. It needs no installer, service, WebView, simulated input, or extra runtime. Settings stay in a readable TOML file in the per-user data folder.
 
 > **System requirements:** Windows 10 1607 / Server 2016 or later (x64 or x86).
 > 1607 is the practical floor because per-monitor DPI APIs require it; the theme title-bar

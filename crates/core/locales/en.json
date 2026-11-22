@@ -581,6 +581,7 @@
   "ctx_filter_programs": "Programs|*.exe;*.bat;*.cmd;*.py;*.pyw|All files|*.*|",
   "ctx_filter_icons": "Icons|*.ico;*.exe;*.dll|All files|*.*|",
   "ctx_save_failed": "Saving context-menu rules failed: %s",
+  "ctx_save_sync_failed": "Rules saved, but the context-menu registry sync failed and the menu may be stale; see the log for details.",
   "ctx_changed_external": "Rules changed elsewhere. Note your edits, then choose Cancel to load the latest rules.",
   "ctx_menu_copy_title": "Copy &Path",
   "ctx_copy_full": "&Full path",

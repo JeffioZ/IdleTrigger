@@ -581,6 +581,7 @@
   "ctx_filter_programs": "程序|*.exe;*.bat;*.cmd;*.py;*.pyw|所有文件|*.*|",
   "ctx_filter_icons": "图标|*.ico;*.exe;*.dll|所有文件|*.*|",
   "ctx_save_failed": "保存右键菜单规则失败：%s",
+  "ctx_save_sync_failed": "规则已保存，但右键菜单注册表同步失败，菜单可能未更新；详情见日志。",
   "ctx_changed_external": "规则已在其他位置更改。请先记下本次修改，再点“取消”加载最新内容。",
   "ctx_menu_copy_title": "复制路径(&P)",
   "ctx_copy_full": "完整路径(&F)",

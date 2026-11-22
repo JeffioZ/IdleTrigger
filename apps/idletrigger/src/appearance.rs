@@ -329,8 +329,11 @@ fn write_cursor_state(paths: &[String], scheme_name: &str) -> Result<(), String>
 
 // ============ Appearance restore: pre-switch snapshot + defaults ============
 
-/// The system default cursor set: per-role REG_EXPAND_SZ paths as shipped
-/// with a fresh Windows profile (CURSOR_NAMES order).
+/// The system default cursor set: per-role REG_EXPAND_SZ paths exactly as
+/// the shipped "Windows Aero" scheme defines them (CURSOR_NAMES order).
+/// Crosshair and IBeam stay empty — Windows ships no aero_cross/aero_ibeam
+/// files and falls back to built-in shapes on a blank value; Pin and
+/// Person do have dedicated files that a reset must restore.
 const DEFAULT_CURSOR_PATHS: [&str; 17] = [
     "%SystemRoot%\\cursors\\aero_arrow.cur",
     "%SystemRoot%\\cursors\\aero_helpsel.cur",
@@ -340,15 +343,15 @@ const DEFAULT_CURSOR_PATHS: [&str; 17] = [
     "%SystemRoot%\\cursors\\aero_unavail.cur",
     "%SystemRoot%\\cursors\\aero_ns.cur",
     "%SystemRoot%\\cursors\\aero_ew.cur",
-    "%SystemRoot%\\cursors\\aero_cross.cur",
-    "%SystemRoot%\\cursors\\aero_ibeam.cur",
+    "",
+    "",
     "%SystemRoot%\\cursors\\aero_nwse.cur",
     "%SystemRoot%\\cursors\\aero_nesw.cur",
     "%SystemRoot%\\cursors\\aero_move.cur",
     "%SystemRoot%\\cursors\\aero_up.cur",
     "%SystemRoot%\\cursors\\aero_link.cur",
-    "",
-    "",
+    "%SystemRoot%\\cursors\\aero_pin.cur",
+    "%SystemRoot%\\cursors\\aero_person.cur",
 ];
 
 /// Fill-position names in DESKTOP_WALLPAPER_POSITION order.

@@ -3315,10 +3315,17 @@ fn active_modal_window() -> Option<HWND> {
     // Modal-depth priority: the picker outranks the embedded editor pane,
     // which outranks the manager root; the ctx manager and settings ride
     // the panel behind them. Top-level HWNDs come from the kit registry;
-    // the editor pane is a manager child and stays automation-owned.
+    // the editor pane is a manager child, so surface its root — callers
+    // do SetForegroundWindow/restore on the result, which are no-ops on a
+    // child window.
     [
         crate::kit::registry::hwnd_of(Kind::ProcessPicker),
-        Some(automation_ui::editor_hwnd()),
+        Some(unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                automation_ui::editor_hwnd(),
+                windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+            )
+        }),
         crate::kit::registry::hwnd_of(Kind::Automation),
         crate::kit::registry::hwnd_of(Kind::ContextRules),
         crate::kit::registry::hwnd_of(Kind::Settings),
@@ -4178,18 +4185,18 @@ fn theme_schedule_summary(short: bool) -> String {
 
 // ---- Stay awake ----------------------------------------------------------
 
-/// Remaining duration and screen flag of the timed override; an expired
-/// entry is cleared on read so no code path can observe a stale value.
+/// Remaining duration and screen flag of the timed override. Pure read: an
+/// expired entry reports as absent but stays armed until the expiry timer
+/// (or an explicit cancel) removes it — both of those paths run
+/// `apply_stay_awake` right after, so the execution state can never stay
+/// pinned when a background reader happens to observe the expiry first
+/// (clearing here would let the timer's `take()` find nothing and skip the
+/// release).
 pub(crate) fn timed_nosleep_state() -> Option<(std::time::Duration, bool)> {
-    let mut guard = crate::runtime::lock(&NOSLEEP_TIMED);
+    let guard = crate::runtime::lock(&NOSLEEP_TIMED);
     let timed = guard.as_ref()?;
     let now = std::time::Instant::now();
-    if now < timed.until {
-        Some((timed.until - now, timed.keep_screen))
-    } else {
-        *guard = None;
-        None
-    }
+    (now < timed.until).then(|| (timed.until - now, timed.keep_screen))
 }
 
 /// Arms the timed override (seconds are clamped) and schedules the one-shot

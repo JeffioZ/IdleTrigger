@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -265,6 +265,14 @@ struct IncomingEvent {
 // existing scanner promptly without moving process queries onto the UI thread.
 static INCOMING_EVENTS: (Mutex<Vec<IncomingEvent>>, Condvar) =
     (Mutex::new(Vec::new()), Condvar::new());
+// Bumped by reload_rules so the scanner's wait predicate sees "rules changed"
+// even though a reload enqueues no event: notify_one alone cannot wake a
+// `pending.is_empty()` predicate that is still true.
+static RULES_VERSION: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn rules_version() -> u64 {
+    RULES_VERSION.load(Ordering::SeqCst)
+}
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -344,7 +352,14 @@ pub fn reload_rules() {
     // State rules whose entries were dropped above only regain effect at the
     // scanner's next wakeup (up to 5s away) — nudge it now so a rename-only
     // edit doesn't blip the panel's reason line or briefly release Stay
-    // Awake.
+    // Awake. The version bump is what makes the wake effective (the wait
+    // predicate re-checks "no pending events AND rules unchanged", and a
+    // reload enqueues no event); bumping under the event lock keeps the
+    // predicate's last evaluation and the notify from racing apart.
+    {
+        let _pending = crate::runtime::lock(&INCOMING_EVENTS.0);
+        RULES_VERSION.fetch_add(1, Ordering::SeqCst);
+    }
     INCOMING_EVENTS.1.notify_one();
 }
 
@@ -379,6 +394,11 @@ pub fn spawn(state_path: PathBuf) {
                 if crate::EXITING.load(Ordering::SeqCst) {
                     return;
                 }
+                // Sample the version BEFORE tick: a reload during tick or
+                // during the wait then changes it under us and the wait
+                // predicate turns false, so the loop re-runs tick with the
+                // fresh rules immediately instead of after SCAN_INTERVAL.
+                let seen_version = rules_version();
                 crate::runtime::catch_and_log("automation", || {
                     if let Err(err) = tick(first_tick) {
                         crate::log_line(&format!("automation tick error: {err}"));
@@ -388,7 +408,9 @@ pub fn spawn(state_path: PathBuf) {
                 let pending = crate::runtime::lock(&INCOMING_EVENTS.0);
                 let _ = INCOMING_EVENTS
                     .1
-                    .wait_timeout_while(pending, SCAN_INTERVAL, |pending| pending.is_empty())
+                    .wait_timeout_while(pending, SCAN_INTERVAL, |pending| {
+                        pending.is_empty() && rules_version() == seen_version
+                    })
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         })

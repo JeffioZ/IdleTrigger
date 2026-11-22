@@ -287,20 +287,39 @@ fn relocate(dir: &Path, exe_dir: &Path, notes: &mut Vec<String>) -> bool {
         let critical = name == LEGACY_CONFIG || name == LEGACY_STATE;
         let src = exe_dir.join(&name);
         let dst = dir.join(&new_name);
+        // A zero-byte destination beside a non-empty source is a torn
+        // earlier migration (a legal data file is never empty): drop it so
+        // the copy below repopulates from the intact source, instead of the
+        // AppData-wins rule deleting that source as "superseded".
+        if dst.exists()
+            && std::fs::metadata(&dst).is_ok_and(|meta| meta.len() == 0)
+            && std::fs::metadata(&src).is_ok_and(|meta| meta.len() > 0)
+        {
+            notes.push(format!(
+                "relocation: replacing a zero-byte {new_name} with the intact source"
+            ));
+            let _ = std::fs::remove_file(&dst);
+        }
         if dst.exists() {
             // AppData wins. Byte-identical is the common crash-between-
             // copy-and-delete case; differing bytes are an older
             // process's output whose mtime proves nothing.
-            let identical = same_bytes(&src, &dst);
-            if let Err(err) = std::fs::remove_file(&src) {
-                notes.push(format!(
-                    "relocation: keeping duplicate {} beside the EXE ({err})",
-                    name
-                ));
-            } else if !identical {
-                notes.push(format!(
-                    "relocation: discarded superseded {name} beside the EXE"
-                ));
+            match same_bytes(&src, &dst) {
+                None => notes.push(format!(
+                    "relocation: could not compare {name}; both copies kept for the next launch"
+                )),
+                Some(identical) => {
+                    if let Err(err) = std::fs::remove_file(&src) {
+                        notes.push(format!(
+                            "relocation: keeping duplicate {} beside the EXE ({err})",
+                            name
+                        ));
+                    } else if !identical {
+                        notes.push(format!(
+                            "relocation: discarded superseded {name} beside the EXE"
+                        ));
+                    }
+                }
             }
         } else if let Err(err) = copy_with_mtime(&src, &dst) {
             notes.push(format!("relocation: {name} stays beside the EXE ({err})"));
@@ -310,7 +329,7 @@ fn relocate(dir: &Path, exe_dir: &Path, notes: &mut Vec<String>) -> bool {
             if critical && dst.is_file() && std::fs::remove_file(&dst).is_err() {
                 critical_ready = false;
             }
-        } else if !same_bytes(&src, &dst) {
+        } else if same_bytes(&src, &dst) != Some(true) {
             notes.push(format!(
                 "relocation: {name} copy failed verification; retrying next launch"
             ));
@@ -331,7 +350,42 @@ fn relocate(dir: &Path, exe_dir: &Path, notes: &mut Vec<String>) -> bool {
 
 fn copy_with_mtime(src: &Path, dst: &Path) -> std::io::Result<()> {
     let modified = std::fs::metadata(src)?.modified().ok();
-    std::fs::copy(src, dst)?;
+    // Copy through a same-directory temp file: a crash mid-copy must not
+    // leave a truncated destination, which the AppData-wins rule would
+    // treat as the winner and delete the intact source for on the next
+    // launch. Same tmp-name convention as config::save_candidate.
+    let file_name = dst
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("data")
+        .to_string();
+    let tmp = dst.with_file_name(format!(".{file_name}-{}.tmp", std::process::id()));
+    let cleanup_tmp = |err: std::io::Error| -> std::io::Error {
+        let _ = std::fs::remove_file(&tmp);
+        err
+    };
+    std::fs::copy(src, &tmp).map_err(cleanup_tmp)?;
+    // fs::copy replicates FILE_ATTRIBUTE_READONLY onto the temp file, which
+    // would make both the sync handle and the cleanup remove fail on a
+    // read-only source; drop the attribute (the destination must stay
+    // writable for later saves anyway). The lint guards a Unix-only world-
+    // writable hazard; on Windows set_readonly(false) just clears the
+    // read-only attribute.
+    #[allow(clippy::permissions_set_readonly_false)]
+    if let Ok(mut permissions) = std::fs::metadata(&tmp).map(|meta| meta.permissions())
+        && permissions.readonly()
+    {
+        permissions.set_readonly(false);
+        if let Err(err) = std::fs::set_permissions(&tmp, permissions) {
+            return Err(cleanup_tmp(err));
+        }
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .and_then(|file| file.sync_all())
+        .map_err(cleanup_tmp)?;
+    std::fs::rename(&tmp, dst).map_err(cleanup_tmp)?;
     if let (Some(modified), Ok(file)) =
         (modified, std::fs::OpenOptions::new().write(true).open(dst))
     {
@@ -340,24 +394,27 @@ fn copy_with_mtime(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn same_bytes(a: &Path, b: &Path) -> bool {
+/// `Some(equal)` when both files were fully readable; `None` when either
+/// side could not be read, which callers must treat as "not comparable"
+/// rather than evidence of difference.
+fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
     let (Ok(mut file_a), Ok(mut file_b)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
-        return false;
+        return None;
     };
     let (mut chunk_a, mut chunk_b) = ([0u8; 64 * 1024], [0u8; 64 * 1024]);
     loop {
         let (Ok(read_a), Ok(read_b)) = (file_a.read(&mut chunk_a), file_b.read(&mut chunk_b))
         else {
-            return false;
+            return None;
         };
         if read_a != read_b {
-            return false;
+            return Some(false);
         }
         if read_a == 0 {
-            return true;
+            return Some(true);
         }
         if chunk_a[..read_a] != chunk_b[..read_b] {
-            return false;
+            return Some(false);
         }
     }
 }
@@ -469,6 +526,64 @@ mod tests {
             assert!(!exe_dir.join(name).exists(), "{name} should be gone");
         }
         assert!(notes.is_empty(), "{notes:?}");
+        // The atomic copy must not leave its temp file behind on success.
+        assert!(std::fs::read_dir(&data_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uncomparable_destination_keeps_the_source() {
+        let root = temp_root("uncomparable");
+        let exe_dir = root.join("exe");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        write(&exe_dir.join("IdleTrigger.toml"), "toml");
+        // A directory named like the destination makes the comparison
+        // unreadable: the source must survive instead of being deleted on
+        // the assumption that the destination is the newer copy.
+        fs::create_dir_all(data_dir.join("config.toml")).unwrap();
+
+        let mut notes = Vec::new();
+        assert!(!relocate(&data_dir, &exe_dir, &mut notes));
+
+        assert!(exe_dir.join("IdleTrigger.toml").exists());
+        assert!(notes.iter().any(|note| note.contains("could not compare")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zero_byte_destination_is_rebuilt_from_the_intact_source() {
+        let root = temp_root("zero-dst");
+        let exe_dir = root.join("exe");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        write(&exe_dir.join("IdleTrigger.toml"), "real config");
+        // What a torn pre-atomicity migration left behind: a readable but
+        // empty destination. The intact source must win and repopulate it,
+        // not be deleted as "superseded".
+        write(&data_dir.join("config.toml"), "");
+
+        let mut notes = Vec::new();
+        assert!(relocate(&data_dir, &exe_dir, &mut notes));
+
+        assert_eq!(
+            fs::read_to_string(data_dir.join("config.toml")).unwrap(),
+            "real config"
+        );
+        assert!(!exe_dir.join("IdleTrigger.toml").exists());
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("replacing a zero-byte"))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
@@ -17,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_SEPARATOR, MF_STRING, MIM_STYLE, MNS_NOCHECK, PostMessageW, PostQuitMessage,
     RegisterWindowMessageW, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SetForegroundWindow,
     SetMenuInfo, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    TrackPopupMenu, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 use windows::core::PCWSTR;
 
@@ -46,6 +47,11 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static THEME_DARK: AtomicBool = AtomicBool::new(false);
 // Last accepted tooltip; re-applied when the taskbar is recreated.
 static TIP: Mutex<String> = Mutex::new(String::new());
+// Tick count of the last WM_LBUTTONDBLCLK (0 = none): the second
+// WM_LBUTTONUP of the double click (delivered right after it) is swallowed
+// instead of toggling the panel again. The stamp ages out so a lost UP
+// message cannot eat the next regular click forever.
+static DOUBLE_CLICK_AT: AtomicU32 = AtomicU32::new(0);
 
 /// Adds the tray icon for the active theme. Only call on the UI thread.
 pub fn add(host: HWND) -> bool {
@@ -117,7 +123,19 @@ pub fn on_taskbar_created() {
 pub fn handle_callback(wparam: WPARAM, lparam: LPARAM) {
     let _ = wparam; // Always TRAY_ID; nothing distinguishes multiple icons.
     match lparam.0 as u32 {
-        WM_LBUTTONUP => crate::toggle_panel(),
+        WM_LBUTTONDBLCLK => {
+            // A double click delivers UP, DBLCLK, UP; without swallowing the
+            // second UP the panel would open and immediately close again.
+            DOUBLE_CLICK_AT.store(unsafe { GetTickCount() }, Ordering::SeqCst);
+        }
+        WM_LBUTTONUP => {
+            let stamped = DOUBLE_CLICK_AT.swap(0, Ordering::SeqCst);
+            let now = unsafe { GetTickCount() };
+            if stamped != 0 && now.wrapping_sub(stamped) < 1_000 {
+                return;
+            }
+            crate::toggle_panel();
+        }
         WM_RBUTTONUP => show_context_menu(host()),
         _ => {}
     }

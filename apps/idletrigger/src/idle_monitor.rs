@@ -97,7 +97,16 @@ impl Clock {
         let mut show = false;
         if !self.warning && idle >= settings.threshold.saturating_sub(settings.warning) {
             self.warning = true;
-            self.deadline = Some(now + settings.threshold.saturating_sub(idle));
+            // Overshoot (a logical-idle jump or a late sample) must not
+            // collapse the cancel window below the configured warning: arm
+            // with at least a full warning left, even if that executes the
+            // action past the threshold instant. The floor never exceeds
+            // the threshold itself (a warning longer than the threshold —
+            // only constructible under devtools thresholds — then arms at
+            // most one threshold away), and a zero warning means the user
+            // disabled the countdown, so it keeps its at-once behavior.
+            let floor = settings.warning.min(settings.threshold);
+            self.deadline = Some(now + settings.threshold.saturating_sub(idle).max(floor));
             show = true;
         }
         Update {
@@ -203,7 +212,7 @@ mod tests {
         }
         assert_eq!(
             clock.countdown(start + Duration::from_secs(120)).unwrap().0,
-            0
+            10
         );
         assert!(
             clock

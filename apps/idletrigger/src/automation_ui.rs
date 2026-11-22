@@ -2156,7 +2156,11 @@ fn cancel_editor(ed: HWND) {
         if editor_needs_discard_confirm(&current, &orig) {
             let title = t_pub("automation_discard_title");
             let body = t_pub("automation_discard_confirm");
-            if !confirm_dialog(ed, &title, &body) {
+            // The pane is a manager child: a MessageBox owned by it only
+            // disables the child, leaving the manager (and its close box)
+            // interactive while the confirm is up. Own the dialog by the
+            // top-level manager so it is actually modal.
+            if !confirm_dialog(unsafe { GetAncestor(ed, GA_ROOT) }, &title, &body) {
                 return;
             }
         }
@@ -2678,8 +2682,11 @@ unsafe extern "system" fn ed_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                         ED_PROC_INFO if hi == BN_CLICKED => {
                             if !edit_procs().is_empty() {
+                                // Same as the discard confirm: the button is
+                                // a pane child, so own the dialog by the
+                                // manager root for real modality.
                                 info_dialog(
-                                    hwnd,
+                                    GetAncestor(hwnd, GA_ROOT),
                                     &t_pub("automation_process_details_title"),
                                     &process_details(),
                                 );

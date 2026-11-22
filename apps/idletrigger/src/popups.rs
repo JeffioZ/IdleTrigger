@@ -358,7 +358,13 @@ pub fn restart_after_resume() {
 /// async key state from the hidden window's 50ms timer instead. Skipped
 /// while one of this thread's windows holds focus — that path consumes Esc
 /// through pre_translate_dialog (closing the focused window), and one press
-/// must not do both.
+/// must not do both. GetAsyncKeyState samples globally while GetFocus() is
+/// thread-local, so also require that this process owns the foreground:
+/// otherwise Esc pressed in an unrelated application would cancel the
+/// countdown (and disable a one-shot rule) from across processes. The
+/// reachable case is a second Esc right after pre_translate closed one of
+/// our focused windows (focus dropped, our window still foreground); the
+/// card's cancel button covers every other situation.
 pub fn poll_escape() {
     if crate::runtime::lock(&CURRENT).is_none() {
         return;
@@ -366,6 +372,15 @@ pub fn poll_escape() {
     unsafe {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetFocus, VK_ESCAPE};
         if !GetFocus().is_invalid() {
+            return;
+        }
+        let foreground = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        let mut foreground_pid = 0u32;
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            foreground,
+            Some(&mut foreground_pid),
+        );
+        if foreground.is_invalid() || foreground_pid != std::process::id() {
             return;
         }
         let state = GetAsyncKeyState(i32::from(VK_ESCAPE.0));

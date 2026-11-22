@@ -202,27 +202,44 @@ pub fn load(path: &Path) -> Loaded {
         created_from_template: true,
     };
     match std::fs::read_to_string(path) {
-        Ok(text) => match text.parse::<toml_edit::DocumentMut>() {
-            Ok(document) => {
-                let mut bad_fields = Vec::new();
-                let config = read_config(&document, defaults, &mut bad_fields).sanitized();
-                let field_errors = (!bad_fields.is_empty()).then(|| bad_fields.join(", "));
-                Loaded {
+        Ok(text) => {
+            // A zero-byte or whitespace-only file is a truncated save
+            // (power cut / crash), not a fresh install: treat it as a load
+            // error so the runtime refuses to save pure defaults over the
+            // committed .bak. Only a genuinely absent file takes the
+            // template path below.
+            if text.trim().is_empty() {
+                return Loaded {
                     source_text: Some(text),
-                    config,
-                    load_error: None,
-                    field_errors,
-                    document,
+                    config: Config::default().sanitized(),
+                    load_error: Some("configuration file is empty".into()),
+                    field_errors: None,
+                    document: template_document(),
                     created_from_template: false,
-                }
+                };
             }
-            Err(err) => Loaded {
-                source_text: Some(text),
-                load_error: Some(format!("parse error: {err}")),
-                created_from_template: false,
-                ..base
-            },
-        },
+            match text.parse::<toml_edit::DocumentMut>() {
+                Ok(document) => {
+                    let mut bad_fields = Vec::new();
+                    let config = read_config(&document, defaults, &mut bad_fields).sanitized();
+                    let field_errors = (!bad_fields.is_empty()).then(|| bad_fields.join(", "));
+                    Loaded {
+                        source_text: Some(text),
+                        config,
+                        load_error: None,
+                        field_errors,
+                        document,
+                        created_from_template: false,
+                    }
+                }
+                Err(err) => Loaded {
+                    source_text: Some(text),
+                    load_error: Some(format!("parse error: {err}")),
+                    created_from_template: false,
+                    ..base
+                },
+            }
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => base,
         Err(err) => {
             // The file exists but cannot be read (locked, permissions):
@@ -697,6 +714,31 @@ mod save_tests {
                 .is_some_and(|err| err.contains("idle_timeout_minutes"))
         );
         assert_eq!(loaded.config.idle_timeout_minutes, 30); // default, not the string
+    }
+    #[test]
+    fn empty_file_is_a_load_error_not_a_fresh_install() {
+        // A zero-byte file is a truncated save (power cut), not a missing
+        // config: loading it as defaults would let the next save overwrite
+        // the committed .bak with pure defaults. It must surface as a load
+        // error so the runtime refuses to save until it is repaired.
+        let path = std::env::temp_dir().join(format!(
+            "idletrigger-empty-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "  \n\t").unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            loaded
+                .load_error
+                .as_deref()
+                .is_some_and(|err| err.contains("empty"))
+        );
+        assert!(!loaded.created_from_template);
     }
     #[test]
     fn wallpaper_library_keeps_good_entries_beside_bad_ones() {
