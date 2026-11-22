@@ -4,7 +4,7 @@
 
 Put the EXE in a writable folder and run it. Left-click its tray icon to open or close the panel (Esc closes it too); right-click for Open, Check for Updates, and Exit. While a modal dialog is open, another tray click brings that dialog forward. One GUI instance runs per Windows session, even when different copies of the EXE are launched.
 
-将 EXE 放入可写目录后运行。左键托盘图标开关浮层（按 Esc 也可关闭）；右键菜单包含打开、检查更新和退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
+将 EXE 放入可写目录后运行。左键托盘图标打开或关闭面板（按 Esc 也可关闭）；右键菜单包含打开、检查更新和退出。模态对话框打开时，再点托盘会聚焦当前窗口。同一 Windows 会话只运行一个界面实例，换目录启动另一份 EXE 也不会额外打开实例。
 
 Enable Start with Windows in Settings if needed. If already enabled, startup repairs its registered path when you run the EXE from a new location. `--minimized` starts with the panel hidden; `--delay=N` delays initialization by up to 60 seconds.
 

@@ -4,7 +4,7 @@
 
 <p><strong>轻量、原生的 Windows 电源自动化托盘工具，一个 EXE 即可使用。</strong></p>
 
-<p>让任务持续运行，在真实输入空闲后执行电源动作，<br>并按时间或进程自动管理电源状态与 Windows 主题。</p>
+<p>让任务持续运行，在检测到真实的键盘、鼠标空闲后执行电源动作，<br>并按时间或进程自动管理电源状态与 Windows 主题。</p>
 
 <p>
   <a href="https://github.com/JeffioZ/IdleTrigger/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/JeffioZ/IdleTrigger?display_name=tag&amp;sort=semver&amp;style=flat&amp;color=37BFF3"></a>
@@ -24,23 +24,23 @@
 
 > **版本要求：** 资源管理器右键增强（含多选路径复制和自定义规则）需要 **v2.6.0 及以上版本**。
 
-## 🪟 原生控制浮层
+## 🪟 原生控制面板
 
 <p align="center"><sub>适配 Windows 深浅色与显示器 DPI。<br>
 支持键盘导航，切换显示器 DPI 时保留正在编辑的内容。</sub></p>
 
-<p align="center"><img src="docs/images/panel-zh-light.png" alt="IdleTrigger 简体中文浅色控制浮层" width="420"></p>
+<p align="center"><img src="docs/images/panel-zh-light.png" alt="IdleTrigger 简体中文浅色控制面板" width="420"></p>
 
 <details>
 <summary>更多主题与语言</summary>
 
 | 简体中文深色 | 英文浅色 | 英文深色 |
 | --- | --- | --- |
-| <img src="docs/images/panel-zh-dark.png" alt="IdleTrigger 简体中文深色控制浮层" width="260"> | <img src="docs/images/panel-en-light.png" alt="IdleTrigger 英文浅色控制浮层" width="260"> | <img src="docs/images/panel-en-dark.png" alt="IdleTrigger 英文深色控制浮层" width="260"> |
+| <img src="docs/images/panel-zh-dark.png" alt="IdleTrigger 简体中文深色控制面板" width="260"> | <img src="docs/images/panel-en-light.png" alt="IdleTrigger 英文浅色控制面板" width="260"> | <img src="docs/images/panel-en-dark.png" alt="IdleTrigger 英文深色控制面板" width="260"> |
 
 </details>
 
-左键托盘图标使用快捷控制，需要调整长期生效的选项时打开“设置”。
+左键点击托盘图标即可快速开关常用选项；持久生效的选项请进入“设置”调整。
 
 中英文深浅色面板及右键增强窗口见[界面截图](docs/screenshots.md)。
 
@@ -49,7 +49,7 @@
 | | 能力 | 适用场景 |
 | --- | --- | --- |
 | ⚡ | **保持唤醒** | 下载、渲染、备份或远程连接期间阻止自动睡眠；支持限时预设，到期自动恢复。 |
-| ⏱️ | **空闲动作** | 真实键盘、鼠标持续无操作后，自动锁定、睡眠、休眠、关机、重启或熄屏。 |
+| ⏱️ | **空闲动作** | 键盘、鼠标持续无操作后，自动锁定、睡眠、休眠、关机、重启或熄屏。 |
 | 🔁 | **自动任务** | 主面板直接新建：进程保持唤醒、工作时段、每晚关机、低电量休眠或延时关机/睡眠；模板经确认保存后生效。 |
 | 📂 | **右键增强** | 六种格式一次复制完整多选结果；在独立窗口维护自定义规则，支持仅单选、逐项执行或整批运行。复制与规则默认合并到 IdleTrigger 子菜单，详见[使用指南](docs/user-guide.md#explorer-context-menu--资源管理器右键增强)。 |
 | 🌗 | **昼夜主题** | 按时间或日出日落切换 Windows 主题，可联动壁纸与指针方案，可推迟单次切换，并适配电池和全屏场景。 |
